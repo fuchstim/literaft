@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 
 	transport "github.com/Jille/raft-grpc-transport"
 	"github.com/fuchstim/sqlite-raft/internal/ctxlog"
@@ -20,6 +21,8 @@ import (
 )
 
 type RaftNode struct {
+	mu sync.Mutex
+
 	params *Params
 	addr   string
 
@@ -36,12 +39,19 @@ func New(lc *lifecycle.Lifecycle, params *Params) (*RaftNode, error) {
 		addr:   fmt.Sprintf("%s:%d", params.Host, params.Port),
 	}
 
-	lc.Append(fx.StartStopHook(n.Start, n.Stop))
+	lc.Append(fx.StartStopHook(n.start, n.stop))
 
 	return n, nil
 }
 
-func (n *RaftNode) Start(ctx context.Context) error {
+func (n *RaftNode) start(ctx context.Context) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.raft != nil {
+		return errors.New("raft node already started")
+	}
+
 	ctxlog.Info(ctx, "starting raft node", zap.String("addr", n.addr))
 
 	listener, err := net.Listen("tcp", n.addr)
@@ -63,7 +73,7 @@ func (n *RaftNode) Start(ctx context.Context) error {
 	if err := os.MkdirAll(n.params.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir %s: %w", n.params.DataDir, err)
 	}
-	boltPath := filepath.Join(n.params.DataDir, "raft.bolt")
+	boltPath := filepath.Join(n.params.DataDir, "raft.dat")
 	boltStore, err := boltdb.NewBoltStore(boltPath)
 	if err != nil {
 		return fmt.Errorf("open bolt store %s: %w", boltPath, err)
@@ -104,7 +114,10 @@ func (n *RaftNode) Start(ctx context.Context) error {
 	return nil
 }
 
-func (n *RaftNode) Stop(ctx context.Context) error {
+func (n *RaftNode) stop(ctx context.Context) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	ctxlog.Info(ctx, "stopping raft node")
 
 	if n.raft != nil {
