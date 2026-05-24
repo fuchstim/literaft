@@ -26,7 +26,7 @@ type RaftNode struct {
 	listener   net.Listener
 	transport  *transport.Manager
 	grpcServer *grpc.Server
-	logStore   *boltdb.BoltStore
+	boltStore  *boltdb.BoltStore
 	raft       *raft.Raft
 }
 
@@ -63,19 +63,24 @@ func (n *RaftNode) Start(ctx context.Context) error {
 	if err := os.MkdirAll(n.params.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir %s: %w", n.params.DataDir, err)
 	}
-	logPath := filepath.Join(n.params.DataDir, "logs.bolt")
-	logStore, err := boltdb.NewBoltStore(logPath)
+	boltPath := filepath.Join(n.params.DataDir, "raft.bolt")
+	boltStore, err := boltdb.NewBoltStore(boltPath)
 	if err != nil {
-		return fmt.Errorf("open log store %s: %w", logPath, err)
+		return fmt.Errorf("open bolt store %s: %w", boltPath, err)
 	}
-	n.logStore = logStore
+	n.boltStore = boltStore
+
+	snapshotStore, err := newFileSnapshotStore(filepath.Join(n.params.DataDir, "snapshots"))
+	if err != nil {
+		return err
+	}
 
 	r, err := raft.NewRaft(
 		cfg,
 		newEmptyFSM(),
-		n.logStore,
-		newEmptyStableStore(),
-		newEmptySnapshotStore(),
+		n.boltStore,
+		n.boltStore,
+		snapshotStore,
 		n.transport.Transport(),
 	)
 	if err != nil {
@@ -112,9 +117,9 @@ func (n *RaftNode) Stop(ctx context.Context) error {
 		n.grpcServer.GracefulStop()
 	}
 
-	if n.logStore != nil {
-		if err := n.logStore.Close(); err != nil {
-			return fmt.Errorf("close log store: %w", err)
+	if n.boltStore != nil {
+		if err := n.boltStore.Close(); err != nil {
+			return fmt.Errorf("close bolt store: %w", err)
 		}
 	}
 
