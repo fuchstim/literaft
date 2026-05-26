@@ -1,7 +1,7 @@
 package raftnode
 
 import (
-	"github.com/fuchstim/sqlite-raft/internal/config"
+	"github.com/fuchstim/literaft/internal/config"
 )
 
 var Module = config.ProvideWithParams[*Params](New)

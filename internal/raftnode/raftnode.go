@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	transport "github.com/Jille/raft-grpc-transport"
-	"github.com/fuchstim/sqlite-raft/internal/ctxlog"
-	"github.com/fuchstim/sqlite-raft/internal/lifecycle"
+	"github.com/fuchstim/literaft/internal/ctxlog"
+	"github.com/fuchstim/literaft/internal/lifecycle"
 	"github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb/v2"
 	"go.uber.org/fx"

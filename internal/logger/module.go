@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"github.com/fuchstim/sqlite-raft/internal/config"
+	"github.com/fuchstim/literaft/internal/config"
 	"go.uber.org/fx"
 )
 

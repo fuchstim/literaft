@@ -1,10 +1,10 @@
 package main
 
 import (
-	"github.com/fuchstim/sqlite-raft/internal/config"
-	"github.com/fuchstim/sqlite-raft/internal/lifecycle"
-	"github.com/fuchstim/sqlite-raft/internal/logger"
-	"github.com/fuchstim/sqlite-raft/internal/raftnode"
+	"github.com/fuchstim/literaft/internal/config"
+	"github.com/fuchstim/literaft/internal/lifecycle"
+	"github.com/fuchstim/literaft/internal/logger"
+	"github.com/fuchstim/literaft/internal/raftnode"
 	"go.uber.org/fx"
 )
 

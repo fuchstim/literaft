@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"context"
 
-	"github.com/fuchstim/sqlite-raft/internal/ctxlog"
+	"github.com/fuchstim/literaft/internal/ctxlog"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
