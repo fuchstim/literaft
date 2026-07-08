@@ -53,6 +53,14 @@ func DecodeEntry(b []byte) (vfs.Entry, error) {
 	count := binary.BigEndian.Uint32(b[0:4])
 	off := 4
 
+	// Bound count against the buffer before trusting it as a make() capacity:
+	// every frame needs at least 8 bytes (pgno + page length), so a corrupted
+	// or truncated entry claiming far more frames than b could possibly hold
+	// must fail cleanly here rather than attempt a multi-gigabyte allocation.
+	if maxFrames := uint32(len(b)-off) / 8; count > maxFrames {
+		return vfs.Entry{}, fmt.Errorf("raft: entry too short (%d bytes) to hold %d frames", len(b), count)
+	}
+
 	frames := make([]vfs.Frame, 0, count)
 	for i := uint32(0); i < count; i++ {
 		if len(b)-off < 8 {

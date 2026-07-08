@@ -1,6 +1,9 @@
 package raft_test
 
 import (
+	"encoding/binary"
+	"math"
+
 	raftadapter "github.com/fuchstim/literaft/raft"
 	"github.com/fuchstim/literaft/vfs"
 
@@ -45,6 +48,19 @@ var _ = Describe("entry encoding", func() {
 			_, err := raftadapter.DecodeEntry(full[:cut])
 			Expect(err).To(HaveOccurred(), "truncating to %d bytes should fail to decode", cut)
 		}
+	})
+
+	It("rejects a corrupted frame count without allocating based on it", func() {
+		// A count claiming far more frames than the remaining bytes could
+		// possibly encode must be rejected before it's ever used as a slice
+		// capacity -- otherwise a corrupted or malformed entry can force a
+		// multi-gigabyte allocation attempt instead of a clean decode error.
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint32(b[0:4], math.MaxUint32)
+		binary.BigEndian.PutUint32(b[4:8], 0)
+
+		_, err := raftadapter.DecodeEntry(b)
+		Expect(err).To(HaveOccurred())
 	})
 
 	It("rejects trailing garbage", func() {
