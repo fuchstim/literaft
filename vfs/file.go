@@ -27,36 +27,48 @@ type File struct {
 	pending *pendingFrame
 	capture []Frame
 
-	// headerOffsets and dataOffsets record, for the transaction currently
+	// headerPgno and dataOffsets record, for the transaction currently
 	// accumulating in capture, which WAL offsets already hold a captured
-	// frame's header and page-image respectively (data offset -> index
-	// into capture). wal.c's walFrames() can revisit both after an
-	// earlier spill: re-dirtying an already-spilled page overwrites its
-	// data in place with a bare page-sized write (no header, since the
-	// header doesn't change), and committing such a transaction runs
-	// walRewriteChecksums(), which rewrites every affected frame's header
-	// -- including the just-written commit frame's own -- a second time
-	// with no paired data write, purely to fix the cumulative checksum
-	// chain. Both must be recognized as revisits of an already-captured
-	// frame, not new ones: missing the first silently under-captures the
-	// transaction, and missing the second desyncs the header/data pairing
-	// state machine, corrupting whatever write follows (docs/WAL_FORMAT.md,
-	// wal.c walFrames/walRewriteChecksums).
+	// frame's header (offset -> that frame's pgno) and page-image (offset
+	// -> index into capture) respectively. wal.c's walFrames() can revisit
+	// both after an earlier spill: re-dirtying an already-spilled page
+	// overwrites its data in place with a bare page-sized write (no
+	// header, since the header doesn't change), and committing such a
+	// transaction runs walRewriteChecksums(), which rewrites every
+	// affected frame's header -- including the just-written commit
+	// frame's own -- a second time with no paired data write, purely to
+	// fix the cumulative checksum chain. Both must be recognized as
+	// revisits of an already-captured frame, not new ones: missing the
+	// first silently under-captures the transaction, and missing the
+	// second desyncs the header/data pairing state machine so badly that
+	// a genuine commit frame can be mistaken for a checksum-only rewrite
+	// and never reach the gate at all (docs/WAL_FORMAT.md, wal.c
+	// walFrames/walRewriteChecksums).
 	//
-	// Both maps hold only the in-flight transaction's own offsets, so a
-	// header at a fresh (never-yet-recorded) offset always starts a new
-	// frame in this transaction; that offset is set to be reused after
-	// commit, but not before a genuinely new header proves the previous
-	// transaction's rewrite phase (which never touches offsets beyond its
-	// own commit frame) is over -- cleared lazily on that write. maxOffset
-	// also lets a header reused at or below any previously-seen offset
-	// (WAL checkpoint restart, or a rolled-back transaction's frames being
-	// reused) force the same reset, since that can't otherwise be told
-	// apart from an in-transaction revisit.
-	headerOffsets map[int64]struct{}
-	dataOffsets   map[int64]int
-	maxOffset     int64
-	txnDone       bool
+	// Both maps hold only the in-flight (or just-finished, mid-rewrite)
+	// transaction's own offsets, cleared lazily on the first header write
+	// that proves they no longer apply -- either a fresh offset once
+	// txnDone (walRewriteChecksums, if any, ran synchronously and is
+	// over), or any offset <= maxOffset (WAL checkpoint restart, or a
+	// transaction that spilled frames and then rolled back without ever
+	// setting txnDone: sqlite3WalUndo only reverts mxFrame back to where
+	// this connection's write transaction began, so the next
+	// transaction's first frame can land exactly on the aborted one's
+	// first frame's offset, not before it).
+	//
+	// A recorded offset+pgno match only proves a genuine walRewriteChecksums
+	// rewrite -- as opposed to a new frame coincidentally landing on an old,
+	// stale offset -- while txnDone is still true, since that rewrite can
+	// only happen synchronously right after this same transaction's own
+	// commit frame was processed (wal.c only calls it from within
+	// walFrames(), guarded by isCommit). Once txnDone is false, either the
+	// rewrite window is over (fresh offset, unrelated to any past pgno) or
+	// there never was one to begin with (rollback), so any offset match is
+	// coincidence, not evidence of a rewrite.
+	headerPgno  map[int64]uint32
+	dataOffsets map[int64]int
+	maxOffset   int64
+	txnDone     bool
 }
 
 // pendingFrame is a frame header seen by writeFrameHeader, held until the
@@ -86,29 +98,39 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	case f.pending != nil:
 		return f.writeFrameData(p, off)
 	case len(p) == frameHeaderSize:
-		if _, seen := f.headerOffsets[off]; seen {
-			// walRewriteChecksums rewriting an already-captured frame's
-			// header to fix the checksum chain: pgno and commit marker
-			// are unchanged (re-read from disk), only the checksum bytes
-			// differ. Not a new frame -- write through as-is, without
-			// restarting the header/data pairing state machine or
-			// re-proposing to the gate.
-			return f.File.WriteAt(p, off)
+		h := parseFrameHeader(p)
+		if f.txnDone {
+			// walRewriteChecksums only ever runs synchronously right
+			// after this connection's own commit frame was processed, so
+			// a rewrite of one of its frames (same offset, same pgno) can
+			// only be genuine while that window is still open. Outside
+			// it, a matching offset+pgno is coincidence, not a rewrite --
+			// see below.
+			if pgno, seen := f.headerPgno[off]; seen && pgno == h.pgno {
+				// The checksum bytes differ, pgno and commit marker don't:
+				// write through as-is, without restarting the header/data
+				// pairing state machine or re-proposing to the gate.
+				return f.File.WriteAt(p, off)
+			}
 		}
 		if f.txnDone || off <= f.maxOffset {
 			// Either the previous transaction's commit-frame pairing
-			// already resolved (so this offset, being unseen, must start
-			// a new transaction -- its own rewrite phase, if any, runs
-			// synchronously before any new transaction's frames), or the
-			// WAL rewound (checkpoint restart, or a rolled-back
-			// transaction's offsets reused). Either way this offset's
+			// already resolved and this write is no longer one of its
+			// checksum rewrites (so it must start a new transaction --
+			// walRewriteChecksums never touches offsets beyond its own
+			// commit frame), or the WAL rewound (checkpoint restart), or a
+			// transaction that spilled frames and then rolled back
+			// without ever setting txnDone left this offset (and possibly
+			// this exact pgno, by coincidence) tracked with nothing to
+			// legitimately rewrite it. In every case this offset's
 			// history no longer applies.
-			f.headerOffsets = nil
+			f.headerPgno = nil
 			f.dataOffsets = nil
+			f.capture = nil
 			f.txnDone = false
 		}
 		f.maxOffset = off
-		return f.writeFrameHeader(p, off)
+		return f.writeFrameHeader(h, p, off)
 	default:
 		if idx, seen := f.dataOffsets[off]; seen && idx < len(f.capture) {
 			// Same-transaction page re-dirty after an earlier spill: a
@@ -122,23 +144,21 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	}
 }
 
-// writeFrameHeader records a just-seen frame header. A non-commit frame is
-// written straight through immediately (docs/DESIGN.md §write path step 2,
-// non-commit frames are safe to write through). The commit frame is held
-// back until writeFrameData resolves the gate.
-func (f *File) writeFrameHeader(p []byte, off int64) (int, error) {
-	h := parseFrameHeader(p)
-
+// writeFrameHeader records a just-seen, already-parsed frame header. A
+// non-commit frame is written straight through immediately (docs/DESIGN.md
+// §write path step 2, non-commit frames are safe to write through). The
+// commit frame is held back until writeFrameData resolves the gate.
+func (f *File) writeFrameHeader(h frameHeader, p []byte, off int64) (int, error) {
 	if !h.isCommit() {
 		if n, err := f.File.WriteAt(p, off); err != nil {
 			return n, err
 		}
 	}
 
-	if f.headerOffsets == nil {
-		f.headerOffsets = make(map[int64]struct{})
+	if f.headerPgno == nil {
+		f.headerPgno = make(map[int64]uint32)
 	}
-	f.headerOffsets[off] = struct{}{}
+	f.headerPgno[off] = h.pgno
 
 	pending := &pendingFrame{header: h, offset: off}
 	copy(pending.headerRaw[:], p)
@@ -172,11 +192,11 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 
 	entry := Entry{Frames: f.capture, NTruncate: pending.header.nTruncate}
 	f.capture = nil
-	// headerOffsets/dataOffsets stay alive: walRewriteChecksums, if it
-	// runs, rewrites frame headers at these exact offsets next, still
-	// inside this same WriteAt sequence. txnDone marks that the next
-	// unseen header offset belongs to a new transaction, safe to clear
-	// them for.
+	// headerPgno/dataOffsets stay alive: walRewriteChecksums, if it runs,
+	// rewrites frame headers at these exact offsets next, still inside
+	// this same WriteAt sequence. txnDone marks that the next unseen (or
+	// pgno-mismatched) header offset belongs to a new transaction, safe
+	// to clear them for.
 	f.txnDone = true
 
 	if err := f.gate.Propose(entry); err != nil {
