@@ -47,6 +47,12 @@ type Gate struct {
 	timeout time.Duration
 	ready   atomic.Bool
 
+	// readyMu serializes every write to ready. Reads (Ready, Propose) stay
+	// lock-free via the atomic.Bool; readyMu only matters for drain's
+	// post-Barrier check-then-set, which must not race watchLeadership's
+	// step-down write -- see drain's doc comment.
+	readyMu sync.Mutex
+
 	lastErrMu sync.Mutex
 	lastErr   error
 
@@ -100,12 +106,12 @@ func (g *Gate) watchLeadership() {
 			return
 		case isLeader := <-g.raft.LeaderCh():
 			if !isLeader {
-				g.ready.Store(false)
+				g.setReady(false)
 				continue
 			}
 			// Closed until proven otherwise, even if some earlier drain
 			// already left it open -- a fresh term starts undrained.
-			g.ready.Store(false)
+			g.setReady(false)
 			term := g.raft.CurrentTerm()
 			g.wg.Add(1)
 			go func() {
@@ -114,6 +120,15 @@ func (g *Gate) watchLeadership() {
 			}()
 		}
 	}
+}
+
+// setReady writes ready under readyMu, so a concurrent drain's
+// check-then-set (see drain) can never race this write and clobber it back
+// to true for a term this node already stepped down from.
+func (g *Gate) setReady(v bool) {
+	g.readyMu.Lock()
+	g.ready.Store(v)
+	g.readyMu.Unlock()
 }
 
 // drain implements docs/ROADMAP.md M5's "gaining leadership" step: commit a
@@ -131,6 +146,16 @@ func (g *Gate) watchLeadership() {
 // has since lost leadership or moved to a later term, drain bails without
 // touching ready, so a slow, superseded drain can never re-open a gate a
 // newer transition already closed (or claim credit for a later one).
+//
+// The post-Barrier check-and-set holds readyMu across both halves: a plain
+// "check state+term, then Store(true)" would leave a window where
+// watchLeadership's step-down write for this exact loss could land between
+// the check and the set, and drain's Store(true) would silently clobber it
+// back to true. No concrete way to trigger it was found (Ready/Propose both
+// independently re-check State() == Leader before consulting ready, and any
+// later leadership regain unconditionally resets ready first), but the race
+// itself is real, so it's closed properly rather than left as a documented
+// coincidence.
 func (g *Gate) drain(term uint64) {
 	const retryDelay = 50 * time.Millisecond
 	for {
@@ -142,9 +167,11 @@ func (g *Gate) drain(term uint64) {
 		// real backlog takes to drain, we wait for it rather than giving up
 		// and opening the gate on stale state.
 		if err := g.raft.Barrier(g.timeout).Error(); err == nil {
+			g.readyMu.Lock()
 			if g.raft.State() == hraft.Leader && g.raft.CurrentTerm() == term {
 				g.ready.Store(true)
 			}
+			g.readyMu.Unlock()
 			return
 		}
 		select {
