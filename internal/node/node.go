@@ -57,6 +57,27 @@ func Start(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("node: creating data dir %s: %w", cfg.DataDir, err)
 	}
 
+	// Discard any -wal/-shm left over from a previous life of this process
+	// (docs/ROADMAP.md M7 "crash/restart recovery") before anything else
+	// touches them. Local WAL fsync is skippable (docs/DESIGN.md
+	// §durability), so this node's own on-disk WAL tail is never trusted as
+	// durable; the RAFT log is. Must run before the priming connection
+	// below: that's a real SQLite connection, and if it saw a non-empty,
+	// non-corrupt -wal it could run SQLite's own walIndexRecover and
+	// resurrect the discarded tail's committed frames on its own --
+	// exactly the untrusted local-recovery path apply/README.md says is
+	// out of scope, defeating the RAFT-log-driven rebuild below. With a
+	// clean -wal, hraft's own startup replay (from its last local snapshot
+	// index, or from log index 1 if none -- restoreSnapshot/processLogs in
+	// vendor/github.com/hashicorp/raft) re-materializes everything via
+	// FSM.Apply -> apply.Applier.Apply. That's safe to replay more of than
+	// strictly necessary: RAFT entries are full page images, not deltas
+	// (CLAUDE.md), so re-applying an already-applied entry converges to the
+	// same state instead of corrupting it.
+	if err := removeWALFiles(cfg.DBPath); err != nil {
+		return nil, fmt.Errorf("node: clearing stale -wal/-shm for %s: %w", cfg.DBPath, err)
+	}
+
 	// Establish this db's WAL-mode identity (page 1's WAL marker) before
 	// apply.Open ever touches -wal/-shm -- apply.Applier materializes
 	// frames without a SQLite connection in the loop at all, and a fresh,
@@ -107,6 +128,13 @@ func Start(cfg Config) (*Node, error) {
 	vfsName := "literaft-node-" + cfg.ID
 	backend := &dbBackend{cfg: cfg, vfsName: vfsName, applier: applier}
 	fsm := raftadapter.NewFSM(backend)
+	// Must be wired before hraft.NewRaft below: NewRaft synchronously calls
+	// restoreSnapshot on startup, which -- if this node has any locally
+	// stored snapshot from a previous life (self-taken or received via a
+	// past InstallSnapshot) -- calls FSM.Restore immediately. Restore
+	// requires a snapshotter; setting it any later makes NewRaft itself
+	// fail on every restart of a node that ever snapshotted.
+	fsm.SetSnapshotter(backend)
 
 	raftConfig := hraft.DefaultConfig()
 	raftConfig.LocalID = hraft.ServerID(cfg.ID)
@@ -169,7 +197,6 @@ func Start(cfg Config) (*Node, error) {
 	}
 
 	backend.attachConns(keeper, checkpointer)
-	fsm.SetSnapshotter(backend)
 
 	n := &Node{
 		cfg:            cfg,

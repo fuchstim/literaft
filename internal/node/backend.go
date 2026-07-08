@@ -202,9 +202,18 @@ func (b *dbBackend) checkpointTruncateLocked() error {
 // -- the same collect-errors-don't-half-fix posture Node.shutdown already
 // takes, just without a way to keep serving from the old state once the
 // swap has begun.
+//
+// Restore can also run synchronously inside hraft.NewRaft's startup
+// restoreSnapshot, before Node.Start has opened keeper/checkpointer or
+// registered this node's VFS name (docs/ROADMAP.md M7 "crash/restart
+// recovery") -- attached distinguishes that case, since reopening against
+// an unregistered VFS name would fail. Start's own post-NewRaft code
+// unconditionally opens both connections and calls attachConns regardless
+// of whether a restore happened, so leaving them nil here is safe.
 func (b *dbBackend) Restore(r io.Reader) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	attached := b.keeper != nil
 
 	dir := filepath.Dir(b.cfg.DBPath)
 	tmp, err := os.CreateTemp(dir, ".literaft-restore-*")
@@ -243,39 +252,52 @@ func (b *dbBackend) Restore(r io.Reader) error {
 	// the old -wal/-shm belong to a superseded generation. Leaving them
 	// would hand apply.Open's bootstrap a nonzero-size -wal it explicitly
 	// refuses to touch (apply/apply.go's bootstrap doc comment).
-	if err := os.Remove(b.cfg.DBPath + "-wal"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("restore: removing stale -wal: %w", err)
-	}
-	if err := os.Remove(b.cfg.DBPath + "-shm"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("restore: removing stale -shm: %w", err)
+	if err := removeWALFiles(b.cfg.DBPath); err != nil {
+		return fmt.Errorf("restore: %w", err)
 	}
 
 	applier, err := apply.Open(b.cfg.DBPath, b.cfg.PageSize)
 	if err != nil {
 		return fmt.Errorf("restore: reopening applier: %w", err)
 	}
+	b.applier = applier
+
+	if !attached {
+		return nil
+	}
 
 	keeper, err := sqlite3.Open("file:" + b.cfg.DBPath + "?vfs=" + b.vfsName)
 	if err != nil {
-		applier.Close()
 		return fmt.Errorf("restore: reopening kept-alive connection: %w", err)
 	}
 	if err := keeper.Exec("PRAGMA synchronous=NORMAL"); err != nil {
 		keeper.Close()
-		applier.Close()
 		return fmt.Errorf("restore: setting synchronous=NORMAL: %w", err)
 	}
 
 	checkpointer, err := sqlite3.Open("file:" + b.cfg.DBPath + "?vfs=" + b.vfsName)
 	if err != nil {
 		keeper.Close()
-		applier.Close()
 		return fmt.Errorf("restore: reopening checkpoint connection: %w", err)
 	}
 
-	b.applier = applier
 	b.keeper = keeper
 	b.checkpointer = checkpointer
+	return nil
+}
+
+// removeWALFiles removes dbPath's -wal and -shm siblings, tolerating either
+// not existing. Shared by Node.Start (docs/ROADMAP.md M7 "crash/restart
+// recovery": every process start discards its local WAL tail) and Restore
+// (docs/ROADMAP.md M6: an installed snapshot's .db is already self-
+// contained, so any -wal/-shm on disk belongs to a superseded generation).
+func removeWALFiles(dbPath string) error {
+	if err := os.Remove(dbPath + "-wal"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing -wal: %w", err)
+	}
+	if err := os.Remove(dbPath + "-shm"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing -shm: %w", err)
+	}
 	return nil
 }
 

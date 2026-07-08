@@ -140,8 +140,26 @@ size to M3's vendored-shm work.
 
 ## M7 — Hardening
 
-- Crash/restart recovery: rebuild WAL tail from the log via `lastApplied`;
-  idempotence.
+- **Crash/restart recovery: rebuild WAL tail from the log via `lastApplied`;
+  idempotence.** *(done)* `internal/node.Start` now unconditionally discards
+  any leftover `-wal`/`-shm` before anything else touches them (the shm
+  dead-man's-switch wipes `-shm` fresh on every restart anyway, which used to
+  leave `apply.Applier.bootstrap` refusing to touch a nonzero-size `-wal`) --
+  see `apply/README.md`'s former "what's out of scope" entry for the gap this
+  closes. Recovery is then just hraft's own already-existing snapshot-restore
+  + log-replay (`vendor/github.com/hashicorp/raft`'s `restoreSnapshot`/
+  `processLogs`), which already resumes from its last locally-stored
+  snapshot's index (persisted `lastApplied`) or from index 1 if none, and is
+  idempotent by construction here since RAFT entries are full page images,
+  not deltas (CLAUDE.md) -- replaying an already-applied entry converges to
+  the same state rather than corrupting it. This also surfaced and fixed a
+  latent, previously-untested bug: `raft.FSM`'s `Snapshotter` was wired
+  *after* `hraft.NewRaft`, which synchronously restores this node's latest
+  local snapshot (if any) on startup and would otherwise fail outright on
+  any restart of a node that had ever snapshotted. Verified by
+  `internal/node/restart_test.go`: follower and leader restarts, both before
+  and after a local snapshot exists, each checked against an external
+  unmodified-VFS reader (M1's bar).
 - Fault injection around the gate (crash between withhold and publish; between
   frame write and header advance).
 - Fuzz the frame parser and the apply encoder against real SQLite output.

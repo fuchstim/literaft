@@ -71,9 +71,15 @@ a real follower node's startup path needs to do.
 
 - **Recovering a wal-index from an existing, non-empty `-wal` file.**
   `Applier.bootstrap` only handles the fully-fresh case (no `-wal` content
-  at all) and refuses otherwise. Rebuilding the wal-index by replaying an
-  existing WAL is real SQLite recovery logic and is deferred to hardening
-  (`docs/ROADMAP.md` M6, "rebuild WAL tail from the log via lastApplied").
+  at all) and still refuses otherwise -- and still should, permanently:
+  rebuilding a wal-index by replaying an existing WAL's own bytes is real
+  SQLite recovery logic, which would mean trusting local, possibly-unsynced
+  state instead of the RAFT log. `docs/ROADMAP.md` M7's crash/restart
+  recovery closed the gap a different way instead: `internal/node.Start`
+  now unconditionally deletes any leftover `-wal`/`-shm` before `apply.Open`
+  ever runs, so bootstrap's fresh-`-wal` precondition always holds, and
+  hraft's own snapshot-restore + log-replay rebuilds the WAL tail via
+  `Applier.Apply` calls instead.
 - **Checkpointing.** Follower checkpoint driving is separate
   (`docs/DESIGN.md` §checkpoint) and untouched by this package.
 - **The `WalCkptInfo` block** (`nBackfill`, read-marks, byte offset 96-135

@@ -39,6 +39,7 @@ type clusterHarness struct {
 	dir      string
 	pageSize uint32
 	nodes    []*node.Node
+	cfgs     []node.Config
 
 	// snapshotThreshold/trailingLogs/snapshotInterval, when non-zero,
 	// override node.Config's own (hraft-default) values -- snapshot_test.go
@@ -70,6 +71,7 @@ func (h *clusterHarness) startNode(id string, addr string, servers []hraft.Serve
 	n, err := node.Start(cfg)
 	Expect(err).NotTo(HaveOccurred())
 	h.nodes = append(h.nodes, n)
+	h.cfgs = append(h.cfgs, cfg)
 	return n
 }
 
@@ -77,6 +79,33 @@ func (h *clusterHarness) shutdown() {
 	for _, n := range h.nodes {
 		_ = n.Shutdown()
 	}
+}
+
+// restart simulates a process restart of node i (docs/ROADMAP.md M7
+// "crash/restart recovery"): shuts it down and starts a fresh node.Node
+// against its exact original Config, in particular the same BindAddr --
+// the rest of the cluster's raft.Configuration (and its own persisted log)
+// still names that address, so a rebind to a new one would leave this
+// member permanently unreachable instead of rejoined.
+func (h *clusterHarness) restart(i int) *node.Node {
+	GinkgoHelper()
+	Expect(h.nodes[i].Shutdown()).To(Succeed())
+	n, err := node.Start(h.cfgs[i])
+	Expect(err).NotTo(HaveOccurred())
+	h.nodes[i] = n
+	return n
+}
+
+// indexOf returns n's position in h.nodes, for passing to restart.
+func (h *clusterHarness) indexOf(n *node.Node) int {
+	GinkgoHelper()
+	for i, hn := range h.nodes {
+		if hn == n {
+			return i
+		}
+	}
+	Fail("node not found in harness")
+	return -1
 }
 
 // leader waits for a node that's both the raft leader and Ready (docs' M5
