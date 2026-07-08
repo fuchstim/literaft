@@ -51,6 +51,36 @@ type FSM struct {
 
 	mu          sync.Mutex
 	selfPending bool
+	snapshotter Snapshotter
+}
+
+// Snapshotter captures and restores this node's full database state for
+// RAFT snapshot-based (very-behind follower) catch-up (docs/ROADMAP.md M6).
+// internal/node's dbBackend satisfies this by driving a TRUNCATE checkpoint
+// (docs/DESIGN.md §checkpoint's "natural cut point") and swapping the
+// resulting .db file in as a unit.
+type Snapshotter interface {
+	// Snapshot returns a reader over a complete, self-contained, private
+	// copy of the current state. It must be unaffected by any Apply calls
+	// that happen after Snapshot returns but before the reader is fully
+	// consumed and closed -- hraft streams it (FSMSnapshot.Persist) from a
+	// separate goroutine, possibly much later and concurrently with
+	// further log application.
+	Snapshot() (io.ReadCloser, error)
+	// Restore replaces all local state with r's bytes (as produced by
+	// another node's Snapshot) and resets any local WAL/apply state to
+	// match. r is exhausted but not closed by Restore.
+	Restore(r io.Reader) error
+}
+
+// SetSnapshotter wires s in as the FSM's Snapshotter. Must be called once,
+// before hraft can plausibly issue a Snapshot/InstallSnapshot against this
+// FSM (node.Start does this as part of bringing the node up, after the
+// backend owning the swappable SQLite state exists).
+func (f *FSM) SetSnapshotter(s Snapshotter) {
+	f.mu.Lock()
+	f.snapshotter = s
+	f.mu.Unlock()
 }
 
 // NewFSM returns an FSM that materializes non-self-originated entries via m.
@@ -104,20 +134,59 @@ func (f *FSM) Apply(log *hraft.Log) interface{} {
 	return nil
 }
 
-// Snapshot implements hraft.FSM. Snapshot-based log compaction and
-// very-behind-follower catch-up (InstallSnapshot) are deferred to
-// docs/ROADMAP.md M6; node wiring configures hraft to avoid triggering this
-// in normal M4/M5 operation (high SnapshotThreshold/SnapshotInterval).
-// Returning an error here -- rather than a snapshot of nothing -- means a
-// forced snapshot attempt fails loudly instead of silently discarding state.
+// Snapshot implements hraft.FSM (docs/ROADMAP.md M6). It delegates the
+// actual state capture to the configured Snapshotter and wraps the result
+// for hraft's snapshot machinery.
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
-	return nil, errors.New("raft: snapshotting not implemented yet (docs/ROADMAP.md M6)")
+	f.mu.Lock()
+	s := f.snapshotter
+	f.mu.Unlock()
+	if s == nil {
+		return nil, errors.New("raft: snapshotting not configured yet")
+	}
+	rc, err := s.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("raft: capturing snapshot: %w", err)
+	}
+	return &fsmSnapshot{rc: rc}, nil
 }
 
 // Restore implements hraft.FSM. See Snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
-	rc.Close()
-	return errors.New("raft: snapshot restore not implemented yet (docs/ROADMAP.md M6)")
+	defer rc.Close()
+	f.mu.Lock()
+	s := f.snapshotter
+	f.mu.Unlock()
+	if s == nil {
+		return errors.New("raft: snapshotting not configured yet")
+	}
+	if err := s.Restore(rc); err != nil {
+		return fmt.Errorf("raft: installing snapshot: %w", err)
+	}
+	return nil
+}
+
+// fsmSnapshot adapts a Snapshotter's io.ReadCloser to hraft.FSMSnapshot.
+type fsmSnapshot struct {
+	rc io.ReadCloser
+}
+
+// Persist implements hraft.FSMSnapshot, streaming the already-captured
+// state to sink. Safe to run long after Snapshot() returned and
+// concurrently with further FSM.Apply calls, since the ReadCloser is a
+// private copy the Snapshotter took up front.
+func (s *fsmSnapshot) Persist(sink hraft.SnapshotSink) error {
+	if _, err := io.Copy(sink, s.rc); err != nil {
+		sink.Cancel()
+		return fmt.Errorf("raft: persisting snapshot: %w", err)
+	}
+	return sink.Close()
+}
+
+// Release implements hraft.FSMSnapshot.
+func (s *fsmSnapshot) Release() {
+	s.rc.Close()
 }
 
 var _ hraft.FSM = (*FSM)(nil)
+var _ hraft.FSMSnapshot = (*fsmSnapshot)(nil)

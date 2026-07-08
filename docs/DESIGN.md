@@ -176,9 +176,22 @@ Local read connections continue throughout via read-marks, exactly as on the
 leader.
 
 **InstallSnapshot (very-behind follower):** if the node has fallen past the
-leader's retained log, it catches up via snapshot, not replay — swap in the
-`TRUNCATE`-checkpointed `.db`, reset the local WAL, resume applying from the
-snapshot's index.
+leader's retained log, it catches up via snapshot, not replay. `raft.FSM`
+delegates to a `Snapshotter` (`internal/node`'s `dbBackend`): `Snapshot`
+drives a `TRUNCATE` checkpoint on whichever node hraft asks (leader or
+follower) so its `.db` alone becomes a complete, self-contained copy, then
+takes a private temp-file copy of it — decoupling the (possibly slow,
+over-the-network) `Persist` from further local `Apply` calls, which must keep
+proceeding against live state in the meantime. `Restore`, on the installing
+follower, closes the applier and both kept-alive SQLite connections (nothing
+may hold the old `.db`/`-wal`/`-shm` open across the swap), atomically renames
+the incoming bytes in as the new `.db`, deletes the now-stale `-wal`/`-shm`,
+and reopens everything fresh — `apply.Open`'s existing "uninitialized
+wal-index" bootstrap path (originally added for a brand new node's
+schema-less db) applies unchanged to a freshly deleted-then-recreated `-wal`.
+No re-priming is needed: the restored `.db`'s own header already carries the
+WAL-mode format-version byte from whichever already-primed node produced the
+snapshot.
 
 ---
 

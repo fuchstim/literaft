@@ -23,33 +23,21 @@ import (
 	"github.com/fuchstim/literaft/vfs"
 )
 
-// snapshotThreshold is set high enough that hraft's periodic automatic
-// snapshot check never actually fires in normal M4/M5 operation --
-// snapshot-based log compaction and very-behind-follower catch-up
-// (InstallSnapshot) are deferred to docs/ROADMAP.md M6 (see raft.FSM's
-// Snapshot/Restore, which error out if ever actually invoked).
-const snapshotThreshold = 1 << 30
-
 // Node is one running literaft cluster member.
 type Node struct {
 	cfg       Config
 	transport *hraft.NetworkTransport
 	boltStore *raftboltdb.BoltStore
-	applier   *apply.Applier
 	raft      *hraft.Raft
 	fsm       *raftadapter.FSM
 	gate      *raftadapter.Gate
 	vfsName   string
-	keeper    *sqlite3.Conn
 
-	// checkpointer is a connection dedicated to runCheckpointDriver, kept
-	// separate from keeper because a *sqlite3.Conn isn't safe for
-	// concurrent use from multiple goroutines -- sharing keeper with the
-	// checkpoint driver's own timer goroutine would race against whatever
-	// callers are doing with DB() (multiple RW connections against the
-	// same VFS are exactly what WAL mode supports; sharing one connection
-	// across goroutines is not).
-	checkpointer *sqlite3.Conn
+	// backend owns the applier and the two kept-alive SQLite connections
+	// (keeper, checkpointer) -- everything a snapshot install
+	// (docs/ROADMAP.md M6) must close and reopen together as a unit. See
+	// internal/node/backend.go.
+	backend *dbBackend
 
 	stopCheckpoint chan struct{}
 	checkpointDone chan struct{}
@@ -116,16 +104,20 @@ func Start(cfg Config) (*Node, error) {
 		return nil, fmt.Errorf("node: opening applier for %s: %w", cfg.DBPath, err)
 	}
 
-	fsm := raftadapter.NewFSM(applier)
+	vfsName := "literaft-node-" + cfg.ID
+	backend := &dbBackend{cfg: cfg, vfsName: vfsName, applier: applier}
+	fsm := raftadapter.NewFSM(backend)
 
 	raftConfig := hraft.DefaultConfig()
 	raftConfig.LocalID = hraft.ServerID(cfg.ID)
 	raftConfig.LogOutput = cfg.LogOutput
-	raftConfig.SnapshotThreshold = snapshotThreshold
+	raftConfig.SnapshotThreshold = cfg.SnapshotThreshold
+	raftConfig.SnapshotInterval = cfg.SnapshotInterval
+	raftConfig.TrailingLogs = cfg.TrailingLogs
 
 	r, err := hraft.NewRaft(raftConfig, fsm, boltStore, boltStore, snapshotStore, transport)
 	if err != nil {
-		applier.Close()
+		backend.closeAll()
 		boltStore.Close()
 		transport.Close()
 		return nil, fmt.Errorf("node: starting raft: %w", err)
@@ -135,7 +127,7 @@ func Start(cfg Config) (*Node, error) {
 		err := r.BootstrapCluster(hraft.Configuration{Servers: cfg.Bootstrap}).Error()
 		if err != nil && !errors.Is(err, hraft.ErrCantBootstrap) {
 			r.Shutdown()
-			applier.Close()
+			backend.closeAll()
 			boltStore.Close()
 			transport.Close()
 			return nil, fmt.Errorf("node: bootstrapping cluster: %w", err)
@@ -143,7 +135,6 @@ func Start(cfg Config) (*Node, error) {
 	}
 
 	gate := raftadapter.NewGate(r, fsm, cfg.ApplyTimeout)
-	vfsName := "literaft-node-" + cfg.ID
 	vfs.RegisterGate(vfsName, sqlite3vfs.Find(""), gate)
 
 	// Journal mode is already WAL (set persistently by the priming
@@ -153,7 +144,7 @@ func Start(cfg Config) (*Node, error) {
 	keeper, err := sqlite3.Open("file:" + cfg.DBPath + "?vfs=" + vfsName)
 	if err != nil {
 		r.Shutdown()
-		applier.Close()
+		backend.closeAll()
 		boltStore.Close()
 		transport.Close()
 		return nil, fmt.Errorf("node: opening kept-alive connection to %s: %w", cfg.DBPath, err)
@@ -161,7 +152,7 @@ func Start(cfg Config) (*Node, error) {
 	if err := keeper.Exec("PRAGMA synchronous=NORMAL"); err != nil {
 		keeper.Close()
 		r.Shutdown()
-		applier.Close()
+		backend.closeAll()
 		boltStore.Close()
 		transport.Close()
 		return nil, fmt.Errorf("node: setting synchronous=NORMAL on %s: %w", cfg.DBPath, err)
@@ -171,23 +162,24 @@ func Start(cfg Config) (*Node, error) {
 	if err != nil {
 		keeper.Close()
 		r.Shutdown()
-		applier.Close()
+		backend.closeAll()
 		boltStore.Close()
 		transport.Close()
 		return nil, fmt.Errorf("node: opening checkpoint connection to %s: %w", cfg.DBPath, err)
 	}
 
+	backend.attachConns(keeper, checkpointer)
+	fsm.SetSnapshotter(backend)
+
 	n := &Node{
 		cfg:            cfg,
 		transport:      transport,
 		boltStore:      boltStore,
-		applier:        applier,
 		raft:           r,
 		fsm:            fsm,
 		gate:           gate,
 		vfsName:        vfsName,
-		keeper:         keeper,
-		checkpointer:   checkpointer,
+		backend:        backend,
 		stopCheckpoint: make(chan struct{}),
 		checkpointDone: make(chan struct{}),
 	}
@@ -212,7 +204,7 @@ func (n *Node) runCheckpointDriver() {
 			return
 		case <-ticker.C:
 			if n.raft.State() != hraft.Leader {
-				_ = n.checkpointer.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+				_ = n.backend.checkpointPassive()
 			}
 		}
 	}
@@ -225,7 +217,7 @@ func (n *Node) Raft() *hraft.Raft { return n.raft }
 // DB returns the kept-alive RW connection. On the leader, client writes
 // should go through this connection (or another opened against the same
 // VFS name) so they flow through the commit-frame gate.
-func (n *Node) DB() *sqlite3.Conn { return n.keeper }
+func (n *Node) DB() *sqlite3.Conn { return n.backend.DB() }
 
 // Ready reports whether this node is currently the raft leader and has
 // finished draining its apply backlog for the current term (docs/DESIGN.md
@@ -259,14 +251,8 @@ func (n *Node) shutdown() error {
 	if err := n.raft.Shutdown().Error(); err != nil {
 		errs = append(errs, fmt.Errorf("raft shutdown: %w", err))
 	}
-	if err := n.keeper.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("closing kept-alive connection: %w", err))
-	}
-	if err := n.checkpointer.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("closing checkpoint connection: %w", err))
-	}
-	if err := n.applier.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("closing applier: %w", err))
+	if err := n.backend.closeAll(); err != nil {
+		errs = append(errs, err)
 	}
 	if err := n.boltStore.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("closing raft log store: %w", err))

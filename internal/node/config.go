@@ -44,6 +44,18 @@ type Config struct {
 	// to 2s if zero.
 	CheckpointInterval time.Duration
 
+	// SnapshotThreshold, SnapshotInterval, and TrailingLogs are wired
+	// straight onto hraft's raft.Config; they control how often this node
+	// takes a RAFT snapshot (raft.FSM.Snapshot, docs/ROADMAP.md M6) and how
+	// many log entries it retains past the last snapshot. Default to
+	// hraft's own defaults (8192, 120s, 10240 -- see hashicorp/raft's
+	// DefaultConfig) when zero. Tests that need to force real, fast
+	// snapshotting (rather than waiting on production-sized thresholds)
+	// override these directly.
+	SnapshotThreshold uint64
+	SnapshotInterval  time.Duration
+	TrailingLogs      uint64
+
 	// LogOutput receives hraft's log output. Defaults to io.Discard if nil.
 	LogOutput io.Writer
 }
@@ -54,6 +66,15 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CheckpointInterval == 0 {
 		c.CheckpointInterval = 2 * time.Second
+	}
+	if c.SnapshotThreshold == 0 {
+		c.SnapshotThreshold = hraft.DefaultConfig().SnapshotThreshold
+	}
+	if c.SnapshotInterval == 0 {
+		c.SnapshotInterval = hraft.DefaultConfig().SnapshotInterval
+	}
+	if c.TrailingLogs == 0 {
+		c.TrailingLogs = hraft.DefaultConfig().TrailingLogs
 	}
 	if c.LogOutput == nil {
 		c.LogOutput = io.Discard

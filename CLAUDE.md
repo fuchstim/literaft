@@ -79,15 +79,18 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 
 ## Current status & milestone
 
-**M0–M5 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
+**M0–M6 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
 compatibility, commit-frame gate, vendored shm + follower apply, real
-`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), and
-the leadership-churn ordering work — a multi-node cluster replicates writes,
-followers serve reads, killing/adding nodes converges, and a node that regains
-leadership with an apply backlog drains it (`raft.Gate`'s `Ready`/`Barrier`
-drain) before serving local writes again. Current work is **Milestone 6**
-(InstallSnapshot for very-behind followers; split out of the original M5 scope
-— see `docs/DECISIONS.md` ADR-010).
+`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), the
+leadership-churn ordering work, and real snapshot take/install — a multi-node
+cluster replicates writes, followers serve reads, killing/adding nodes
+converges, a node that regains leadership with an apply backlog drains it
+(`raft.Gate`'s `Ready`/`Barrier` drain) before serving local writes again, and
+a follower too far behind for normal log replication catches up via
+`raft.FSM.Snapshot`/`Restore` (a `TRUNCATE`-checkpointed `.db` swapped in as a
+unit by `internal/node`'s `dbBackend`) instead. Current work is **Milestone 7**
+(hardening: crash/restart recovery, fault injection, fuzzing, throughput
+benchmarks — see `docs/ROADMAP.md`).
 
 **Scope decision for now:** *reject all follower-originated writes.* A client
 write that lands on a follower returns an error with a leader hint; the client

@@ -108,20 +108,35 @@ churn itself; snapshot-based catch-up is split out into M6 below.
   un-`Ready` and rejects writes until the backlog drains, then applies it
   exactly once and correctly resumes ADR-005's self-skip for new writes.
 
-## M6 — Snapshots & very-behind followers
+## M6 — Snapshots & very-behind followers *(done)*
 
-Split out of the original M5 scope (see `DECISIONS.md`): comparable in size to
-M3's vendored-shm work, and the roadmap already flagged the snapshot-cut
-wiring as optional. `raft.FSM.Snapshot`/`Restore` remain stubbed (error out if
-invoked) and `internal/node`'s `SnapshotThreshold` stays high enough that
-hraft's automatic snapshot check doesn't fire in normal M4/M5 operation.
+Split out of the original M5 scope (see `DECISIONS.md` ADR-010): comparable in
+size to M3's vendored-shm work.
 
-- **Very-behind:** InstallSnapshot from a `TRUNCATE`-checkpointed `.db`, reset
-  local WAL, resume applying.
-- Wire the RAFT snapshot cut to a truncate-checkpointed db (optional coupling).
+- `raft.FSM.Snapshot`/`Restore` are real: `Snapshot` delegates to a
+  `raftadapter.Snapshotter` (implemented by `internal/node`'s `dbBackend`),
+  which drives a `TRUNCATE` checkpoint -- the natural cut point
+  (`DESIGN.md` §checkpoint) -- so the `.db` file alone becomes a complete,
+  self-contained copy, then hands hraft a private temp-file copy of it so
+  `FSMSnapshot.Persist` can stream it later without blocking further `Apply`.
+- `Restore` closes the applier and both kept-alive SQLite connections,
+  swaps the incoming bytes in as the new `.db` (atomic rename), deletes the
+  now-stale `-wal`/`-shm` (a superseded generation apply's bootstrap would
+  otherwise refuse to touch), and reopens everything fresh -- `apply.Open`'s
+  existing "uninitialized wal-index" bootstrap path covers the rest, no
+  `apply/` changes needed.
+- `internal/node.Config` exposes `SnapshotThreshold`/`SnapshotInterval`/
+  `TrailingLogs` (defaulting to hraft's own defaults), letting tests force
+  fast, real snapshotting instead of waiting on production-sized thresholds.
 - **Done when:** a follower too far behind for normal log replication catches
-  up via a snapshot instead, and ends up byte-for-byte-equivalent (logically)
-  to the leader, including to an external reader.
+  up via a snapshot instead, and ends up logically-equivalent to the leader,
+  including to an external reader. Verified by
+  `internal/node/backend_test.go` (a direct `Snapshot`/`Restore` round trip,
+  checked against a plain unmodified-VFS reader) and
+  `internal/node/snapshot_test.go` (a real cluster with `TrailingLogs` low
+  enough that a brand-new joiner's needed log entries are provably compacted
+  away, so only `InstallSnapshot` -- not `AppendEntries` replay -- can
+  converge it).
 
 ## M7 — Hardening
 

@@ -39,6 +39,15 @@ type clusterHarness struct {
 	dir      string
 	pageSize uint32
 	nodes    []*node.Node
+
+	// snapshotThreshold/trailingLogs/snapshotInterval, when non-zero,
+	// override node.Config's own (hraft-default) values -- snapshot_test.go
+	// sets these low enough to force real, fast InstallSnapshot catch-up
+	// (docs/ROADMAP.md M6) instead of waiting on production-sized
+	// thresholds. Left zero, startNode gets node.Config's normal defaults.
+	snapshotThreshold uint64
+	trailingLogs      uint64
+	snapshotInterval  time.Duration
 }
 
 // startNode starts and returns one node under h.dir, bootstrapping it with
@@ -54,6 +63,9 @@ func (h *clusterHarness) startNode(id string, addr string, servers []hraft.Serve
 		Bootstrap:          servers,
 		ApplyTimeout:       2 * time.Second,
 		CheckpointInterval: 200 * time.Millisecond,
+		SnapshotThreshold:  h.snapshotThreshold,
+		TrailingLogs:       h.trailingLogs,
+		SnapshotInterval:   h.snapshotInterval,
 	}
 	n, err := node.Start(cfg)
 	Expect(err).NotTo(HaveOccurred())

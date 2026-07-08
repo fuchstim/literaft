@@ -1,0 +1,302 @@
+package node
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/ncruces/go-sqlite3"
+
+	"github.com/fuchstim/literaft/apply"
+	raftadapter "github.com/fuchstim/literaft/raft"
+	"github.com/fuchstim/literaft/vfs"
+)
+
+// checkpointRetryDelay/checkpointRetryTimeout bound how long Snapshot waits
+// for a full TRUNCATE checkpoint (docs/ROADMAP.md M6): TRUNCATE only fully
+// backfills and truncates the -wal file once no reader still needs older WAL
+// content, so a lagging reader can make one attempt only partially succeed.
+const (
+	checkpointRetryDelay   = 20 * time.Millisecond
+	checkpointRetryTimeout = 5 * time.Second
+)
+
+// dbBackend owns every piece of this node's on-disk/SQLite state that a
+// snapshot install (docs/ROADMAP.md M6) must swap out as a unit: the
+// follower-apply handle and the two kept-alive SQLite connections
+// (CLAUDE.md's "keep >=1 RW connection open"). Before M6
+// nothing ever replaced these mid-flight, so Node held them as plain
+// fields; Restore needs to close and reopen all three together, so they're
+// centralized here behind one mutex.
+//
+// One plain Mutex, not an RWMutex, guards all of it: Apply, Snapshot,
+// Restore, and the checkpoint driver's tick all touch checkpointer and/or
+// applier, and a *sqlite3.Conn is not safe for concurrent goroutine use
+// (the same reason checkpointer was split from keeper in the first place).
+// Contention is negligible -- every one of these operations is brief except
+// Snapshot's checkpoint+copy, which is expected to be infrequent.
+type dbBackend struct {
+	mu sync.Mutex
+
+	cfg     Config
+	vfsName string
+
+	applier      *apply.Applier
+	keeper       *sqlite3.Conn
+	checkpointer *sqlite3.Conn
+}
+
+// attachConns wires the two kept-alive SQLite connections in after they're
+// opened (Start creates them only after the raft node -- and therefore this
+// backend's FSM -- already exists, so they can't be set at construction).
+func (b *dbBackend) attachConns(keeper, checkpointer *sqlite3.Conn) {
+	b.mu.Lock()
+	b.keeper = keeper
+	b.checkpointer = checkpointer
+	b.mu.Unlock()
+}
+
+// Apply implements raftadapter.Materializer.
+func (b *dbBackend) Apply(e vfs.Entry) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.applier.Apply(e)
+}
+
+// DB returns the kept-alive RW connection client writes should use.
+func (b *dbBackend) DB() *sqlite3.Conn {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.keeper
+}
+
+// checkpointPassive runs the periodic follower checkpoint
+// (docs/DESIGN.md §checkpoint). Kept behind the same lock as Snapshot's own
+// checkpoint call so the two never drive checkpointer concurrently.
+func (b *dbBackend) checkpointPassive() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.checkpointer.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+}
+
+// closeAll closes the applier and both SQLite connections, returning the
+// first error encountered (if any) while still attempting every step.
+func (b *dbBackend) closeAll() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closeAllLocked()
+}
+
+func (b *dbBackend) closeAllLocked() error {
+	var errs []error
+	if b.keeper != nil {
+		if err := b.keeper.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing kept-alive connection: %w", err))
+		}
+	}
+	if b.checkpointer != nil {
+		if err := b.checkpointer.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing checkpoint connection: %w", err))
+		}
+	}
+	if b.applier != nil {
+		if err := b.applier.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing applier: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Snapshot implements raftadapter.Snapshotter (docs/ROADMAP.md M6). It
+// drives a TRUNCATE checkpoint -- the natural snapshot cut point
+// (docs/DESIGN.md §checkpoint) -- so the .db file alone becomes a complete,
+// self-contained copy of the current state, then hands back a private copy
+// of those bytes.
+//
+// The lock is held for this whole call, but only across a local checkpoint
+// + file copy, not the (potentially much slower, over-the-network) transfer
+// hraft does later via the returned ReadCloser's consumer -- copying now is
+// exactly what decouples the two, so Apply/Restore/checkpointPassive aren't
+// blocked while a slow follower is still catching up.
+func (b *dbBackend) Snapshot() (io.ReadCloser, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.checkpointTruncateLocked(); err != nil {
+		return nil, err
+	}
+
+	src, err := os.Open(b.cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: opening %s: %w", b.cfg.DBPath, err)
+	}
+	defer src.Close()
+
+	tmp, err := os.CreateTemp("", "literaft-snapshot-*")
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: creating temp copy: %w", err)
+	}
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, fmt.Errorf("snapshot: copying %s: %w", b.cfg.DBPath, err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return nil, fmt.Errorf("snapshot: rewinding temp copy: %w", err)
+	}
+
+	return &tempFileReader{File: tmp}, nil
+}
+
+// checkpointTruncateLocked retries a TRUNCATE checkpoint until the -wal
+// file is actually truncated to zero bytes -- the real signal that every
+// frame was backfilled and no reader is still pinning older WAL content
+// (a busy reader can make a single attempt only partially succeed).
+//
+// This goes through Exec("PRAGMA wal_checkpoint(TRUNCATE)") rather than the
+// Conn.WALCheckpoint API: verified empirically that calling the latter as
+// the very first operation on a freshly opened connection (exactly
+// checkpointer's usage pattern -- it's opened once at Start and otherwise
+// only ever runs PASSIVE checkpoints) returns nLog=nCkpt=-1 with a nil
+// error ("checkpoint could not run"), because that path skips whatever
+// per-connection WAL setup a normal SQL statement lazily triggers. Going
+// through the SQL layer sidesteps it; the -wal size check below is what
+// actually confirms success either way.
+func (b *dbBackend) checkpointTruncateLocked() error {
+	deadline := time.Now().Add(checkpointRetryTimeout)
+	for {
+		err := b.checkpointer.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		if err == nil {
+			fi, statErr := os.Stat(b.cfg.DBPath + "-wal")
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return fmt.Errorf("snapshot: checking -wal size: %w", statErr)
+			}
+			if statErr != nil || fi.Size() == 0 {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("snapshot: TRUNCATE checkpoint never completed: %w", err)
+			}
+			return errors.New("snapshot: TRUNCATE checkpoint never fully backfilled the WAL")
+		}
+		time.Sleep(checkpointRetryDelay)
+	}
+}
+
+// Restore implements raftadapter.Snapshotter (docs/ROADMAP.md M6). It
+// replaces this node's entire .db with r's bytes and resets local WAL/apply
+// state to match, swapping in fresh handles for the applier and both
+// kept-alive SQLite connections.
+//
+// A failure partway through leaves this node's local state genuinely
+// broken (there is no in-place rollback of a half-completed file swap);
+// that's surfaced as an error, and hraft will simply retry InstallSnapshot
+// -- the same collect-errors-don't-half-fix posture Node.shutdown already
+// takes, just without a way to keep serving from the old state once the
+// swap has begun.
+func (b *dbBackend) Restore(r io.Reader) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	dir := filepath.Dir(b.cfg.DBPath)
+	tmp, err := os.CreateTemp(dir, ".literaft-restore-*")
+	if err != nil {
+		return fmt.Errorf("restore: creating temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := io.Copy(tmp, r); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("restore: writing incoming snapshot: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("restore: syncing incoming snapshot: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("restore: closing incoming snapshot: %w", err)
+	}
+
+	// Close everything before touching files on disk: SQLite's own
+	// mmap/fd state (and the vendored shm handle inside applier) must not
+	// outlive the swap.
+	if err := b.closeAllLocked(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("restore: closing existing state: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, b.cfg.DBPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("restore: installing new db file: %w", err)
+	}
+	// The incoming .db is already fully checkpointed (self-contained), so
+	// the old -wal/-shm belong to a superseded generation. Leaving them
+	// would hand apply.Open's bootstrap a nonzero-size -wal it explicitly
+	// refuses to touch (apply/apply.go's bootstrap doc comment).
+	if err := os.Remove(b.cfg.DBPath + "-wal"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("restore: removing stale -wal: %w", err)
+	}
+	if err := os.Remove(b.cfg.DBPath + "-shm"); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("restore: removing stale -shm: %w", err)
+	}
+
+	applier, err := apply.Open(b.cfg.DBPath, b.cfg.PageSize)
+	if err != nil {
+		return fmt.Errorf("restore: reopening applier: %w", err)
+	}
+
+	keeper, err := sqlite3.Open("file:" + b.cfg.DBPath + "?vfs=" + b.vfsName)
+	if err != nil {
+		applier.Close()
+		return fmt.Errorf("restore: reopening kept-alive connection: %w", err)
+	}
+	if err := keeper.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		keeper.Close()
+		applier.Close()
+		return fmt.Errorf("restore: setting synchronous=NORMAL: %w", err)
+	}
+
+	checkpointer, err := sqlite3.Open("file:" + b.cfg.DBPath + "?vfs=" + b.vfsName)
+	if err != nil {
+		keeper.Close()
+		applier.Close()
+		return fmt.Errorf("restore: reopening checkpoint connection: %w", err)
+	}
+
+	b.applier = applier
+	b.keeper = keeper
+	b.checkpointer = checkpointer
+	return nil
+}
+
+// tempFileReader wraps a temp file so Close both closes and removes it,
+// tying the private snapshot copy's lifetime to its consumer (fsmSnapshot's
+// Release, or an error path that never gets that far).
+type tempFileReader struct {
+	*os.File
+}
+
+func (t *tempFileReader) Close() error {
+	closeErr := t.File.Close()
+	if err := os.Remove(t.File.Name()); err != nil && !os.IsNotExist(err) {
+		if closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
+}
+
+var (
+	_ raftadapter.Materializer = (*dbBackend)(nil)
+	_ raftadapter.Snapshotter  = (*dbBackend)(nil)
+)
