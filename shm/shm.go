@@ -8,9 +8,23 @@ package shm
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
+)
+
+// dmsLockRetryDelay/dmsLockRetryTimeout bound how long Open retries the
+// dead-man's-switch handshake locks below. Upstream (shm/upstream/
+// shm_ofd.go.upstream) takes both non-blocking and makes a single attempt,
+// relying on SQLite's own caller-side open-retry logic to cover the narrow
+// window where another opener is mid-handshake; this package has no such
+// wrapper around it, so it provides its own short, bounded retry instead of
+// either a single attempt (too fragile) or a blocking wait (see Open's doc).
+const (
+	dmsLockRetryDelay   = 10 * time.Millisecond
+	dmsLockRetryTimeout = 2 * time.Second
 )
 
 // regionSize is SQLite's fixed wal-index shared-memory granularity
@@ -73,20 +87,52 @@ func Open(path string) (*SharedMemory, error) {
 		// We're the first opener: claim the switch exclusively, wipe any
 		// stale content, then downgrade to the shared lock every opener
 		// holds for as long as the shm is in use.
-		if err := writeLock(f, dmsOffset, 1, true); err != nil {
+		//
+		// Non-blocking, matching upstream: if the lock isn't immediately
+		// available, some other opener is truncating the file and will only
+		// ever downgrade to a shared lock afterward, never release it --
+		// upstream's own comment is "no point in blocking here." A blocking
+		// attempt here would risk an unbounded wait if that opener stalls
+		// (or, on this vendored port, never progresses for some other
+		// reason) instead of failing fast and letting the caller retry.
+		if err := retryNonBlocking(func() error { return writeLock(f, dmsOffset, 1, false) }); err != nil {
 			f.Close()
-			return nil, err
+			return nil, fmt.Errorf("shm: claiming dead man's switch: %w", err)
 		}
 		if err := f.Truncate(0); err != nil {
 			f.Close()
 			return nil, err
 		}
 	}
-	if err := readLock(f, dmsOffset, 1, true); err != nil {
+	// Also non-blocking upstream (its timeout here is a non-negative
+	// time.Millisecond; upstream's osLock only blocks for a negative
+	// timeout, so this is a single non-blocking attempt there too): the
+	// only way this conflicts is the same narrow exclusive-claim window
+	// above, which self-resolves quickly once the other opener downgrades
+	// or this node's own claim above completes.
+	if err := retryNonBlocking(func() error { return readLock(f, dmsOffset, 1, false) }); err != nil {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("shm: acquiring shared dead man's switch lock: %w", err)
 	}
 	return s, nil
+}
+
+// retryNonBlocking retries a non-blocking lock attempt for up to
+// dmsLockRetryTimeout, rather than either giving up after one try (fragile:
+// this package has no caller-side retry wrapper the way SQLite's own VFS
+// open path does) or blocking indefinitely (see Open's doc).
+func retryNonBlocking(attempt func() error) error {
+	deadline := time.Now().Add(dmsLockRetryTimeout)
+	for {
+		err := attempt()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(dmsLockRetryDelay)
+	}
 }
 
 // Region returns the mapped bytes for wal-index page id (0-based), each
