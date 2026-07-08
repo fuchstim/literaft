@@ -26,6 +26,37 @@ type File struct {
 	gate    Gate
 	pending *pendingFrame
 	capture []Frame
+
+	// headerOffsets and dataOffsets record, for the transaction currently
+	// accumulating in capture, which WAL offsets already hold a captured
+	// frame's header and page-image respectively (data offset -> index
+	// into capture). wal.c's walFrames() can revisit both after an
+	// earlier spill: re-dirtying an already-spilled page overwrites its
+	// data in place with a bare page-sized write (no header, since the
+	// header doesn't change), and committing such a transaction runs
+	// walRewriteChecksums(), which rewrites every affected frame's header
+	// -- including the just-written commit frame's own -- a second time
+	// with no paired data write, purely to fix the cumulative checksum
+	// chain. Both must be recognized as revisits of an already-captured
+	// frame, not new ones: missing the first silently under-captures the
+	// transaction, and missing the second desyncs the header/data pairing
+	// state machine, corrupting whatever write follows (docs/WAL_FORMAT.md,
+	// wal.c walFrames/walRewriteChecksums).
+	//
+	// Both maps hold only the in-flight transaction's own offsets, so a
+	// header at a fresh (never-yet-recorded) offset always starts a new
+	// frame in this transaction; that offset is set to be reused after
+	// commit, but not before a genuinely new header proves the previous
+	// transaction's rewrite phase (which never touches offsets beyond its
+	// own commit frame) is over -- cleared lazily on that write. maxOffset
+	// also lets a header reused at or below any previously-seen offset
+	// (WAL checkpoint restart, or a rolled-back transaction's frames being
+	// reused) force the same reset, since that can't otherwise be told
+	// apart from an in-transaction revisit.
+	headerOffsets map[int64]struct{}
+	dataOffsets   map[int64]int
+	maxOffset     int64
+	txnDone       bool
 }
 
 // pendingFrame is a frame header seen by writeFrameHeader, held until the
@@ -55,11 +86,38 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	case f.pending != nil:
 		return f.writeFrameData(p, off)
 	case len(p) == frameHeaderSize:
+		if _, seen := f.headerOffsets[off]; seen {
+			// walRewriteChecksums rewriting an already-captured frame's
+			// header to fix the checksum chain: pgno and commit marker
+			// are unchanged (re-read from disk), only the checksum bytes
+			// differ. Not a new frame -- write through as-is, without
+			// restarting the header/data pairing state machine or
+			// re-proposing to the gate.
+			return f.File.WriteAt(p, off)
+		}
+		if f.txnDone || off <= f.maxOffset {
+			// Either the previous transaction's commit-frame pairing
+			// already resolved (so this offset, being unseen, must start
+			// a new transaction -- its own rewrite phase, if any, runs
+			// synchronously before any new transaction's frames), or the
+			// WAL rewound (checkpoint restart, or a rolled-back
+			// transaction's offsets reused). Either way this offset's
+			// history no longer applies.
+			f.headerOffsets = nil
+			f.dataOffsets = nil
+			f.txnDone = false
+		}
+		f.maxOffset = off
 		return f.writeFrameHeader(p, off)
 	default:
-		// The 32-byte WAL header, or any other write outside the normal
-		// frame-header/frame-data cadence: not a frame boundary we
-		// intercept.
+		if idx, seen := f.dataOffsets[off]; seen && idx < len(f.capture) {
+			// Same-transaction page re-dirty after an earlier spill: a
+			// bare page-sized overwrite of an already-captured frame's
+			// data, no header rewrite. Update that frame's captured image
+			// in place instead of silently letting it pass through
+			// uncaptured.
+			f.capture[idx].Page = append([]byte(nil), p...)
+		}
 		return f.File.WriteAt(p, off)
 	}
 }
@@ -76,6 +134,11 @@ func (f *File) writeFrameHeader(p []byte, off int64) (int, error) {
 			return n, err
 		}
 	}
+
+	if f.headerOffsets == nil {
+		f.headerOffsets = make(map[int64]struct{})
+	}
+	f.headerOffsets[off] = struct{}{}
 
 	pending := &pendingFrame{header: h, offset: off}
 	copy(pending.headerRaw[:], p)
@@ -94,6 +157,10 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	pending := f.pending
 	f.pending = nil
 
+	if f.dataOffsets == nil {
+		f.dataOffsets = make(map[int64]int)
+	}
+	f.dataOffsets[off] = len(f.capture)
 	f.capture = append(f.capture, Frame{
 		Pgno: pending.header.pgno,
 		Page: append([]byte(nil), p...),
@@ -105,6 +172,12 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 
 	entry := Entry{Frames: f.capture, NTruncate: pending.header.nTruncate}
 	f.capture = nil
+	// headerOffsets/dataOffsets stay alive: walRewriteChecksums, if it
+	// runs, rewrites frame headers at these exact offsets next, still
+	// inside this same WriteAt sequence. txnDone marks that the next
+	// unseen header offset belongs to a new transaction, safe to clear
+	// them for.
+	f.txnDone = true
 
 	if err := f.gate.Propose(entry); err != nil {
 		return 0, sqlite3.IOERR_WRITE
