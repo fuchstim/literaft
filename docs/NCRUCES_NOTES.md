@@ -101,6 +101,15 @@ hash** it was copied from in `shm/UPSTREAM.md`, and add a CI check or a note to
 re-diff on dependency bumps (the wal-index layout and lock offsets must stay in
 lockstep with the version SQLite-in-wasm actually uses, or readers corrupt).
 
+**How to vendor `shm/` (don't commit `go mod vendor` output):** `go mod
+vendor`'s `vendor/` tree is gitignored project-wide — it holds *every*
+dependency, not just the handful of shm files we need, and isn't meant to be
+committed. Instead, add a `Makefile` target that `git clone`s (or
+`git archive`s) `github.com/ncruces/go-sqlite3` at the pinned commit into a
+scratch dir and copies just the shm source files into `shm/`, then stamps
+`shm/UPSTREAM.md` with that commit hash. Re-run the same target to re-diff on
+dependency bumps.
+
 Files to look for upstream (names circa v0.35.1, verify): `vfs/shm.go`
 (interface + `NewSharedMemory`), and the platform impls
 (`vfs/shm_*.go` — the mmap/OFD variants). Copy the concrete struct + the
