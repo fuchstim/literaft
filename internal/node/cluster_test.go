@@ -170,16 +170,52 @@ func queryInt(c *sqlite3.Conn, sql string) int64 {
 	return stmt.ColumnInt64(0)
 }
 
+// nodeExec runs sql against n's kept-alive connection via WithDB, rather
+// than holding a *sqlite3.Conn returned from a since-removed DB() accessor
+// across the call -- exactly the pattern a concurrent snapshot install
+// (docs/ROADMAP.md M6/M7) could race.
+func nodeExec(n *node.Node, sql string) error {
+	GinkgoHelper()
+	return n.WithDB(func(c *sqlite3.Conn) error { return c.Exec(sql) })
+}
+
+// nodeQueryText/nodeQueryInt are queryText/queryInt for a *node.Node instead
+// of an already-open *sqlite3.Conn, for the same reason as nodeExec.
+func nodeQueryText(n *node.Node, sql string) string {
+	GinkgoHelper()
+	var result string
+	Expect(n.WithDB(func(c *sqlite3.Conn) error {
+		result = queryText(c, sql)
+		return nil
+	})).To(Succeed())
+	return result
+}
+
+func nodeQueryInt(n *node.Node, sql string) int64 {
+	GinkgoHelper()
+	var result int64
+	Expect(n.WithDB(func(c *sqlite3.Conn) error {
+		result = queryInt(c, sql)
+		return nil
+	})).To(Succeed())
+	return result
+}
+
 func rowCount(n *node.Node) (int64, error) {
-	stmt, _, err := n.DB().Prepare("SELECT count(*) FROM t")
-	if err != nil {
-		return 0, err
-	}
-	defer stmt.Close()
-	if !stmt.Step() {
-		return 0, fmt.Errorf("no rows")
-	}
-	return stmt.ColumnInt64(0), nil
+	var count int64
+	err := n.WithDB(func(c *sqlite3.Conn) error {
+		stmt, _, err := c.Prepare("SELECT count(*) FROM t")
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		if !stmt.Step() {
+			return fmt.Errorf("no rows")
+		}
+		count = stmt.ColumnInt64(0)
+		return nil
+	})
+	return count, err
 }
 
 var _ = Describe("cluster", func() {
@@ -188,9 +224,9 @@ var _ = Describe("cluster", func() {
 		defer h.shutdown()
 
 		leader := h.leader()
-		Expect(leader.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(leader, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		for i := 0; i < 20; i++ {
-			Expect(leader.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
+			Expect(nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
 		var followers []*node.Node
@@ -204,7 +240,7 @@ var _ = Describe("cluster", func() {
 		for _, f := range followers {
 			f := f
 			Eventually(func() (int64, error) { return rowCount(f) }, 5*time.Second, 20*time.Millisecond).Should(Equal(int64(20)))
-			Expect(queryText(f.DB(), "PRAGMA integrity_check")).To(Equal("ok"))
+			Expect(nodeQueryText(f, "PRAGMA integrity_check")).To(Equal("ok"))
 		}
 
 		// Kill one follower: the cluster (now 2/3) must still accept and
@@ -215,7 +251,7 @@ var _ = Describe("cluster", func() {
 
 		Eventually(func() error {
 			leader = h.leader()
-			return leader.DB().Exec("INSERT INTO t (v) VALUES ('after-kill')")
+			return nodeExec(leader, "INSERT INTO t (v) VALUES ('after-kill')")
 		}, 5*time.Second, 20*time.Millisecond).Should(Succeed())
 
 		Eventually(func() (int64, error) { return rowCount(survivor) }, 5*time.Second, 20*time.Millisecond).Should(Equal(int64(21)))
@@ -230,7 +266,7 @@ var _ = Describe("cluster", func() {
 			To(Succeed())
 
 		Eventually(func() (int64, error) { return rowCount(joiner) }, 5*time.Second, 20*time.Millisecond).Should(Equal(int64(21)))
-		Expect(queryText(joiner.DB(), "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(nodeQueryText(joiner, "PRAGMA integrity_check")).To(Equal("ok"))
 	})
 })
 

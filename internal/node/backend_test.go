@@ -71,6 +71,36 @@ func queryText(c *sqlite3.Conn, sql string) string {
 	return stmt.ColumnText(0)
 }
 
+// nodeExec/nodeQueryText/nodeQueryInt run against n's kept-alive connection
+// via WithDB, rather than holding a *sqlite3.Conn from a since-removed DB()
+// accessor across the call -- exactly the pattern a concurrent Restore
+// (this file's own subject) could race. Duplicated from cluster_test.go's
+// identical helpers since that file is package node_test, not node.
+func nodeExec(n *Node, sql string) error {
+	GinkgoHelper()
+	return n.WithDB(func(c *sqlite3.Conn) error { return c.Exec(sql) })
+}
+
+func nodeQueryText(n *Node, sql string) string {
+	GinkgoHelper()
+	var result string
+	Expect(n.WithDB(func(c *sqlite3.Conn) error {
+		result = queryText(c, sql)
+		return nil
+	})).To(Succeed())
+	return result
+}
+
+func nodeQueryInt(n *Node, sql string) int64 {
+	GinkgoHelper()
+	var result int64
+	Expect(n.WithDB(func(c *sqlite3.Conn) error {
+		result = queryInt(c, sql)
+		return nil
+	})).To(Succeed())
+	return result
+}
+
 // pageSizeProbe returns SQLite's actual default page size, the same caution
 // cluster_test.go and apply_test.go take (CLAUDE.md: verify, don't assume).
 func pageSizeProbe() uint32 {
@@ -92,9 +122,9 @@ var _ = Describe("dbBackend snapshot/restore (M6)", func() {
 		src := startSingleNode(dir, "src", pageSize)
 		defer src.Shutdown()
 
-		Expect(src.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(src, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		for i := 0; i < 50; i++ {
-			Expect(src.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
+			Expect(nodeExec(src, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
 		rc, err := src.backend.Snapshot()
@@ -106,10 +136,10 @@ var _ = Describe("dbBackend snapshot/restore (M6)", func() {
 		Expect(dst.backend.Restore(rc)).To(Succeed())
 		Expect(rc.Close()).To(Succeed())
 
-		Expect(queryText(dst.DB(), "PRAGMA integrity_check")).To(Equal("ok"))
-		Expect(queryInt(dst.DB(), "SELECT count(*) FROM t")).To(Equal(int64(50)))
-		Expect(queryText(dst.DB(), "SELECT v FROM t WHERE id = 1")).To(Equal("row0"))
-		Expect(queryText(dst.DB(), "SELECT v FROM t WHERE id = 50")).To(Equal("row49"))
+		Expect(nodeQueryText(dst, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(nodeQueryInt(dst, "SELECT count(*) FROM t")).To(Equal(int64(50)))
+		Expect(nodeQueryText(dst, "SELECT v FROM t WHERE id = 1")).To(Equal("row0"))
+		Expect(nodeQueryText(dst, "SELECT v FROM t WHERE id = 50")).To(Equal("row49"))
 
 		// External-reader compatibility (docs/ROADMAP.md M1/M3's bar): open
 		// the restored file with a completely plain, unmodified-VFS

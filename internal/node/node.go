@@ -241,10 +241,17 @@ func (n *Node) runCheckpointDriver() {
 // when joining a new node into an existing cluster.
 func (n *Node) Raft() *hraft.Raft { return n.raft }
 
-// DB returns the kept-alive RW connection. On the leader, client writes
-// should go through this connection (or another opened against the same
-// VFS name) so they flow through the commit-frame gate.
-func (n *Node) DB() *sqlite3.Conn { return n.backend.DB() }
+// WithDB runs fn with the kept-alive RW connection. On the leader, client
+// writes should go through this connection (or another opened against the
+// same VFS name) so they flow through the commit-frame gate.
+//
+// fn must not retain the *sqlite3.Conn it's given past WithDB's return: a
+// concurrent snapshot install (docs/ROADMAP.md M6 InstallSnapshot, which can
+// fire on a follower serving reads/writes at any time) closes and replaces
+// this connection, and WithDB's lock is what makes that safe -- a
+// previous DB() *sqlite3.Conn accessor let the pointer escape unprotected,
+// which ginkgo -race caught as a genuine use-after-free.
+func (n *Node) WithDB(fn func(*sqlite3.Conn) error) error { return n.backend.WithDB(fn) }
 
 // Ready reports whether this node is currently the raft leader and has
 // finished draining its apply backlog for the current term (docs/DESIGN.md

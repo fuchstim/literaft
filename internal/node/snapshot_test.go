@@ -46,13 +46,13 @@ var _ = Describe("snapshot-based catch-up (M6)", func() {
 		}
 
 		leader := h.leader()
-		Expect(leader.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(leader, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 
 		const rows = 120
 		for i := 0; i < rows; i++ {
 			Eventually(func() error {
 				leader = h.leader()
-				return leader.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))
+				return nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))
 			}, 5*time.Second, 20*time.Millisecond).Should(Succeed())
 		}
 
@@ -74,6 +74,6 @@ var _ = Describe("snapshot-based catch-up (M6)", func() {
 			To(Succeed())
 
 		Eventually(func() (int64, error) { return rowCount(joiner) }, 10*time.Second, 20*time.Millisecond).Should(Equal(int64(rows)))
-		Expect(queryText(joiner.DB(), "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(nodeQueryText(joiner, "PRAGMA integrity_check")).To(Equal("ok"))
 	})
 })

@@ -30,7 +30,7 @@ import (
 func assertRestarted(restarted *node.Node, dbPath string, wantRows int64) {
 	GinkgoHelper()
 	Eventually(func() (int64, error) { return rowCount(restarted) }, 10*time.Second, 20*time.Millisecond).Should(Equal(wantRows))
-	Expect(queryText(restarted.DB(), "PRAGMA integrity_check")).To(Equal("ok"))
+	Expect(nodeQueryText(restarted, "PRAGMA integrity_check")).To(Equal("ok"))
 
 	external, err := sqlite3.Open(dbPath)
 	Expect(err).NotTo(HaveOccurred())
@@ -45,9 +45,9 @@ var _ = Describe("node restart (M7)", func() {
 		defer h.shutdown()
 
 		leader := h.leader()
-		Expect(leader.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(leader, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		for i := 0; i < 20; i++ {
-			Expect(leader.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
+			Expect(nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
 		var follower *node.Node
@@ -68,9 +68,9 @@ var _ = Describe("node restart (M7)", func() {
 		defer h.shutdown()
 
 		leader := h.leader()
-		Expect(leader.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(leader, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		for i := 0; i < 20; i++ {
-			Expect(leader.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
+			Expect(nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
 		// The leader's own pre-restart -wal holds real-SQLite-written
@@ -114,11 +114,11 @@ var _ = Describe("node restart (M7)", func() {
 	writeRowsAndForceSnapshot := func(h *clusterHarness, rows int) *node.Node {
 		GinkgoHelper()
 		leader := h.leader()
-		Expect(leader.DB().Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(nodeExec(leader, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		for i := 0; i < rows; i++ {
 			Eventually(func() error {
 				leader = h.leader()
-				return leader.DB().Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))
+				return nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))
 			}, 5*time.Second, 20*time.Millisecond).Should(Succeed())
 		}
 		// Give the snapshot goroutine (SnapshotInterval ticks every 200ms)

@@ -33,20 +33,37 @@ const (
 // fields; Restore needs to close and reopen all three together, so they're
 // centralized here behind one mutex.
 //
-// One plain Mutex, not an RWMutex, guards all of it: Apply, Snapshot,
-// Restore, and the checkpoint driver's tick all touch checkpointer and/or
-// applier, and a *sqlite3.Conn is not safe for concurrent goroutine use
-// (the same reason checkpointer was split from keeper in the first place).
-// Contention is negligible -- every one of these operations is brief except
-// Snapshot's checkpoint+copy, which is expected to be infrequent.
+// One plain Mutex, not an RWMutex, guards applier/checkpointer: Apply,
+// Snapshot, Restore, and the checkpoint driver's tick all touch one or both,
+// and a *sqlite3.Conn is not safe for concurrent goroutine use (the same
+// reason checkpointer was split from keeper in the first place). Contention
+// is negligible -- every one of these operations is brief except Snapshot's
+// checkpoint+copy, which is expected to be infrequent.
+//
+// keeper is guarded by a separate connMu instead: it used to be handed out
+// via a DB() *sqlite3.Conn accessor, but that only protected the field read,
+// not the caller's subsequent use of the returned pointer -- a concurrent
+// Restore (driven by hraft's InstallSnapshot, which can fire on a follower
+// serving reads at any time) could close and replace keeper while a caller
+// was still calling Prepare/Exec on the connection object it got back
+// (confirmed reproducible: ginkgo -race caught a genuine use-after-free,
+// since Conn.Close on the WASM-backed driver frees the connection's linear
+// memory). WithDB replaces DB(): it holds connMu for the whole call instead
+// of just a field read, so Restore (which takes connMu exclusively) always
+// waits for in-flight users to finish before closing keeper. A plain
+// Mutex would also work but would serialize every statement behind
+// Snapshot/Restore; RWMutex lets concurrent WithDB callers proceed
+// (multiple RLock holders), only blocking on the rare Restore.
 type dbBackend struct {
 	mu sync.Mutex
+
+	connMu sync.RWMutex
+	keeper *sqlite3.Conn
 
 	cfg     Config
 	vfsName string
 
 	applier      *apply.Applier
-	keeper       *sqlite3.Conn
 	checkpointer *sqlite3.Conn
 }
 
@@ -54,8 +71,11 @@ type dbBackend struct {
 // opened (Start creates them only after the raft node -- and therefore this
 // backend's FSM -- already exists, so they can't be set at construction).
 func (b *dbBackend) attachConns(keeper, checkpointer *sqlite3.Conn) {
-	b.mu.Lock()
+	b.connMu.Lock()
 	b.keeper = keeper
+	b.connMu.Unlock()
+
+	b.mu.Lock()
 	b.checkpointer = checkpointer
 	b.mu.Unlock()
 }
@@ -67,11 +87,13 @@ func (b *dbBackend) Apply(e vfs.Entry) error {
 	return b.applier.Apply(e)
 }
 
-// DB returns the kept-alive RW connection client writes should use.
-func (b *dbBackend) DB() *sqlite3.Conn {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.keeper
+// WithDB runs fn with the kept-alive RW connection client writes should
+// use, held safe from a concurrent Restore closing/replacing it out from
+// under fn for the whole call (see dbBackend's doc comment).
+func (b *dbBackend) WithDB(fn func(*sqlite3.Conn) error) error {
+	b.connMu.RLock()
+	defer b.connMu.RUnlock()
+	return fn(b.keeper)
 }
 
 // checkpointPassive runs the periodic follower checkpoint
@@ -88,9 +110,12 @@ func (b *dbBackend) checkpointPassive() error {
 func (b *dbBackend) closeAll() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
 	return b.closeAllLocked()
 }
 
+// closeAllLocked requires both mu and connMu already held.
 func (b *dbBackend) closeAllLocked() error {
 	var errs []error
 	if b.keeper != nil {
@@ -210,9 +235,17 @@ func (b *dbBackend) checkpointTruncateLocked() error {
 // an unregistered VFS name would fail. Start's own post-NewRaft code
 // unconditionally opens both connections and calls attachConns regardless
 // of whether a restore happened, so leaving them nil here is safe.
+//
+// connMu is held for this whole call (not just around closing/reassigning
+// keeper) alongside mu: hraft's own contract already guarantees Restore
+// never runs concurrently with Apply or with itself, so the only new
+// exclusion this needs is against a concurrent WithDB caller still using
+// the connection this call is about to close out from under it.
 func (b *dbBackend) Restore(r io.Reader) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
 	attached := b.keeper != nil
 
 	dir := filepath.Dir(b.cfg.DBPath)
