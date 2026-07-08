@@ -24,9 +24,9 @@ import (
 )
 
 // snapshotThreshold is set high enough that hraft's periodic automatic
-// snapshot check never actually fires in normal M4 operation --
+// snapshot check never actually fires in normal M4/M5 operation --
 // snapshot-based log compaction and very-behind-follower catch-up
-// (InstallSnapshot) are deferred to docs/ROADMAP.md M5 (see raft.FSM's
+// (InstallSnapshot) are deferred to docs/ROADMAP.md M6 (see raft.FSM's
 // Snapshot/Restore, which error out if ever actually invoked).
 const snapshotThreshold = 1 << 30
 
@@ -227,6 +227,14 @@ func (n *Node) Raft() *hraft.Raft { return n.raft }
 // VFS name) so they flow through the commit-frame gate.
 func (n *Node) DB() *sqlite3.Conn { return n.keeper }
 
+// Ready reports whether this node is currently the raft leader and has
+// finished draining its apply backlog for the current term (docs/DESIGN.md
+// §conflicts "gaining leadership"). A client write attempted before Ready
+// returns true will fail its gate with a raftadapter.CatchingUpError; unlike
+// a NotLeaderError there's no other node to redirect to, so callers should
+// just retry shortly.
+func (n *Node) Ready() bool { return n.gate.Ready() }
+
 // VFSName returns the name this node registered its literaft VFS instance
 // under.
 func (n *Node) VFSName() string { return n.vfsName }
@@ -245,6 +253,7 @@ func (n *Node) Shutdown() error {
 func (n *Node) shutdown() error {
 	close(n.stopCheckpoint)
 	<-n.checkpointDone
+	n.gate.Close()
 
 	var errs []error
 	if err := n.raft.Shutdown().Error(); err != nil {

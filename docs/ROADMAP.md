@@ -80,21 +80,50 @@ Swap the stub for the chosen RAFT library via the `raft/` adapter.
 - **Done when:** a multi-node cluster replicates writes, followers serve
   (possibly stale) reads, and killing/adding nodes converges.
 
-## M5 — Role transitions & the hard orderings
+## M5 — Role transitions & the hard orderings *(done)*
 
-The subtle correctness work from `DESIGN.md §conflicts`.
+The subtle correctness work from `DESIGN.md §conflicts`, scoped to leadership
+churn itself; snapshot-based catch-up is split out into M6 below.
 
-- **Losing leadership:** drain/abort in-flight local writes (fail gates, release
-  write lock) *before* starting follower apply.
-- **Gaining leadership:** commit a current-term no-op, drain apply until
-  `lastApplied == commitIndex`, only then open the gate. (Handles apply-behind.)
+- **Losing leadership:** hraft already resolves every in-flight local
+  `Apply`/`Barrier` future with `ErrLeadershipLost` *before* it flips
+  `LeaderCh` to `false` (`runLeader`'s step-down path), and the local SQLite
+  writer's own `WAL_WRITE_LOCK` (an OFD lock shared with the vendored `shm/`
+  apply path) already serializes any follower-apply against a still-in-flight
+  local write. No additional code needed beyond verifying this via tests
+  (`raft/gate_test.go`'s "surfaces a lost-leadership proposal" case).
+- **Gaining leadership:** `raft.Gate` now tracks a `ready` flag, closed
+  (`false`) the instant a leadership term begins and opened only once a
+  current-term `raft.Barrier` call returns -- which by construction blocks
+  until every already-committed entry, including any backlog, has been sent
+  through `FSM.Apply` on this node (`raft/gate.go`'s `drain`). `Gate.Propose`
+  rejects with `CatchingUpError` while closed. This also closes the Figure-8
+  self-apply race documented in `raft/fsm.go`: a stale entry from an earlier,
+  unfinished leadership stint is always applied *during* the drain, while no
+  new self-proposal can be racing for the self-apply marker.
+- **Done when:** leadership churn under load never produces a torn WAL, a lost
+  update, or a stale-state leader serving writes. Verified by
+  `raft/leadership_test.go`: a node with a real, durably-replicated-but-
+  unapplied backlog is handed leadership (`LeadershipTransferToServer`), stays
+  un-`Ready` and rejects writes until the backlog drains, then applies it
+  exactly once and correctly resumes ADR-005's self-skip for new writes.
+
+## M6 — Snapshots & very-behind followers
+
+Split out of the original M5 scope (see `DECISIONS.md`): comparable in size to
+M3's vendored-shm work, and the roadmap already flagged the snapshot-cut
+wiring as optional. `raft.FSM.Snapshot`/`Restore` remain stubbed (error out if
+invoked) and `internal/node`'s `SnapshotThreshold` stays high enough that
+hraft's automatic snapshot check doesn't fire in normal M4/M5 operation.
+
 - **Very-behind:** InstallSnapshot from a `TRUNCATE`-checkpointed `.db`, reset
   local WAL, resume applying.
 - Wire the RAFT snapshot cut to a truncate-checkpointed db (optional coupling).
-- **Done when:** leadership churn under load never produces a torn WAL, a lost
-  update, or a stale-state leader serving writes.
+- **Done when:** a follower too far behind for normal log replication catches
+  up via a snapshot instead, and ends up byte-for-byte-equivalent (logically)
+  to the leader, including to an external reader.
 
-## M6 — Hardening
+## M7 — Hardening
 
 - Crash/restart recovery: rebuild WAL tail from the log via `lastApplied`;
   idempotence.

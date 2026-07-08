@@ -225,3 +225,32 @@ transaction support.
 (accept latency, add hard idle timeouts); Model C if the app can submit txns as
 units (most robust — no think-time lock exposure). Reach for B/OCC only in the
 narrow ADR-008 regime.
+
+---
+
+## ADR-010 — Split InstallSnapshot out of M5 into its own milestone
+
+**Decision.** M5 ships only the leadership-churn ordering work (`ROADMAP.md`'s
+"losing leadership" / "gaining leadership" bullets): `raft.Gate` gates local
+proposals on a current-term `raft.Barrier` drain, closing the apply-behind
+window and the Figure-8 self-apply race (`raft/fsm.go`'s doc comment).
+InstallSnapshot for very-behind followers and wiring the RAFT snapshot cut to a
+`TRUNCATE` checkpoint move to a new M6; the former "M6 — Hardening" becomes M7.
+
+**Why.** The two pieces don't share much implementation surface: leadership
+churn is about `raft.Gate`/`raft.FSM` ordering against the existing WAL/apply
+machinery, while InstallSnapshot needs a real `raft.FSM.Snapshot`/`Restore`
+(currently stubbed to error), a new on-disk snapshot format, integration with
+hraft's `SnapshotStore`, and WAL-reset-and-resume-apply logic — comparable in
+size to M3's vendored-shm work. `ROADMAP.md`'s own text already flagged the
+snapshot-cut wiring as "(optional coupling)," and M4 had already deferred
+snapshot mechanics entirely (`SnapshotThreshold` set high specifically to avoid
+triggering it). The M5 "done when" bar — leadership churn never produces a torn
+WAL, a lost update, or a stale-state leader serving writes — doesn't need
+InstallSnapshot to be met; a node that's merely apply-behind (not log-behind)
+catches up via normal replication, which small/moderate-log clusters never
+exceed.
+
+**Consequence.** `raft.FSM.Snapshot`/`Restore` stay stubbed and
+`internal/node`'s `SnapshotThreshold` stays high through M5; a follower that
+falls far enough behind to need a real snapshot isn't handled until M6.

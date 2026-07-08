@@ -110,12 +110,16 @@ func shutdownCluster(nodes []*testNode) {
 	}
 }
 
+// waitForLeader waits for a leader that has also finished its M5
+// gaining-leadership drain (Gate.Ready), i.e. one that's actually ready to
+// accept a proposal -- not just one hraft currently reports as State() ==
+// Leader, which can be true for a moment before the drain completes.
 func waitForLeader(nodes []*testNode) *testNode {
 	GinkgoHelper()
 	var leader *testNode
 	Eventually(func() bool {
 		for _, n := range nodes {
-			if n.raft.State() == hraft.Leader {
+			if n.raft.State() == hraft.Leader && n.gate.Ready() {
 				leader = n
 				return true
 			}

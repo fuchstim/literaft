@@ -67,12 +67,16 @@ func (h *clusterHarness) shutdown() {
 	}
 }
 
+// leader waits for a node that's both the raft leader and Ready (docs' M5
+// gaining-leadership drain) -- callers immediately issue writes against the
+// result, which would otherwise race the drain and fail with a
+// raftadapter.CatchingUpError.
 func (h *clusterHarness) leader() *node.Node {
 	GinkgoHelper()
 	var leader *node.Node
 	Eventually(func() bool {
 		for _, n := range h.nodes {
-			if n.Raft().State() == hraft.Leader {
+			if n.Raft().State() == hraft.Leader && n.Ready() {
 				leader = n
 				return true
 			}

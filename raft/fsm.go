@@ -29,21 +29,23 @@ type Materializer interface {
 // "self-pending" before calling hraft's Apply; this FSM's Apply consumes
 // that marker and skips materialization for exactly that entry.
 //
-// M4-scoped limitation: this assumes a freshly-leading node has no apply
-// backlog when it starts accepting local proposals (true for the bootstrap
-// / small-cluster scenarios M4 targets). The general fix -- drain
-// lastApplied == commitIndex before opening the gate on a new leader -- is
-// docs/ROADMAP.md M5 ("gaining leadership"); see docs/DESIGN.md §conflicts.
-// Without that drain, a backlog entry could be wrongly treated as
-// self-originated (skipped, losing data) or vice versa. Concretely: a node
-// can accumulate exactly this kind of backlog against itself, with no other
-// leader involved, via hraft's Figure-8 rule -- an entry it appended while
-// leader but never got committed (e.g. it lost leadership mid-proposal, the
-// scenario Gate.Propose's ambiguous-commit error covers) can be retroactively
-// committed later, once it regains leadership and a *subsequent* entry in
-// its new term commits and covers it. If that regained-leadership node's
-// next self-proposal starts before its own FSM has caught up through that
-// stale entry, the self-pending flag can attach to the wrong one.
+// That boolean marker is only safe because Gate never lets a *new*
+// self-proposal start until it has proven there's no leftover backlog from
+// an earlier leadership stint (docs/ROADMAP.md M5 "gaining leadership",
+// implemented by Gate.drain). Without that drain, a node could accumulate
+// backlog against itself, with no other leader involved, via hraft's
+// Figure-8 rule: an entry it appended while leader but never got committed
+// (e.g. it lost leadership mid-proposal, the scenario Gate.Propose's
+// ambiguous-commit error covers) can be retroactively committed later, once
+// it regains leadership and a *subsequent* entry in its new term commits
+// and covers it. If a regained-leadership node's next self-proposal started
+// before its own FSM had caught up through that stale entry, the
+// self-pending flag could attach to the wrong one (dropping the stale
+// entry, or double-materializing the new one). Gate.drain closes this gap
+// structurally: the stale entry necessarily has a lower log index than the
+// drain's own barrier, so it is always applied *during* the drain, while
+// the gate is still closed and no self-proposal can be racing for the
+// marker. See docs/DESIGN.md §conflicts.
 type FSM struct {
 	materializer Materializer
 
@@ -104,18 +106,18 @@ func (f *FSM) Apply(log *hraft.Log) interface{} {
 
 // Snapshot implements hraft.FSM. Snapshot-based log compaction and
 // very-behind-follower catch-up (InstallSnapshot) are deferred to
-// docs/ROADMAP.md M5; node wiring configures hraft to avoid triggering this
-// in normal M4 operation (high SnapshotThreshold/SnapshotInterval).
+// docs/ROADMAP.md M6; node wiring configures hraft to avoid triggering this
+// in normal M4/M5 operation (high SnapshotThreshold/SnapshotInterval).
 // Returning an error here -- rather than a snapshot of nothing -- means a
 // forced snapshot attempt fails loudly instead of silently discarding state.
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
-	return nil, errors.New("raft: snapshotting not implemented yet (docs/ROADMAP.md M5)")
+	return nil, errors.New("raft: snapshotting not implemented yet (docs/ROADMAP.md M6)")
 }
 
 // Restore implements hraft.FSM. See Snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	rc.Close()
-	return errors.New("raft: snapshot restore not implemented yet (docs/ROADMAP.md M5)")
+	return errors.New("raft: snapshot restore not implemented yet (docs/ROADMAP.md M6)")
 }
 
 var _ hraft.FSM = (*FSM)(nil)

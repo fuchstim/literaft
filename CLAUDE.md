@@ -79,12 +79,15 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 
 ## Current status & milestone
 
-**M0–M4 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
-compatibility, commit-frame gate, vendored shm + follower apply, and real
-`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`) — a
-multi-node cluster replicates writes, followers serve reads, and
-killing/adding nodes converges. Current work is **Milestone 5** (role
-transitions and the hard orderings around leadership change).
+**M0–M5 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
+compatibility, commit-frame gate, vendored shm + follower apply, real
+`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), and
+the leadership-churn ordering work — a multi-node cluster replicates writes,
+followers serve reads, killing/adding nodes converges, and a node that regains
+leadership with an apply backlog drains it (`raft.Gate`'s `Ready`/`Barrier`
+drain) before serving local writes again. Current work is **Milestone 6**
+(InstallSnapshot for very-behind followers; split out of the original M5 scope
+— see `docs/DECISIONS.md` ADR-010).
 
 **Scope decision for now:** *reject all follower-originated writes.* A client
 write that lands on a follower returns an error with a leader hint; the client
