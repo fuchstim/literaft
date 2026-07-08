@@ -72,15 +72,22 @@ func run() error {
 	// and shut down immediately instead of waiting for stdin to produce
 	// another line. A REPL goroutine left blocked on stdin in that case dies
 	// with the process, same as any other in-flight work at signal time.
-	replDone := make(chan struct{})
+	replDone := make(chan bool, 1)
 	go func() {
-		defer close(replDone)
-		runREPL(n, os.Stdin, os.Stdout)
+		replDone <- runREPL(n, os.Stdin, os.Stdout)
 	}()
 
+	// Only an explicit .exit/.quit means "shut this node down now". A bare
+	// EOF (runREPL's doc comment: stdin from /dev/null under a headless
+	// launch, or a piped script finishing) must not stop a node that's
+	// still supposed to serve raft traffic and reads -- fall back to
+	// waiting on a real signal instead.
 	select {
 	case <-sigCh:
-	case <-replDone:
+	case explicitExit := <-replDone:
+		if !explicitExit {
+			<-sigCh
+		}
 	}
 
 	fmt.Fprintln(os.Stderr, "literaft: shutting down")

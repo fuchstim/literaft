@@ -5,11 +5,20 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	hraft "github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 
 	"github.com/fuchstim/literaft/internal/node"
 )
+
+// addVoterTimeout bounds how long ".addvoter" waits for hraft's own
+// raft.AddVoter to commit the configuration-change log entry -- not for the
+// new voter to finish catching up afterward, which happens asynchronously
+// via normal replication (or a snapshot install, docs/ROADMAP.md M6, if it's
+// too far behind).
+const addVoterTimeout = 10 * time.Second
 
 // runREPL runs an interactive SQL loop against n's kept-alive connection,
 // reading from in and writing prompts/results/errors to out, until in
@@ -19,12 +28,26 @@ import (
 // still draining its apply backlog, that write fails and the error is
 // printed rather than crashing the loop.
 //
+// It returns true if the user explicitly typed .exit/.quit, false if it
+// stopped because in reached EOF. Callers must treat those two differently:
+// a headless/daemonized launch (stdin redirected from /dev/null, as under
+// systemd or a detached background process) hits EOF on the very first
+// read, and a piped script (docs' `literaft ... < seed.sql`) hits it the
+// moment the script ends -- neither means "the operator wants this node
+// process to exit", only .exit/.quit does.
+//
 // A line is treated as a complete statement once its trimmed text ends in
 // ";" -- a deliberately simple heuristic (it doesn't parse strings or
 // comments, so a literal containing ";-- not a comment" would mis-trigger)
 // that's good enough for an ops/debug tool; anything fancier belongs in a
 // real SQL tokenizer, not here.
-func runREPL(n *node.Node, in io.Reader, out io.Writer) {
+//
+// One meta-command, ".addvoter <id> <address>", wraps hraft's own
+// raft.AddVoter (docs/ROADMAP.md M4's "join a running cluster" path) so an
+// operator can grow the cluster from the same session instead of a separate
+// tool. Like ".exit"/".quit" it must stand alone on its own line -- it's
+// recognized only when no SQL statement is being accumulated.
+func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
 	scanner := bufio.NewScanner(in)
 
 	var buf strings.Builder
@@ -34,12 +57,16 @@ func runREPL(n *node.Node, in io.Reader, out io.Writer) {
 		trimmed := strings.TrimSpace(line)
 
 		if buf.Len() == 0 {
-			switch trimmed {
-			case "":
+			switch {
+			case trimmed == "":
 				fmt.Fprint(out, "literaft> ")
 				continue
-			case ".exit", ".quit":
-				return
+			case trimmed == ".exit" || trimmed == ".quit":
+				return true
+			case trimmed == ".addvoter" || strings.HasPrefix(trimmed, ".addvoter "):
+				runAddVoter(n, trimmed, out)
+				fmt.Fprint(out, "literaft> ")
+				continue
 			}
 		}
 
@@ -58,6 +85,26 @@ func runREPL(n *node.Node, in io.Reader, out io.Writer) {
 	if buf.Len() > 0 {
 		fmt.Fprintln(out, "error: unexpected EOF mid-statement")
 	}
+	return false
+}
+
+// runAddVoter implements the REPL's ".addvoter <id> <address>" command. It
+// hands straight off to hraft's own raft.AddVoter, so it fails the same way
+// any other write does when this node isn't the leader.
+func runAddVoter(n *node.Node, line string, out io.Writer) {
+	fields := strings.Fields(line)
+	if len(fields) != 3 {
+		fmt.Fprintln(out, "usage: .addvoter <id> <address>")
+		return
+	}
+	id, addr := fields[1], fields[2]
+
+	err := n.Raft().AddVoter(hraft.ServerID(id), hraft.ServerAddress(addr), 0, addVoterTimeout).Error()
+	if err != nil {
+		fmt.Fprintln(out, "error:", err)
+		return
+	}
+	fmt.Fprintln(out, "OK")
 }
 
 // runStatements runs every statement in sql in turn (one input can hold
