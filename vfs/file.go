@@ -216,7 +216,22 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 		f.headerPgno = nil
 		f.dataOffsets = nil
 		f.txnDone = false
-		return 0, sqlite3.IOERR_WRITE
+		// Wrap, don't discard: gate.Propose can return a *NotLeaderError
+		// (with a leader-redirect hint, docs/DESIGN.md's client-redirect
+		// flow) or a CatchingUpError, and a bare result code would lose that
+		// distinction. sqlite3vfs.SystemError attaches err so it's reachable
+		// via errors.As from whatever wraps this return value -- but it is
+		// NOT a reliable channel by itself: SQLite's own automatic rollback
+		// after a failed commit makes further, successful VFS calls before
+		// conn.Exec/Stmt.Step returns to Go, and each one clears the single
+		// slot this detail travels through (ncruces' wrp.SysError), win or
+		// lose. Confirmed empirically -- a real Exec-driven commit failure
+		// reliably loses it before the caller ever sees it. Gate.LastRejection
+		// is the mechanism a caller should actually use to recover which
+		// error this was; this wrap is attempted anyway since it's free and
+		// occasionally survives (e.g. paths that don't trigger an automatic
+		// rollback), never because it can be relied on alone.
+		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
 	}
 
 	// headerPgno/dataOffsets stay alive: walRewriteChecksums, if it runs,

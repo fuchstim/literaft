@@ -47,6 +47,9 @@ type Gate struct {
 	timeout time.Duration
 	ready   atomic.Bool
 
+	lastErrMu sync.Mutex
+	lastErr   error
+
 	stop      chan struct{}
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -157,7 +160,23 @@ func (g *Gate) drain(term uint64) {
 // error here, which vfs/file.go turns into an IOERR_WRITE, leaving no valid
 // commit frame on disk (docs/CLAUDE.md "Ambiguous commit"; already exercised
 // by the M2 abort-path tests).
+//
+// The concrete error is also recorded for LastRejection: vfs/file.go's own
+// attempt to preserve it through sqlite3vfs.SystemError doesn't reliably
+// survive the round trip back through *sqlite3.Conn.Exec/Stmt.Step (SQLite's
+// own automatic rollback after a failed commit makes further, successful VFS
+// calls that clear it first), so a caller that holds this Gate directly --
+// e.g. a future client-redirect layer, docs/DESIGN.md's "the client
+// redirects" -- has a reliable way to recover which error this was.
 func (g *Gate) Propose(e vfs.Entry) error {
+	err := g.propose(e)
+	g.lastErrMu.Lock()
+	g.lastErr = err
+	g.lastErrMu.Unlock()
+	return err
+}
+
+func (g *Gate) propose(e vfs.Entry) error {
 	if g.raft.State() != hraft.Leader {
 		leader, _ := g.raft.LeaderWithID()
 		return &NotLeaderError{Leader: leader}
@@ -183,6 +202,14 @@ func (g *Gate) Propose(e vfs.Entry) error {
 		}
 	}
 	return nil
+}
+
+// LastRejection returns the error from the most recently completed Propose
+// call (nil if that call succeeded, or if Propose has never been called).
+func (g *Gate) LastRejection() error {
+	g.lastErrMu.Lock()
+	defer g.lastErrMu.Unlock()
+	return g.lastErr
 }
 
 var _ vfs.Gate = (*Gate)(nil)

@@ -205,6 +205,31 @@ var _ = Describe("Gate", func() {
 		Expect(hint).NotTo(BeEmpty())
 	})
 
+	// vfs/file.go's own attempt to preserve gate.Propose's concrete error
+	// through sqlite3vfs.SystemError doesn't reliably survive the round trip
+	// back through *sqlite3.Conn.Exec/Stmt.Step (confirmed empirically:
+	// SQLite's automatic rollback after a failed commit clears it first), so
+	// LastRejection is the mechanism a caller holding the Gate directly (a
+	// future client-redirect layer) should actually use.
+	It("exposes the most recent rejection via LastRejection, clearing it on the next success", func() {
+		nodes := newCluster(2)
+		defer shutdownCluster(nodes)
+		leader := waitForLeader(nodes)
+		follower := otherThan(nodes, leader)
+
+		Expect(follower.gate.LastRejection()).To(BeNil(), "no proposal attempted yet")
+
+		err := follower.gate.Propose(vfs.Entry{Frames: []vfs.Frame{{Pgno: 1, Page: []byte("x")}}, NTruncate: 1})
+		Expect(err).To(HaveOccurred())
+		var notLeader *raftadapter.NotLeaderError
+		Expect(errors.As(follower.gate.LastRejection(), &notLeader)).To(BeTrue(),
+			"LastRejection must return the same concrete error Propose returned")
+
+		entry := vfs.Entry{Frames: []vfs.Frame{{Pgno: 1, Page: []byte("hello")}}, NTruncate: 1}
+		proposer := proposeOnCurrentLeader(nodes, entry)
+		Expect(proposer.gate.LastRejection()).To(BeNil(), "a successful proposal must clear the previous rejection")
+	})
+
 	It("commits a leader's proposal without the leader materializing its own entry, while the follower does", func() {
 		nodes := newCluster(2)
 		defer shutdownCluster(nodes)
