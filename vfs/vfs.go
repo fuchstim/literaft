@@ -31,9 +31,22 @@ func Register(name string, base sqlite3vfs.VFS) {
 // RegisterGate is like Register but lets the caller supply the gate that
 // decides whether each write transaction's commit frame may be published.
 // RAFT integration (M4) will supply the real one; tests use it to exercise
-// the abort branch.
+// the abort branch. Page size isn't enforced (see RegisterGatePageSize).
 func RegisterGate(name string, base sqlite3vfs.VFS, gate Gate) {
 	sqlite3vfs.Register(name, WrapGate(base, gate))
+}
+
+// RegisterGatePageSize is like RegisterGate but also enforces CLAUDE.md's
+// "fixed cluster-wide page size" invariant on the leader write path: a
+// captured frame whose page image isn't exactly pageSize bytes is rejected
+// before ever reaching the gate/RAFT, rather than only being caught after
+// the fact on a follower (apply.Applier.Apply's own, later check). A literal
+// check "at open" isn't meaningful for a schema-less new database (nothing
+// to compare yet -- see apply/README.md's identical caveat for a different
+// piece of code), so this enforces on first write instead. pageSize == 0
+// disables the check.
+func RegisterGatePageSize(name string, base sqlite3vfs.VFS, gate Gate, pageSize uint32) {
+	sqlite3vfs.Register(name, WrapGatePageSize(base, gate, pageSize))
 }
 
 // Wrap wraps base with the M2 stub gate (AlwaysCommit). Every other
@@ -44,15 +57,22 @@ func Wrap(base sqlite3vfs.VFS) sqlite3vfs.VFS {
 
 // WrapGate wraps base to tag opened files by FileType and gate WAL commit
 // frames through gate. Every other operation is delegated to base
-// unchanged.
+// unchanged. Page size isn't enforced (see WrapGatePageSize).
 func WrapGate(base sqlite3vfs.VFS, gate Gate) sqlite3vfs.VFS {
-	return &VFS{base: base, gate: gate}
+	return WrapGatePageSize(base, gate, 0)
+}
+
+// WrapGatePageSize is like WrapGate but also enforces a fixed page size; see
+// RegisterGatePageSize.
+func WrapGatePageSize(base sqlite3vfs.VFS, gate Gate, pageSize uint32) sqlite3vfs.VFS {
+	return &VFS{base: base, gate: gate, pageSize: pageSize}
 }
 
 // VFS wraps a base sqlite3vfs.VFS. See package doc.
 type VFS struct {
-	base sqlite3vfs.VFS
-	gate Gate
+	base     sqlite3vfs.VFS
+	gate     Gate
+	pageSize uint32
 }
 
 var (
@@ -66,7 +86,7 @@ func (v *VFS) Open(name string, flags sqlite3vfs.OpenFlag) (sqlite3vfs.File, sql
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags), v.gate), flags, nil
+	return wrapFile(file, fileType(flags), v.gate, v.pageSize), flags, nil
 }
 
 // OpenFilename implements sqlite3vfs.VFSFilename.
@@ -75,7 +95,7 @@ func (v *VFS) OpenFilename(name *sqlite3vfs.Filename, flags sqlite3vfs.OpenFlag)
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags), v.gate), flags, nil
+	return wrapFile(file, fileType(flags), v.gate, v.pageSize), flags, nil
 }
 
 // Delete implements sqlite3vfs.VFS.

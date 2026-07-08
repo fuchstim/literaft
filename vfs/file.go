@@ -1,6 +1,8 @@
 package vfs
 
 import (
+	"fmt"
+
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
@@ -26,6 +28,13 @@ type File struct {
 	gate    Gate
 	pending *pendingFrame
 	capture []Frame
+
+	// pageSize enforces CLAUDE.md's "fixed cluster-wide page size" on
+	// captured page images, catching a mismatch on the leader before it's
+	// ever proposed to RAFT rather than only after a follower's
+	// apply.Applier.Apply rejects it post-commit. 0 disables the check
+	// (M0-M2's default registration, and any test not opting in).
+	pageSize uint32
 
 	// headerPgno and dataOffsets record, for the transaction currently
 	// accumulating in capture, which WAL offsets already hold a captured
@@ -85,8 +94,8 @@ type pendingFrame struct {
 	offset    int64
 }
 
-func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate) *File {
-	return &File{File: base, kind: kind, gate: gate}
+func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate, pageSize uint32) *File {
+	return &File{File: base, kind: kind, gate: gate, pageSize: pageSize}
 }
 
 // Kind reports which SQLite file this wraps.
@@ -182,6 +191,18 @@ func (f *File) writeFrameHeader(h frameHeader, p []byte, off int64) (int, error)
 func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	pending := f.pending
 	f.pending = nil
+
+	if f.pageSize != 0 && len(p) != int(f.pageSize) {
+		// Same reset as a gate rejection (writeFrameData's Propose-error
+		// branch below): this write is never captured or proposed, so
+		// leaving txnDone/headerPgno stale would expose the same
+		// same-offset-retry bypass fixed there.
+		f.headerPgno = nil
+		f.dataOffsets = nil
+		f.txnDone = false
+		err := fmt.Errorf("literaft: frame page image is %d bytes, want configured page size %d", len(p), f.pageSize)
+		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
+	}
 
 	if f.dataOffsets == nil {
 		f.dataOffsets = make(map[int64]int)

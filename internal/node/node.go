@@ -163,7 +163,7 @@ func Start(cfg Config) (*Node, error) {
 	}
 
 	gate := raftadapter.NewGate(r, fsm, cfg.ApplyTimeout)
-	vfs.RegisterGate(vfsName, sqlite3vfs.Find(""), gate)
+	vfs.RegisterGatePageSize(vfsName, sqlite3vfs.Find(""), gate, cfg.PageSize)
 
 	// Journal mode is already WAL (set persistently by the priming
 	// connection above; verified not to need re-setting per connection);

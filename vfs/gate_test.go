@@ -21,6 +21,17 @@ import (
 // branch on demand -- neither is possible through the package's default
 // AlwaysCommit registration used by the other test files.
 
+// pageSizeProbe returns SQLite's actual default page size by asking a
+// throwaway in-memory connection, rather than assuming a value (CLAUDE.md:
+// verify, don't assume).
+func pageSizeProbe() uint32 {
+	GinkgoHelper()
+	c, err := sqlite3.Open(":memory:")
+	Expect(err).NotTo(HaveOccurred())
+	defer c.Close()
+	return uint32(queryInt(c, "PRAGMA page_size"))
+}
+
 // spyGate records every proposal it sees (whether or not it's told to
 // reject it), so tests can inspect the captured frames independently of
 // whatever data ended up on disk.
@@ -232,5 +243,31 @@ var _ = Describe("commit-frame interception (M2)", func() {
 			"a same-shape retry must still be proposed (and rejected) rather than bypassing the gate")
 		Expect(len(gate.snapshot())).To(Equal(beforeRetry + 1))
 		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(0)))
+	})
+
+	// Page size enforcement (docs/CLAUDE.md: "fixed cluster-wide page size...
+	// enforce it at open") lives on the leader write path so a mismatch is
+	// rejected before ever reaching the gate/RAFT, not only after the fact
+	// on a follower's apply.Applier.Apply.
+	It("rejects a captured frame whose page size doesn't match the configured cluster page size", func() {
+		dir := GinkgoT().TempDir()
+		path := filepath.Join(dir, "pagesize.db")
+
+		gate := &spyGate{}
+		name := "literaft-pagesize-test"
+		// SQLite's actual page size will be its own default (verify, don't
+		// assume, per CLAUDE.md) -- registering with any different value
+		// guarantees a mismatch on the very first captured frame.
+		actual := pageSizeProbe()
+		raftvfs.RegisterGatePageSize(name, sqlite3vfs.Find(""), gate, actual+1)
+
+		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
+		Expect(err).NotTo(HaveOccurred())
+		defer c.Close()
+		Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
+		Expect(c.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+
+		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(HaveOccurred())
+		Expect(gate.snapshot()).To(BeEmpty(), "a page-size mismatch must never reach the gate")
 	})
 })
