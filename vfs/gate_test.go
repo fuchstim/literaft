@@ -170,4 +170,67 @@ var _ = Describe("commit-frame interception (M2)", func() {
 		Expect(queryInt(reopened, "SELECT count(*) FROM t")).To(Equal(int64(2)))
 		Expect(queryText(reopened, "PRAGMA integrity_check")).To(Equal("ok"))
 	})
+
+	// Regression test: writeFrameData used to set txnDone=true
+	// unconditionally, before gate.Propose's outcome was known, and never
+	// reset it on rejection. Since a rejected commit leaves mxFrame unmoved
+	// (docs/DESIGN.md: "the next txn overwrites cleanly... at the same
+	// offset"), a same-shape retry lands on the exact same WAL offset(s) and
+	// pgno(s) as the failed attempt -- which WriteAt's header branch would
+	// then mistake for SQLite's own synchronous walRewriteChecksums revisit
+	// of an already-approved transaction, writing the retry straight to disk
+	// without ever calling writeFrameHeader, capturing frames, or calling
+	// gate.Propose again.
+	It("still proposes a retry that repeats the exact same statement after a rejection", func() {
+		dir := GinkgoT().TempDir()
+		path := filepath.Join(dir, "retry.db")
+
+		gate := &spyGate{}
+		c := openGated(path, gate)
+		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+
+		const stmt = "INSERT INTO t (id, v) VALUES (1, 'a')"
+
+		gate.setReject(true)
+		Expect(c.Exec(stmt)).To(HaveOccurred())
+		gate.setReject(false)
+
+		beforeRetry := len(gate.snapshot())
+
+		// Same statement, same base state (the rejected txn never
+		// committed): SQLite recomputes the identical page images at the
+		// identical WAL offset, so a stale txnDone/headerPgno would wrongly
+		// match this as a checksum rewrite of the rejected attempt.
+		Expect(c.Exec(stmt)).To(Succeed())
+
+		afterRetry := gate.snapshot()
+		Expect(len(afterRetry)).To(Equal(beforeRetry+1),
+			"the retry must reach gate.Propose again, not bypass it as a stale checksum rewrite")
+		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(1)))
+	})
+
+	// The same bypass, but on what would be a follower: every rejection
+	// reason (including a plain "not the leader") leaves txnDone/headerPgno
+	// in the same stale state, so a second same-shape write attempt must
+	// still reach the gate and be rejected again -- never silently accepted
+	// with zero RAFT involvement (ADR-004/ADR-007: writes are leader-only).
+	It("still rejects a same-shape retry after a not-leader-style rejection, never accepting it locally", func() {
+		dir := GinkgoT().TempDir()
+		path := filepath.Join(dir, "follower-retry.db")
+
+		gate := &spyGate{}
+		c := openGated(path, gate)
+		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+
+		const stmt = "INSERT INTO t (id, v) VALUES (1, 'a')"
+
+		gate.setReject(true)
+		Expect(c.Exec(stmt)).To(HaveOccurred())
+
+		beforeRetry := len(gate.snapshot())
+		Expect(c.Exec(stmt)).To(HaveOccurred(),
+			"a same-shape retry must still be proposed (and rejected) rather than bypassing the gate")
+		Expect(len(gate.snapshot())).To(Equal(beforeRetry + 1))
+		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(0)))
+	})
 })

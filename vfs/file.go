@@ -64,7 +64,13 @@ type File struct {
 	// walFrames(), guarded by isCommit). Once txnDone is false, either the
 	// rewrite window is over (fresh offset, unrelated to any past pgno) or
 	// there never was one to begin with (rollback), so any offset match is
-	// coincidence, not evidence of a rewrite.
+	// coincidence, not evidence of a rewrite. This is why writeFrameData
+	// must reset both maps and txnDone the instant gate.Propose fails,
+	// rather than only on the next header write: a rejected commit's
+	// offsets (and possibly pgnos, by coincidence with a same-shape retry)
+	// are exactly as stale as a rolled-back transaction's, and the
+	// walRewriteChecksums window never opens for a transaction that never
+	// committed.
 	headerPgno  map[int64]uint32
 	dataOffsets map[int64]int
 	maxOffset   int64
@@ -192,16 +198,33 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 
 	entry := Entry{Frames: f.capture, NTruncate: pending.header.nTruncate}
 	f.capture = nil
+
+	if err := f.gate.Propose(entry); err != nil {
+		// Rejected: no walRewriteChecksums window opens for a transaction
+		// that never committed, so headerPgno/dataOffsets must not survive
+		// into the next write. Leaving txnDone true (and the old offsets
+		// keyed by their now-stale pgnos) would let a retry that happens to
+		// land on the same WAL offset with the same pgno -- exactly what
+		// docs/DESIGN.md promises happens on retry, since mxFrame never
+		// moved -- be mistaken for a same-transaction checksum rewrite and
+		// written straight through, bypassing capture and the gate
+		// entirely. That's not just a leader-side gate bypass: since the
+		// stale-match branch never calls gate.Propose again, it also skips
+		// the leader check, so a retried follower-local write could be
+		// silently accepted with zero RAFT involvement (violates
+		// ADR-004/ADR-007's writes-are-leader-only invariant).
+		f.headerPgno = nil
+		f.dataOffsets = nil
+		f.txnDone = false
+		return 0, sqlite3.IOERR_WRITE
+	}
+
 	// headerPgno/dataOffsets stay alive: walRewriteChecksums, if it runs,
 	// rewrites frame headers at these exact offsets next, still inside
 	// this same WriteAt sequence. txnDone marks that the next unseen (or
 	// pgno-mismatched) header offset belongs to a new transaction, safe
 	// to clear them for.
 	f.txnDone = true
-
-	if err := f.gate.Propose(entry); err != nil {
-		return 0, sqlite3.IOERR_WRITE
-	}
 
 	if _, err := f.File.WriteAt(pending.headerRaw[:], pending.offset); err != nil {
 		return 0, err
