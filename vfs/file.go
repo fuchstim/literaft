@@ -1,29 +1,120 @@
 package vfs
 
 import (
+	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 )
 
 // File wraps a base sqlite3vfs.File, tagging it with its FileType.
 //
-// Required File methods (Close/ReadAt/WriteAt/Truncate/Sync/Size/Lock/
-// Unlock/CheckReservedLock/SectorSize/DeviceCharacteristics) are promoted
-// unchanged from the embedded base. The optional capability interfaces
-// don't promote through an embedded interface, so each is forwarded
-// explicitly below via vfsutil, mirroring the wrapping pattern used by
-// ncruces' own vfs/adiantum and vfs/xts.
+// Required File methods (Close/ReadAt/Truncate/Sync/Size/Lock/Unlock/
+// CheckReservedLock/SectorSize/DeviceCharacteristics) are promoted unchanged
+// from the embedded base. WriteAt is overridden below to intercept the
+// commit frame on the WAL file (docs/DESIGN.md §write path). The optional
+// capability interfaces don't promote through an embedded interface, so
+// each is forwarded explicitly below via vfsutil, mirroring the wrapping
+// pattern used by ncruces' own vfs/adiantum and vfs/xts.
 type File struct {
 	sqlite3vfs.File
 	kind FileType
+
+	// WAL commit-frame interception (FileTypeWAL only). pending holds a
+	// frame header already parsed but not yet paired with its page-image
+	// write; capture accumulates (pgno, page) pairs for the write
+	// transaction currently in flight on this file.
+	gate    Gate
+	pending *pendingFrame
+	capture []Frame
 }
 
-func wrapFile(base sqlite3vfs.File, kind FileType) *File {
-	return &File{File: base, kind: kind}
+// pendingFrame is a frame header seen by writeFrameHeader, held until the
+// paired page-image write arrives at writeFrameData.
+type pendingFrame struct {
+	header    frameHeader
+	headerRaw [frameHeaderSize]byte
+	offset    int64
+}
+
+func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate) *File {
+	return &File{File: base, kind: kind, gate: gate}
 }
 
 // Kind reports which SQLite file this wraps.
 func (f *File) Kind() FileType { return f.kind }
+
+// WriteAt implements sqlite3vfs.File. On the WAL file it intercepts the
+// commit frame; every other file, and every non-frame WAL write, passes
+// straight through (docs/DESIGN.md §write path, docs/WAL_FORMAT.md).
+func (f *File) WriteAt(p []byte, off int64) (int, error) {
+	if f.kind != FileTypeWAL {
+		return f.File.WriteAt(p, off)
+	}
+
+	switch {
+	case f.pending != nil:
+		return f.writeFrameData(p, off)
+	case len(p) == frameHeaderSize:
+		return f.writeFrameHeader(p, off)
+	default:
+		// The 32-byte WAL header, or any other write outside the normal
+		// frame-header/frame-data cadence: not a frame boundary we
+		// intercept.
+		return f.File.WriteAt(p, off)
+	}
+}
+
+// writeFrameHeader records a just-seen frame header. A non-commit frame is
+// written straight through immediately (docs/DESIGN.md §write path step 2,
+// non-commit frames are safe to write through). The commit frame is held
+// back until writeFrameData resolves the gate.
+func (f *File) writeFrameHeader(p []byte, off int64) (int, error) {
+	h := parseFrameHeader(p)
+
+	if !h.isCommit() {
+		if n, err := f.File.WriteAt(p, off); err != nil {
+			return n, err
+		}
+	}
+
+	pending := &pendingFrame{header: h, offset: off}
+	copy(pending.headerRaw[:], p)
+	f.pending = pending
+	return len(p), nil
+}
+
+// writeFrameData completes the pending frame with its page image. For a
+// non-commit frame it just passes the write through and extends the
+// capture buffer. For the commit frame it proposes the whole captured
+// transaction to the gate, then either releases the withheld header and
+// this write to disk, or, on gate failure, discards both -- so a rejected
+// transaction never leaves a valid commit frame on disk (docs/DESIGN.md
+// §write path steps 3-5).
+func (f *File) writeFrameData(p []byte, off int64) (int, error) {
+	pending := f.pending
+	f.pending = nil
+
+	f.capture = append(f.capture, Frame{
+		Pgno: pending.header.pgno,
+		Page: append([]byte(nil), p...),
+	})
+
+	if !pending.header.isCommit() {
+		return f.File.WriteAt(p, off)
+	}
+
+	entry := Entry{Frames: f.capture, NTruncate: pending.header.nTruncate}
+	f.capture = nil
+
+	if err := f.gate.Propose(entry); err != nil {
+		return 0, sqlite3.IOERR_WRITE
+	}
+
+	if _, err := f.File.WriteAt(pending.headerRaw[:], pending.offset); err != nil {
+		return 0, err
+	}
+	return f.File.WriteAt(p, off)
+}
 
 var (
 	_ sqlite3vfs.File                   = (*File)(nil)

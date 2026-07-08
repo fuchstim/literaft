@@ -22,21 +22,37 @@ func init() {
 	Register(Name, sqlite3vfs.Find(""))
 }
 
-// Register wraps base and registers it under name, so it can be selected
-// with "?vfs=<name>" in a SQLite URI DSN.
+// Register wraps base with the M2 stub gate (AlwaysCommit) and registers it
+// under name, so it can be selected with "?vfs=<name>" in a SQLite URI DSN.
 func Register(name string, base sqlite3vfs.VFS) {
-	sqlite3vfs.Register(name, Wrap(base))
+	RegisterGate(name, base, AlwaysCommit)
 }
 
-// Wrap wraps base to tag opened files by FileType. Every other operation is
-// delegated to base unchanged.
+// RegisterGate is like Register but lets the caller supply the gate that
+// decides whether each write transaction's commit frame may be published.
+// RAFT integration (M4) will supply the real one; tests use it to exercise
+// the abort branch.
+func RegisterGate(name string, base sqlite3vfs.VFS, gate Gate) {
+	sqlite3vfs.Register(name, WrapGate(base, gate))
+}
+
+// Wrap wraps base with the M2 stub gate (AlwaysCommit). Every other
+// operation is delegated to base unchanged.
 func Wrap(base sqlite3vfs.VFS) sqlite3vfs.VFS {
-	return &VFS{base: base}
+	return WrapGate(base, AlwaysCommit)
+}
+
+// WrapGate wraps base to tag opened files by FileType and gate WAL commit
+// frames through gate. Every other operation is delegated to base
+// unchanged.
+func WrapGate(base sqlite3vfs.VFS, gate Gate) sqlite3vfs.VFS {
+	return &VFS{base: base, gate: gate}
 }
 
 // VFS wraps a base sqlite3vfs.VFS. See package doc.
 type VFS struct {
 	base sqlite3vfs.VFS
+	gate Gate
 }
 
 var (
@@ -50,7 +66,7 @@ func (v *VFS) Open(name string, flags sqlite3vfs.OpenFlag) (sqlite3vfs.File, sql
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags)), flags, nil
+	return wrapFile(file, fileType(flags), v.gate), flags, nil
 }
 
 // OpenFilename implements sqlite3vfs.VFSFilename.
@@ -59,7 +75,7 @@ func (v *VFS) OpenFilename(name *sqlite3vfs.Filename, flags sqlite3vfs.OpenFlag)
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags)), flags, nil
+	return wrapFile(file, fileType(flags), v.gate), flags, nil
 }
 
 // Delete implements sqlite3vfs.VFS.
