@@ -98,9 +98,6 @@ func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate, pageSize uint32) *
 	return &File{File: base, kind: kind, gate: gate, pageSize: pageSize}
 }
 
-// Kind reports which SQLite file this wraps.
-func (f *File) Kind() FileType { return f.kind }
-
 // WriteAt implements sqlite3vfs.File. On the WAL file it intercepts the
 // commit frame; every other file, and every non-frame WAL write, passes
 // straight through (docs/DESIGN.md §write path, docs/WAL_FORMAT.md).

@@ -132,6 +132,14 @@ func (f *FSM) takeSelfApply() bool {
 // has no safe way to keep participating, so it must stop the process instead
 // of limping on with corrupted state.
 func (f *FSM) Apply(log *hraft.Log) interface{} {
+	// Defensive, not load-bearing against the real library: hraft's own
+	// applySingle only ever calls FSM.Apply for LogCommand entries (verified
+	// against vendor/github.com/hashicorp/raft/fsm.go) -- LogBarrier and
+	// LogConfiguration entries never reach here at all. That's actually
+	// load-bearing context for Gate.drain's ordering argument: a Barrier's
+	// future resolves without ever touching the self-apply marker below,
+	// which is what lets drain distinguish "the barrier itself completed"
+	// from "an entry got materialized."
 	if log.Type != hraft.LogCommand {
 		return nil
 	}
