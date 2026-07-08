@@ -264,6 +264,15 @@ func (n *Node) WithDB(fn func(*sqlite3.Conn) error) error { return n.backend.Wit
 // just retry shortly.
 func (n *Node) Ready() bool { return n.gate.Ready() }
 
+// LastWriteError returns the concrete error from this node's most recently
+// completed write proposal (nil if it succeeded, or if none has been made
+// yet). raft.Gate.Propose's doc comment notes that this distinction --
+// specifically, a *raftadapter.NotLeaderError or CatchingUpError -- doesn't
+// reliably survive the round trip back through *sqlite3.Conn/*sqlite3.Stmt,
+// which by then may report only a generic IOERR_WRITE; this is the reliable
+// way for a caller like the REPL to recover which error it actually was.
+func (n *Node) LastWriteError() error { return n.gate.LastRejection() }
+
 // VFSName returns the name this node registered its literaft VFS instance
 // under.
 func (n *Node) VFSName() string { return n.vfsName }

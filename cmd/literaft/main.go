@@ -1,7 +1,8 @@
 // Command literaft runs one node process: a real hraft cluster member
 // serving a RAFT-replicated SQLite database (docs/ROADMAP.md M4). Wiring
-// lives in internal/node; this is just the flag parsing and process
-// lifecycle around it.
+// lives in internal/node; this is the flag parsing and process lifecycle
+// around it, plus an interactive SQL REPL (repl.go) on stdin/stdout for
+// exercising a running node by hand.
 package main
 
 import (
@@ -65,7 +66,22 @@ func run() error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
+
+	// runREPL blocks reading os.Stdin, which can't be interrupted directly;
+	// running it in its own goroutine lets a signal on sigCh win the race
+	// and shut down immediately instead of waiting for stdin to produce
+	// another line. A REPL goroutine left blocked on stdin in that case dies
+	// with the process, same as any other in-flight work at signal time.
+	replDone := make(chan struct{})
+	go func() {
+		defer close(replDone)
+		runREPL(n, os.Stdin, os.Stdout)
+	}()
+
+	select {
+	case <-sigCh:
+	case <-replDone:
+	}
 
 	fmt.Fprintln(os.Stderr, "literaft: shutting down")
 	return n.Shutdown()
