@@ -184,6 +184,14 @@ Recommended PRAGMAs on every connection: `journal_mode=WAL`,
 `synchronous=NORMAL` (durability comes from the RAFT quorum, not local fsync —
 see `docs/DESIGN.md §durability`).
 
+**Reading Go package source.** When you need to read the source of a
+dependency (e.g. `github.com/ncruces/go-sqlite3`), read it from the local
+`./vendor/` directory, not the system-wide Go module cache
+(`$GOPATH/pkg/mod`). `./vendor/` is a plain `go mod vendor` mirror of the full
+dependency tree kept around locally for exactly this purpose — refresh it
+with `go mod vendor` if it looks stale rather than falling back to the module
+cache.
+
 ---
 
 ## Top gotchas (bite-marks from the design discussion)
