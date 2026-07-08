@@ -50,14 +50,16 @@ const (
 // since Conn.Close on the WASM-backed driver frees the connection's linear
 // memory). WithDB replaces DB(): it holds connMu for the whole call instead
 // of just a field read, so Restore (which takes connMu exclusively) always
-// waits for in-flight users to finish before closing keeper. A plain
-// Mutex would also work but would serialize every statement behind
-// Snapshot/Restore; RWMutex lets concurrent WithDB callers proceed
-// (multiple RLock holders), only blocking on the rare Restore.
+// waits for in-flight users to finish before closing keeper. connMu is a
+// plain Mutex, not an RWMutex: a *sqlite3.Conn is not safe for concurrent
+// goroutine use (ncruces/go-sqlite3's own doc on Conn -- the same reason
+// checkpointer was split from keeper in the first place), so two concurrent
+// WithDB callers must never both be running fn(keeper) at once, only ever
+// serialized behind each other and behind Restore.
 type dbBackend struct {
 	mu sync.Mutex
 
-	connMu sync.RWMutex
+	connMu sync.Mutex
 	keeper *sqlite3.Conn
 
 	cfg     Config
@@ -88,11 +90,12 @@ func (b *dbBackend) Apply(e vfs.Entry) error {
 }
 
 // WithDB runs fn with the kept-alive RW connection client writes should
-// use, held safe from a concurrent Restore closing/replacing it out from
-// under fn for the whole call (see dbBackend's doc comment).
+// use, held safe both from a concurrent Restore closing/replacing it out
+// from under fn and from a second, concurrent WithDB caller running fn on
+// the same *sqlite3.Conn at the same time (see dbBackend's doc comment).
 func (b *dbBackend) WithDB(fn func(*sqlite3.Conn) error) error {
-	b.connMu.RLock()
-	defer b.connMu.RUnlock()
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
 	return fn(b.keeper)
 }
 

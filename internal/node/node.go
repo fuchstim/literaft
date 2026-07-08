@@ -250,7 +250,10 @@ func (n *Node) Raft() *hraft.Raft { return n.raft }
 // fire on a follower serving reads/writes at any time) closes and replaces
 // this connection, and WithDB's lock is what makes that safe -- a
 // previous DB() *sqlite3.Conn accessor let the pointer escape unprotected,
-// which ginkgo -race caught as a genuine use-after-free.
+// which ginkgo -race caught as a genuine use-after-free. That same lock also
+// serializes concurrent WithDB callers against each other, not just against
+// Restore: a *sqlite3.Conn is not safe for concurrent goroutine use, so two
+// callers can never both be running fn on this connection at once.
 func (n *Node) WithDB(fn func(*sqlite3.Conn) error) error { return n.backend.WithDB(fn) }
 
 // Ready reports whether this node is currently the raft leader and has
