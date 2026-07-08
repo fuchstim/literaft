@@ -36,6 +36,17 @@ type File struct {
 	// (M0-M2's default registration, and any test not opting in).
 	pageSize uint32
 
+	// walPageSize is the page size actually in effect for this WAL, used to
+	// tell a frame header write from a page-image write by offset alone
+	// (walHeaderSize + n*(frameHeaderSize+walPageSize) is always a header).
+	// Unlike pageSize above it's never optional: it's read from the WAL
+	// header itself (docs/WAL_FORMAT.md) the first time it's needed, either
+	// because WriteAt just saw offset 0 written, or, lazily, straight off
+	// disk in isFrameHeaderOffset if this handle's own WriteAt never saw
+	// that write -- e.g. a connection reopening a WAL-mode db whose WAL a
+	// prior connection left non-empty on close. 0 until known.
+	walPageSize uint32
+
 	// headerPgno and dataOffsets record, for the transaction currently
 	// accumulating in capture, which WAL offsets already hold a captured
 	// frame's header (offset -> that frame's pgno) and page-image (offset
@@ -106,10 +117,21 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 		return f.File.WriteAt(p, off)
 	}
 
+	if off == 0 {
+		// The WAL header (docs/WAL_FORMAT.md) -- the only thing ever
+		// written at offset 0 of a WAL file. Captured, never intercepted:
+		// it's what isFrameHeaderOffset needs to locate frame boundaries by
+		// offset for the rest of this WAL epoch.
+		if len(p) >= 12 {
+			f.walPageSize = walHeaderPageSize(p)
+		}
+		return f.File.WriteAt(p, off)
+	}
+
 	switch {
 	case f.pending != nil:
 		return f.writeFrameData(p, off)
-	case len(p) == frameHeaderSize:
+	case f.isFrameHeaderOffset(off):
 		h := parseFrameHeader(p)
 		if f.txnDone {
 			// walRewriteChecksums only ever runs synchronously right
@@ -154,6 +176,24 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 		}
 		return f.File.WriteAt(p, off)
 	}
+}
+
+// isFrameHeaderOffset reports whether off is where a frame header must
+// start, per the WAL's fixed frame layout: walHeaderSize +
+// n*(frameHeaderSize+page size), n = 0, 1, 2, ... (docs/WAL_FORMAT.md). It
+// resolves walPageSize lazily via a direct read of the underlying file's own
+// header if this handle's WriteAt has never seen offset 0 written -- true
+// for the very first WAL write of a freshly created/reset WAL, but not for a
+// connection that reopens a WAL a prior connection left non-empty.
+func (f *File) isFrameHeaderOffset(off int64) bool {
+	if f.walPageSize == 0 {
+		var hdr [12]byte
+		if _, err := f.File.ReadAt(hdr[:], 0); err != nil {
+			return false
+		}
+		f.walPageSize = walHeaderPageSize(hdr[:])
+	}
+	return off >= walHeaderSize && (off-walHeaderSize)%(frameHeaderSize+int64(f.walPageSize)) == 0
 }
 
 // writeFrameHeader records a just-seen, already-parsed frame header. A
