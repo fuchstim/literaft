@@ -68,6 +68,13 @@ func (a *Applier) Close() error {
 // two-copy header write (docs/DESIGN.md §follower-apply steps 1-5). Apply
 // takes WAL_WRITE_LOCK for its own duration and releases it before
 // returning, whether it succeeds or fails.
+//
+// A wal-index header with pageSize == 0 is treated as uninitialized (see
+// bootstrap) even though it otherwise looks structurally valid: real
+// SQLite can leave exactly this behind for a WAL-mode db that's had
+// journal_mode=WAL enabled but never had an actual write transaction, and
+// trusting it would chain every frame's checksum from a salt real readers
+// never see written into the -wal file's own header.
 func (a *Applier) Apply(e raftvfs.Entry) error {
 	if err := a.shm.Lock(shm.WriteLock); err != nil {
 		return fmt.Errorf("apply: acquiring WAL_WRITE_LOCK: %w", err)
@@ -80,6 +87,18 @@ func (a *Applier) Apply(e raftvfs.Entry) error {
 	}
 
 	hdr, ok := readHeader(region0)
+	// A WAL-mode db that's had journal_mode=WAL enabled but never had an
+	// actual write transaction can leave a structurally valid, "init"
+	// wal-index header behind (real SQLite's own doing, establishing the
+	// header lazily on connect) whose pageSize/salt were never actually
+	// populated -- a real header with none of the real content, distinct
+	// from readHeader's own "freshly zeroed region" case. Trusting it as-is
+	// would make every applied frame carry a zero salt while the -wal
+	// file's own on-disk header is never written (bootstrap never runs),
+	// which readers reject outright. Treat it the same as uninitialized.
+	if ok && hdr.pageSize == 0 {
+		ok = false
+	}
 	if !ok {
 		hdr, err = a.bootstrap()
 		if err != nil {

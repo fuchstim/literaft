@@ -79,8 +79,12 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 
 ## Current status & milestone
 
-**Greenfield.** Nothing is implemented yet. We are at **Milestone 0** (see
-`docs/ROADMAP.md`).
+**M0–M4 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
+compatibility, commit-frame gate, vendored shm + follower apply, and real
+`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`) — a
+multi-node cluster replicates writes, followers serve reads, and
+killing/adding nodes converges. Current work is **Milestone 5** (role
+transitions and the hard orderings around leadership change).
 
 **Scope decision for now:** *reject all follower-originated writes.* A client
 write that lands on a follower returns an error with a leader hint; the client
