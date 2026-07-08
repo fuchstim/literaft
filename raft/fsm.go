@@ -117,6 +117,20 @@ func (f *FSM) takeSelfApply() bool {
 }
 
 // Apply implements hraft.FSM.
+//
+// A decode or materialization failure panics rather than returning the error
+// as hraft's generic response value. hraft has no "apply failed, stop
+// advancing" concept: processLogs advances lastApplied unconditionally after
+// dispatching a batch, and every follower-received entry (plus any
+// retroactively-committed Figure-8 entry from an earlier leadership stint) is
+// applied with no local future to receive a response at all -- so a returned
+// error here is silently discarded forever, while lastApplied has already
+// moved past the entry that failed. Every later entry then applies on top of
+// a base state this node never actually reached, permanently and silently
+// diverging it from the cluster (CLAUDE.md: "apply must be strictly in-order
+// and gapless"). An FSM that can't apply a committed entry deterministically
+// has no safe way to keep participating, so it must stop the process instead
+// of limping on with corrupted state.
 func (f *FSM) Apply(log *hraft.Log) interface{} {
 	if log.Type != hraft.LogCommand {
 		return nil
@@ -126,10 +140,10 @@ func (f *FSM) Apply(log *hraft.Log) interface{} {
 	}
 	entry, err := DecodeEntry(log.Data)
 	if err != nil {
-		return fmt.Errorf("raft: decoding committed entry at index %d: %w", log.Index, err)
+		panic(fmt.Sprintf("raft: decoding committed entry at index %d: %v", log.Index, err))
 	}
 	if err := f.materializer.Apply(entry); err != nil {
-		return fmt.Errorf("raft: materializing entry at index %d: %w", log.Index, err)
+		panic(fmt.Sprintf("raft: materializing entry at index %d: %v", log.Index, err))
 	}
 	return nil
 }

@@ -18,15 +18,21 @@ import (
 
 // spyMaterializer records every entry passed to Apply, standing in for
 // apply.Applier so these tests don't need real WAL/shm files (raft.FSM
-// depends only on the raftadapter.Materializer interface).
+// depends only on the raftadapter.Materializer interface). failWith, if set,
+// makes Apply fail instead of recording -- for exercising FSM.Apply's
+// materialization-failure path directly (see fsm_test.go).
 type spyMaterializer struct {
-	mu      sync.Mutex
-	entries []vfs.Entry
+	mu       sync.Mutex
+	entries  []vfs.Entry
+	failWith error
 }
 
 func (m *spyMaterializer) Apply(e vfs.Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failWith != nil {
+		return m.failWith
+	}
 	m.entries = append(m.entries, e)
 	return nil
 }
