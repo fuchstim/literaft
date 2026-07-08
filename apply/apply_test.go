@@ -124,8 +124,13 @@ var _ = Describe("follower apply (M3)", func() {
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 2")).To(Equal("z"))
 		Expect(queryInt(follower, "SELECT count(*) FROM t WHERE id = 3")).To(Equal(int64(0)))
 
+		// Fail loudly, not skip: this re-runs M1's load-bearing
+		// external-reader check (CLAUDE.md/ROADMAP.md: "the whole premise
+		// depends on it") against an apply-built db specifically. A Skip
+		// here would let an environment missing the sqlite3 CLI pass
+		// quietly instead of surfacing that this claim was never checked.
 		if _, err := exec.LookPath("sqlite3"); err != nil {
-			Skip("stock sqlite3 CLI not found in PATH; required to re-run M1 against an apply-built db")
+			Fail("stock sqlite3 CLI not found in PATH; required to re-run M1 against an apply-built db")
 		}
 
 		check, err := externalRead(followerPath, "PRAGMA integrity_check")

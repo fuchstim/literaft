@@ -40,13 +40,21 @@ func init() {
 	sqlite3Path, _ = exec.LookPath("sqlite3")
 }
 
+// requireExternalSQLite fails loudly, rather than skipping, if this
+// environment can't run the external-reader compatibility checks: CLAUDE.md
+// and ROADMAP.md call M1 the single most load-bearing verification in the
+// project ("the whole premise depends on it... if this fails, stop"). A
+// Skip here would let a CI environment missing the sqlite3 CLI (or lacking
+// the file-locking/shared-memory support requirement #3 depends on) pass
+// quietly instead of surfacing that the one claim the whole architecture is
+// staked on was never actually checked.
 func requireExternalSQLite() {
 	GinkgoHelper()
 	if sqlite3Path == "" {
-		Skip("stock sqlite3 CLI not found in PATH; required for external-reader compatibility tests (ROADMAP.md M1)")
+		Fail("stock sqlite3 CLI not found in PATH; required for external-reader compatibility tests (ROADMAP.md M1)")
 	}
 	if !sqlite3vfs.SupportsFileLocking || !sqlite3vfs.SupportsSharedMemory {
-		Skip("platform lacks the file locking or shared memory support requirement #3 depends on")
+		Fail("platform lacks the file locking or shared memory support requirement #3 depends on")
 	}
 }
 
