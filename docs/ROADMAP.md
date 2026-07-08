@@ -166,6 +166,54 @@ size to M3's vendored-shm work.
 - Bench: leader write throughput ≈ 1 txn / RAFT round-trip; confirm batching
   multiple SQLite txns per entry raises it; read concurrency unaffected.
 
+## M8 — Library polish & packaging
+
+Cleanups and API-surface work identified while M7 hardening is underway.
+These don't block M7, but should land before literaft is embedded by
+anything outside this repo.
+
+- **`dbBackend.Snapshot` should use SQLite's online backup API, not a raw
+  file copy.** (`internal/node/backend.go`'s `Snapshot`) Copying
+  `b.cfg.DBPath` byte-for-byte after a `TRUNCATE` checkpoint works today
+  because the checkpoint lock is held across the whole call, but it leans on
+  a pre-checkpoint plus filesystem-level copy semantics rather than the
+  sanctioned way to get a point-in-time, self-consistent copy of a SQLite
+  database.
+- **`vfs/File` should translate `gate.Propose` errors into the right SQLite
+  result code**, not always `sqlite3.IOERR_WRITE` (`vfs/file.go`'s `xWrite`
+  commit branch, currently around line 292). A `CatchingUpError` (RAFT not
+  yet ready -- `raft/gate.go`'s `Ready`/drain) should surface as
+  `sqlite3.BUSY` so a client retries instead of treating it as a hard I/O
+  failure; `NotLeaderError` needs its own mapping so a client-side redirect
+  can tell it apart from both. Note the existing comment at
+  `vfs/file.go:277-291`: SQLite's automatic post-failure rollback already
+  destroys the one channel (`wrp.SysError`) this detail could otherwise ride
+  through, so `Gate.LastRejection` -- not the returned result code -- is the
+  reliable mechanism callers need; the result-code translation is still
+  worth doing for BUSY's retry semantics, but can't be the only fix.
+- **Collapse `raft.NewFSM` + `FSM.SetSnapshotter` into one constructor
+  call.** Currently `internal/node.Start` calls
+  `raft.NewFSM(materializer)` and then immediately
+  `fsm.SetSnapshotter(backend)` (`internal/node/node.go:137`).
+  `SetSnapshotter` exists as a separate step only because, in today's wiring
+  order, the snapshotter (the backend) doesn't exist yet at the point the
+  FSM needs constructing -- if that ordering constraint isn't real, fold it
+  into `NewFSM(materializer, snapshotter)` and delete the two-step API.
+- **Write a top-level `README.md`** covering how to actually use the
+  package: minimal example wiring a VFS + gate + FSM + backend into a
+  running node, the required PRAGMAs (CLAUDE.md's `journal_mode=WAL`,
+  `synchronous=NORMAL`), the leader-only write restriction and how a caller
+  sees/handles a not-leader rejection, and a pointer to `docs/` for the
+  design rationale. There's currently no repo-root README, only subpackage
+  ones (`apply/README.md`, `shm/README.md`, `cmd/literaft/README.md`).
+- **Export a `database/sql`-compatible driver** (registered via
+  `sql.Register`) that accepts an `hraft.Raft`, an `FSM`, page size, and
+  whatever other config `internal/node` currently wires up by hand, so
+  embedding literaft doesn't require reimplementing `internal/node`'s
+  plumbing. This is the natural point to decide which of `internal/node`'s
+  responsibilities (keep-alive RW connection, checkpoint driver, config
+  defaults) belong in the driver itself vs. stay caller-supplied.
+
 ---
 
 ## Deferred (do NOT build under current scope)

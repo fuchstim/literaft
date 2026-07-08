@@ -105,6 +105,44 @@ electable. That is the path that needs the copied SHM code (below).
 
 ---
 
+## GitHub workflow
+
+GitHub issues and milestones are the source of truth for outstanding work.
+`docs/ROADMAP.md` is a derived mirror kept only for easier AI consumption in
+this file's context — update it *from* GitHub, not the other way around.
+
+**GitHub ↔ roadmap mapping**
+
+- Each GH milestone maps to a roadmap section (`## M# — ...`) of the same
+  name; each GH issue under it maps to a bullet in that section (bullet text
+  = issue body). Every roadmap-tracked issue lives in project 3
+  (https://github.com/users/fuchstim/projects/3, repo `fuchstim/literaft`).
+  The "Deferred (out of current scope)" milestone maps to the roadmap's
+  "Deferred" section.
+- Status: the project's `Status` field is `Done` for completed items (issue
+  also closed) or `Backlog` otherwise — roadmap-derived issues only ever use
+  those two values. A milestone is closed once every issue under it is done.
+- **When GitHub issues/milestones change, update `docs/ROADMAP.md` in the
+  same pass:** a new issue becomes a new bullet, an edited issue body becomes
+  an edited bullet, an issue closed/marked `Done` gets reflected in the
+  bullet, a new milestone becomes a new `## M# — ...` section. Don't let the
+  two drift.
+- IDs for scripting this via `gh api`/`gh project`: project id
+  `PVT_kwHOATlZK84Bc32q`, `Status` field id `PVTSSF_lAHOATlZK84Bc32qzhXdftE`,
+  options `Backlog`=`f75ad846`, `Done`=`98236657`. `gh project item-edit`
+  passes single-select option IDs via `-f` (not `-F`) — `-F` auto-coerces a
+  numeric-looking ID into a JSON number and the mutation rejects it.
+
+**Implementing a ticket**
+
+- Check out a new branch before starting work on an issue — never commit
+  straight to `master`. Branch names are prefixed `tfuchs/` per the global git
+  convention (e.g. `tfuchs/m7-fault-injection`).
+- Open a PR against `master` that links back to the issue (e.g. `Closes #<n>`
+  in the PR body) so merging it auto-closes the issue.
+
+---
+
 ## Repo layout (proposed)
 
 ```
