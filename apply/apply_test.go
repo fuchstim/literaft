@@ -141,4 +141,66 @@ var _ = Describe("follower apply (M3)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rows).To(Equal("1|a\n2|z"))
 	})
+
+	// walindex.go's frameZero and hashTableOffsets both special-case
+	// wal-index page 0 (frames 1-4062, hashtableNPageOne) versus every later
+	// page, but the M3 test above only ever produces a handful of frames --
+	// never enough to actually exercise the page != 0 branches. A regression
+	// here (e.g. an off-by-one in hashtableNPageOne+(page-1)*hashtableNPage)
+	// would silently corrupt any sufficiently large apply, undetected.
+	It("replays enough frames to overflow wal-index page 0 into page 1", func() {
+		dir := GinkgoT().TempDir()
+
+		var entries []raftvfs.Entry
+		gateName := "literaft-apply-test-multipage"
+		raftvfs.RegisterGate(gateName, sqlite3vfs.Find(""), raftvfs.GateFunc(func(e raftvfs.Entry) error {
+			entries = append(entries, e)
+			return nil
+		}))
+
+		leaderPath := filepath.Join(dir, "leader-multipage.db")
+		leader, err := sqlite3.Open("file:" + leaderPath + "?vfs=" + gateName)
+		Expect(err).NotTo(HaveOccurred())
+		defer leader.Close()
+		Expect(leader.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
+		Expect(leader.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		Expect(leader.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+
+		const rows = 5000
+		for i := 0; i < rows; i++ {
+			Expect(leader.Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
+		}
+
+		var totalFrames int
+		for _, e := range entries {
+			totalFrames += len(e.Frames)
+		}
+		Expect(totalFrames).To(BeNumerically(">", 4062),
+			"test setup must produce enough frames to actually exercise wal-index page 1")
+
+		pageSize := queryInt(leader, "PRAGMA page_size")
+
+		followerPath := filepath.Join(dir, "follower-multipage.db")
+		keeper, err := sqlite3.Open("file:" + followerPath + "?vfs=literaft")
+		Expect(err).NotTo(HaveOccurred())
+		defer keeper.Close()
+		Expect(keeper.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
+
+		applier, err := apply.Open(followerPath, uint32(pageSize))
+		Expect(err).NotTo(HaveOccurred())
+		defer applier.Close()
+
+		for i, e := range entries {
+			Expect(applier.Apply(e)).To(Succeed(), "applying entry %d", i)
+		}
+
+		follower, err := sqlite3.Open("file:" + followerPath + "?vfs=literaft")
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryInt(follower, "SELECT count(*) FROM t")).To(Equal(int64(rows)))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal("row0"))
+		Expect(queryText(follower, fmt.Sprintf("SELECT v FROM t WHERE id = %d", rows))).To(Equal(fmt.Sprintf("row%d", rows-1)))
+	})
 })
