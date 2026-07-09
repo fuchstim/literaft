@@ -2,15 +2,14 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
-	hraft "github.com/hashicorp/raft"
+	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
-
-	"github.com/fuchstim/literaft/internal/node"
 )
 
 // addVoterTimeout bounds how long ".addvoter" waits for hraft's own
@@ -46,7 +45,7 @@ const addVoterTimeout = 10 * time.Second
 // instead of a separate tool. Like ".exit"/".quit" it must stand alone on
 // its own line -- it's recognized only when no SQL statement is being
 // accumulated.
-func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
+func runREPL(r *raft.Raft, db *sql.DB, in io.Reader, out io.Writer) bool {
 	scanner := bufio.NewScanner(in)
 
 	var buf strings.Builder
@@ -63,7 +62,7 @@ func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
 			case trimmed == ".exit" || trimmed == ".quit":
 				return true
 			case trimmed == ".addvoter" || strings.HasPrefix(trimmed, ".addvoter "):
-				runAddVoter(n, trimmed, out)
+				runAddVoter(r, trimmed, out)
 				fmt.Fprint(out, "literaft> ")
 				continue
 			}
@@ -77,7 +76,7 @@ func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
 			continue
 		}
 
-		runStatements(n, buf.String(), out)
+		runStatement(db, buf.String(), out)
 		buf.Reset()
 		fmt.Fprint(out, "literaft> ")
 	}
@@ -88,9 +87,9 @@ func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
 }
 
 // runAddVoter implements the REPL's ".addvoter <id> <address>" command. It
-// hands straight off to hraft's own raft.AddVoter, so it fails the same way
+// hands straight off to raft's own raft.AddVoter, so it fails the same way
 // any other write does when this node isn't the leader.
-func runAddVoter(n *node.Node, line string, out io.Writer) {
+func runAddVoter(r *raft.Raft, line string, out io.Writer) {
 	fields := strings.Fields(line)
 	if len(fields) != 3 {
 		fmt.Fprintln(out, "usage: .addvoter <id> <address>")
@@ -98,7 +97,7 @@ func runAddVoter(n *node.Node, line string, out io.Writer) {
 	}
 	id, addr := fields[1], fields[2]
 
-	err := n.Raft().AddVoter(hraft.ServerID(id), hraft.ServerAddress(addr), 0, addVoterTimeout).Error()
+	err := r.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), 0, addVoterTimeout).Error()
 	if err != nil {
 		fmt.Fprintln(out, "error:", err)
 		return
@@ -106,44 +105,52 @@ func runAddVoter(n *node.Node, line string, out io.Writer) {
 	fmt.Fprintln(out, "OK")
 }
 
-// runStatements runs every statement in sql in turn (one input can hold
-// more than one, separated by ";") against n's kept-alive connection,
-// printing each one's results as it completes and stopping at the first
-// error.
-func runStatements(n *node.Node, sql string, out io.Writer) {
-	err := n.WithDB(func(conn *sqlite3.Conn) error {
-		for sql != "" {
-			stmt, tail, err := conn.Prepare(sql)
-			if err != nil {
-				return err
-			}
-			if stmt == nil {
-				return nil // sql was only whitespace/a comment
-			}
-			sql = tail
-
-			readOnly := stmt.ReadOnly()
-			runErr := runStmt(stmt, out)
-			closeErr := stmt.Close()
-			if runErr != nil {
-				if !readOnly {
-					// A failed write's real cause (not the leader, or still
-					// draining) is more useful than the generic IOERR_WRITE
-					// that's all that reliably survives back through *Stmt.
-					if writeErr := n.LastWriteError(); writeErr != nil {
-						return writeErr
-					}
-				}
-				return runErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		}
-		return nil
-	})
+// runStatement runs a single SQL statement (which may be multiple semicolon-separated statements) through db, printing results to out. It
+// prints any error and returns immediately on the first statement that fails.
+func runStatement(db *sql.DB, sql string, out io.Writer) {
+	r, err := db.Query(sql)
 	if err != nil {
 		fmt.Fprintln(out, "error:", err)
+		return
+	}
+	defer r.Close()
+
+	cols, err := r.Columns()
+	if err != nil {
+		fmt.Fprintln(out, "error:", err)
+		return
+	}
+	if len(cols) > 0 {
+		fmt.Fprintln(out, strings.Join(cols, "\t"))
+	}
+
+	for r.Next() {
+		row := make([]interface{}, len(cols))
+		rowPtrs := make([]interface{}, len(cols))
+		for i := range row {
+			rowPtrs[i] = &row[i]
+		}
+		if err := r.Scan(rowPtrs...); err != nil {
+			fmt.Fprintln(out, "error:", err)
+			return
+		}
+		strRow := make([]string, len(row))
+		for i, val := range row {
+			if val == nil {
+				strRow[i] = "NULL"
+			} else {
+				strRow[i] = fmt.Sprintf("%v", val)
+			}
+		}
+		fmt.Fprintln(out, strings.Join(strRow, "\t"))
+	}
+	if err := r.Err(); err != nil {
+		fmt.Fprintln(out, "error:", err)
+		return
+	}
+
+	if len(cols) == 0 {
+		fmt.Fprintln(out, "OK")
 	}
 }
 

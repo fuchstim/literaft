@@ -3,6 +3,7 @@ module github.com/fuchstim/literaft
 go 1.25.2
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/raft v1.7.3
 	github.com/hashicorp/raft-boltdb/v2 v2.3.1
 	github.com/ncruces/go-sqlite3 v0.35.2

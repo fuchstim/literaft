@@ -67,14 +67,13 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 func (c *connector) Driver() driver.Driver { return c.owner }
 
 // applyRequiredPragmas sets synchronous=NORMAL (durability comes from the
-// RAFT quorum, not local fsync -- CLAUDE.md) on a freshly opened
-// connection. Must run on every new connection, not once: synchronous is a
-// per-connection setting (internal/node/node.go:168-171 makes the same
-// point about its own keeper/checkpointer connections).
+// RAFT quorum, not local fsync) on a freshly opened
+// connection.
 func applyRequiredPragmas(c driver.Conn) error {
 	raw, ok := c.(ncrdriver.Conn)
 	if !ok {
 		return fmt.Errorf("driver: opened connection doesn't implement ncrdriver.Conn (got %T)", c)
 	}
+
 	return raw.Raw().Exec("PRAGMA synchronous=NORMAL")
 }
