@@ -248,13 +248,12 @@ anything outside this repo.
   a use case needs it.
 - **Refactor `internal/node` to consume `driver/`** — `internal/node.Start`
   wires raft transport/store/FSM/VFS/keep-alive/checkpoint plumbing by hand,
-  predating `driver/` (M8's `database/sql` driver issue), which now does the
-  VFS/Gate/keep-alive/checkpoint half of that same job as a reusable
-  package. Collapsing `internal/node`'s equivalent code onto `driver.Driver`
-  would remove the duplication, but was out of scope for that issue itself
-  (which added `driver/` standalone, without touching
-  `internal/node`/`cmd/literaft`). Revisit once `driver/` has real external
-  users to validate its API against.
+  predating `driver/` (#31), which now does the VFS/Gate/keep-alive/
+  checkpoint half of that same job as a reusable package. Collapsing
+  `internal/node`'s equivalent code onto `driver.Driver` would remove the
+  duplication, but was out of scope for #31 itself (which added `driver/`
+  standalone, without touching `internal/node`/`cmd/literaft`). Revisit once
+  `driver/` has real external users to validate its API against.
 - **Multiple databases on one RAFT cluster, keyed by `sql.Open`'s name
   argument** — `driver.Driver.Open`/`OpenConnector` currently ignore the
   `name` argument `database/sql` passes them; one `driver.Driver` always
