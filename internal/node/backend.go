@@ -7,22 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/ncruces/go-sqlite3"
 
 	"github.com/fuchstim/literaft/apply"
 	raftadapter "github.com/fuchstim/literaft/raft"
 	"github.com/fuchstim/literaft/vfs"
-)
-
-// checkpointRetryDelay/checkpointRetryTimeout bound how long Snapshot waits
-// for a full TRUNCATE checkpoint: TRUNCATE only fully backfills and
-// truncates the -wal file once no reader still needs older WAL content, so
-// a lagging reader can make one attempt only partially succeed.
-const (
-	checkpointRetryDelay   = 20 * time.Millisecond
-	checkpointRetryTimeout = 5 * time.Second
 )
 
 // dbBackend owns every piece of this node's on-disk/SQLite state that a
@@ -37,7 +27,7 @@ const (
 // and a *sqlite3.Conn is not safe for concurrent goroutine use (the same
 // reason checkpointer was split from keeper in the first place). Contention
 // is negligible -- every one of these operations is brief except Snapshot's
-// checkpoint+copy, which is expected to be infrequent.
+// backup, which is expected to be infrequent.
 //
 // keeper is guarded by a separate connMu instead: it used to be handed out
 // via a DB() *sqlite3.Conn accessor, but that only protected the field read,
@@ -138,84 +128,53 @@ func (b *dbBackend) closeAllLocked() error {
 	return errors.Join(errs...)
 }
 
-// Snapshot implements raftadapter.Snapshotter. It drives a TRUNCATE
-// checkpoint -- the natural snapshot cut point
-// (docs/DESIGN.md §checkpoint) -- so the .db file alone becomes a complete,
-// self-contained copy of the current state, then hands back a private copy
-// of those bytes.
+// Snapshot implements raftadapter.Snapshotter. It uses SQLite's online
+// backup API (https://sqlite.org/backup.html) -- the sanctioned way to get
+// a point-in-time, self-consistent copy of a live database -- to back
+// checkpointer's "main" database up into a private temp file, then hands
+// back a reader over that file.
 //
-// The lock is held for this whole call, but only across a local checkpoint
-// + file copy, not the (potentially much slower, over-the-network) transfer
-// hraft does later via the returned ReadCloser's consumer -- copying now is
-// exactly what decouples the two, so Apply/Restore/checkpointPassive aren't
-// blocked while a slow follower is still catching up.
+// Backup opens its destination through the default (non-RAFT) VFS, since
+// dstURI here is a plain OS path rather than a "file:...?vfs=..." URI: the
+// temp file is a private, non-replicated export, not something the gate or
+// follower-apply should ever see. Unlike a raw file copy, Backup needs no
+// prior checkpoint -- it reads a consistent set of pages directly through
+// checkpointer's pager, resolving anything still only in the -wal exactly
+// as any other reader would, and the destination it produces is a single
+// self-contained file (a fresh connection defaults to non-WAL journal
+// mode), so there's nothing else to reconcile afterwards.
+//
+// The lock is held for this whole call, but only across the local backup,
+// not the (potentially much slower, over-the-network) transfer hraft does
+// later via the returned ReadCloser's consumer -- copying now is exactly
+// what decouples the two, so Apply/Restore/checkpointPassive aren't blocked
+// while a slow follower is still catching up.
 func (b *dbBackend) Snapshot() (io.ReadCloser, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	if err := b.checkpointTruncateLocked(); err != nil {
-		return nil, err
-	}
-
-	src, err := os.Open(b.cfg.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot: opening %s: %w", b.cfg.DBPath, err)
-	}
-	defer src.Close()
 
 	tmp, err := os.CreateTemp("", "literaft-snapshot-*")
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: creating temp copy: %w", err)
 	}
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("snapshot: copying %s: %w", b.cfg.DBPath, err)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return nil, fmt.Errorf("snapshot: rewinding temp copy: %w", err)
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("snapshot: closing temp copy: %w", err)
 	}
 
-	return &tempFileReader{File: tmp}, nil
-}
-
-// checkpointTruncateLocked retries a TRUNCATE checkpoint until the -wal
-// file is actually truncated to zero bytes -- the real signal that every
-// frame was backfilled and no reader is still pinning older WAL content
-// (a busy reader can make a single attempt only partially succeed).
-//
-// This goes through Exec("PRAGMA wal_checkpoint(TRUNCATE)") rather than the
-// Conn.WALCheckpoint API: verified empirically that calling the latter as
-// the very first operation on a freshly opened connection (exactly
-// checkpointer's usage pattern -- it's opened once at Start and otherwise
-// only ever runs PASSIVE checkpoints) returns nLog=nCkpt=-1 with a nil
-// error ("checkpoint could not run"), because that path skips whatever
-// per-connection WAL setup a normal SQL statement lazily triggers. Going
-// through the SQL layer sidesteps it; the -wal size check below is what
-// actually confirms success either way.
-func (b *dbBackend) checkpointTruncateLocked() error {
-	deadline := time.Now().Add(checkpointRetryTimeout)
-	for {
-		err := b.checkpointer.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-		if err == nil {
-			fi, statErr := os.Stat(b.cfg.DBPath + "-wal")
-			if statErr != nil && !os.IsNotExist(statErr) {
-				return fmt.Errorf("snapshot: checking -wal size: %w", statErr)
-			}
-			if statErr != nil || fi.Size() == 0 {
-				return nil
-			}
-		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return fmt.Errorf("snapshot: TRUNCATE checkpoint never completed: %w", err)
-			}
-			return errors.New("snapshot: TRUNCATE checkpoint never fully backfilled the WAL")
-		}
-		time.Sleep(checkpointRetryDelay)
+	if err := b.checkpointer.Backup("main", tmpPath); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("snapshot: backing up %s: %w", b.cfg.DBPath, err)
 	}
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("snapshot: reopening backup copy: %w", err)
+	}
+
+	return &tempFileReader{File: f}, nil
 }
 
 // Restore implements raftadapter.Snapshotter. It replaces this node's

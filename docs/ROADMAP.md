@@ -178,7 +178,14 @@ anything outside this repo.
   because the checkpoint lock is held across the whole call, but it leans on
   a pre-checkpoint plus filesystem-level copy semantics rather than the
   sanctioned way to get a point-in-time, self-consistent copy of a SQLite
-  database.
+  database. *(done)* `Snapshot` now calls `checkpointer.Backup("main",
+  tmpPath)` (https://sqlite.org/backup.html) directly against live state --
+  no preceding `wal_checkpoint(TRUNCATE)` needed, since the backup API
+  resolves pages still only in the `-wal` itself, the same as any other
+  reader. `checkpointTruncateLocked` and its retry constants are gone;
+  `docs/DESIGN.md` (§checkpoint, follower-apply path) and
+  `raft.Snapshotter`'s doc comment updated to match. Verified by the existing
+  `internal/node/backend_test.go` Snapshot/Restore round trip, unchanged.
 - **`vfs/File` should translate `gate.Propose` errors into the right SQLite
   result code**, not always `sqlite3.IOERR_WRITE` (`vfs/file.go`'s `xWrite`
   commit branch, currently around line 292). A `CatchingUpError` (RAFT not

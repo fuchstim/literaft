@@ -141,11 +141,13 @@ does not intercept it.
    content, reset the WAL (`mxFrame → 0`, new salt, header change-counter
    bumped). External readers detect the change and re-read. Standard.
 
-Two integration notes: checkpoints never race the RAFT gate (different locks,
-and the gate only fires on commit-frame writes); and a freshly
-`TRUNCATE`-checkpointed `.db` is the natural cut point for a **RAFT snapshot** —
-snapshot the db file, then RAFT compacts its log below that applied index. This
-is the only real coupling between checkpointing and RAFT, and it's optional.
+One integration note: checkpoints never race the RAFT gate (different locks,
+and the gate only fires on commit-frame writes). A **RAFT snapshot** doesn't
+need a preceding checkpoint at all — it goes through SQLite's online backup
+API instead (see "Follower-apply path" below), which produces a
+self-consistent copy directly off live state; RAFT then compacts its log
+below that applied index. So there's no real coupling between checkpointing
+and RAFT snapshots.
 
 Followers need their own checkpoint driver (a maintenance connection or direct
 checkpoint call) to bound WAL growth, since they have no local writer triggering
@@ -178,11 +180,13 @@ leader.
 **InstallSnapshot (very-behind follower):** if the node has fallen past the
 leader's retained log, it catches up via snapshot, not replay. `raft.FSM`
 delegates to a `Snapshotter` (`internal/node`'s `dbBackend`): `Snapshot`
-drives a `TRUNCATE` checkpoint on whichever node hraft asks (leader or
-follower) so its `.db` alone becomes a complete, self-contained copy, then
-takes a private temp-file copy of it — decoupling the (possibly slow,
-over-the-network) `Persist` from further local `Apply` calls, which must keep
-proceeding against live state in the meantime. `Restore`, on the installing
+uses SQLite's online backup API (https://sqlite.org/backup.html) on
+whichever node hraft asks (leader or follower) to copy its live "main"
+database into a private temp file — the sanctioned way to get a
+point-in-time, self-consistent copy without a preceding checkpoint —
+decoupling the (possibly slow, over-the-network) `Persist` from further
+local `Apply` calls, which must keep proceeding against live state in the
+meantime. `Restore`, on the installing
 follower, closes the applier and both kept-alive SQLite connections (nothing
 may hold the old `.db`/`-wal`/`-shm` open across the swap), atomically renames
 the incoming bytes in as the new `.db`, deletes the now-stale `-wal`/`-shm`,
