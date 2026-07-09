@@ -56,9 +56,9 @@ type FSM struct {
 
 // Snapshotter captures and restores this node's full database state for
 // RAFT snapshot-based (very-behind follower) catch-up.
-// internal/node's dbBackend satisfies this by driving a TRUNCATE checkpoint
-// (docs/DESIGN.md §checkpoint's "natural cut point") and swapping the
-// resulting .db file in as a unit.
+// internal/node's dbBackend satisfies this by using SQLite's online backup
+// API (docs/DESIGN.md §checkpoint) to produce a self-contained copy and
+// swapping the resulting .db file in as a unit.
 type Snapshotter interface {
 	// Snapshot returns a reader over a complete, self-contained, private
 	// copy of the current state. It must be unaffected by any Apply calls

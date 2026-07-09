@@ -141,11 +141,14 @@ does not intercept it.
    content, reset the WAL (`mxFrame → 0`, new salt, header change-counter
    bumped). External readers detect the change and re-read. Standard.
 
-Two integration notes: checkpoints never race the RAFT gate (different locks,
-and the gate only fires on commit-frame writes); and a freshly
-`TRUNCATE`-checkpointed `.db` is the natural cut point for a **RAFT snapshot** —
-snapshot the db file, then RAFT compacts its log below that applied index. This
-is the only real coupling between checkpointing and RAFT, and it's optional.
+One integration note: checkpoints never race the RAFT gate (different locks,
+and the gate only fires on commit-frame writes). A freshly
+`TRUNCATE`-checkpointed `.db` is still the natural precursor to a **RAFT
+snapshot** (see "Follower-apply path" below) -- not because the snapshot
+mechanism (SQLite's online backup API) requires it for correctness, but
+because it shrinks the amount of WAL the backup has to walk and the window
+in which a concurrent writer can force it to restart. RAFT then compacts its
+log below the snapshot's applied index.
 
 Followers need their own checkpoint driver (a maintenance connection or direct
 checkpoint call) to bound WAL growth, since they have no local writer triggering
@@ -178,11 +181,19 @@ leader.
 **InstallSnapshot (very-behind follower):** if the node has fallen past the
 leader's retained log, it catches up via snapshot, not replay. `raft.FSM`
 delegates to a `Snapshotter` (`internal/node`'s `dbBackend`): `Snapshot`
-drives a `TRUNCATE` checkpoint on whichever node hraft asks (leader or
-follower) so its `.db` alone becomes a complete, self-contained copy, then
-takes a private temp-file copy of it — decoupling the (possibly slow,
-over-the-network) `Persist` from further local `Apply` calls, which must keep
-proceeding against live state in the meantime. `Restore`, on the installing
+runs a best-effort `TRUNCATE` checkpoint, then uses SQLite's online backup
+API (https://sqlite.org/backup.html) on whichever node hraft asks (leader or
+follower) to copy its live "main" database into a private temp file — the
+sanctioned way to get a point-in-time, self-consistent copy, and one that
+(unlike a raw file copy) doesn't actually depend on the checkpoint having
+fully backfilled the `-wal`. The checkpoint matters for a different reason:
+`sqlite3_backup_step` restarts from scratch if a *different* connection
+modifies the source mid-backup (on the leader, that's any client write,
+which lands via `keeper`, not `checkpointer`), so shrinking the WAL first
+shrinks both the per-attempt cost and the collision window. This decouples
+the (possibly slow, over-the-network) `Persist` from further local `Apply`
+calls, which must keep proceeding against live state in the meantime.
+`Restore`, on the installing
 follower, closes the applier and both kept-alive SQLite connections (nothing
 may hold the old `.db`/`-wal`/`-shm` open across the swap), atomically renames
 the incoming bytes in as the new `.db`, deletes the now-stale `-wal`/`-shm`,
