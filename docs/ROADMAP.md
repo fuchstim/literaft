@@ -233,6 +233,15 @@ anything outside this repo.
   reason the `vfs/File` result-code bullet above exists. Verified by
   `driver/driver_test.go` against a real (non-stub) `apply.Applier`-backed
   raft cluster, including an M1-style plain-VFS-external-reader check.
+- **Speed up the node test suite.** `internal/node`'s integration tests
+  (`cluster_test.go`, `restart_test.go`, `snapshot_test.go`) spin up real
+  `hraft` clusters and wait out actual leader-election/heartbeat/snapshot
+  timers via `Eventually`/`time.Sleep` -- the whole suite takes ~57s for
+  just 7 specs today, and grows with every M7 fault-injection/fuzzing/
+  benchmark spec added on top. Investigate tightening hraft's election/
+  heartbeat timeouts for tests, trimming redundant `time.Sleep` calls (e.g.
+  `restart_test.go:130`, `snapshot_test.go:67`), and/or running independent
+  specs in parallel.
 
 ---
 
