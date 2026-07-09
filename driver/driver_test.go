@@ -87,9 +87,8 @@ var _ = Describe("Driver", func() {
 		defer shutdownRaftCluster(nodes)
 		n := nodes[0]
 
-		drv, err := driver.New(n.raft, n.fsm, driver.Config{
-			DBPath: n.dbPath, PageSize: 4096, CheckpointInterval: 50 * time.Millisecond,
-		})
+		drv, err := driver.New(n.raft, n.fsm, n.dbPath,
+			driver.WithPageSize(4096), driver.WithCheckpointInterval(50*time.Millisecond))
 		Expect(err).NotTo(HaveOccurred())
 		defer drv.Close()
 
@@ -118,9 +117,8 @@ var _ = Describe("Driver", func() {
 
 		drivers := make(map[*raftNode]*driver.Driver, len(nodes))
 		for _, n := range nodes {
-			d, err := driver.New(n.raft, n.fsm, driver.Config{
-				DBPath: n.dbPath, PageSize: 4096, CheckpointInterval: 50 * time.Millisecond,
-			})
+			d, err := driver.New(n.raft, n.fsm, n.dbPath,
+				driver.WithPageSize(4096), driver.WithCheckpointInterval(50*time.Millisecond))
 			Expect(err).NotTo(HaveOccurred())
 			defer d.Close()
 			drivers[n] = d
@@ -142,7 +140,7 @@ var _ = Describe("Driver", func() {
 			"got %v (%T), not a NotLeaderError", rejection, rejection)
 	})
 
-	It("guarantees unique VFS names across Driver instances, even with the same Config.Name", func() {
+	It("guarantees unique VFS names across Driver instances, even with the same WithName hint", func() {
 		dir1 := GinkgoT().TempDir()
 		dir2 := GinkgoT().TempDir()
 		nodes1 := newRaftCluster(dir1, 1, 4096)
@@ -150,14 +148,12 @@ var _ = Describe("Driver", func() {
 		nodes2 := newRaftCluster(dir2, 1, 4096)
 		defer shutdownRaftCluster(nodes2)
 
-		drv1, err := driver.New(nodes1[0].raft, nodes1[0].fsm, driver.Config{
-			DBPath: nodes1[0].dbPath, PageSize: 4096, Name: "shared-hint",
-		})
+		drv1, err := driver.New(nodes1[0].raft, nodes1[0].fsm, nodes1[0].dbPath,
+			driver.WithPageSize(4096), driver.WithName("shared-hint"))
 		Expect(err).NotTo(HaveOccurred())
 		defer drv1.Close()
-		drv2, err := driver.New(nodes2[0].raft, nodes2[0].fsm, driver.Config{
-			DBPath: nodes2[0].dbPath, PageSize: 4096, Name: "shared-hint",
-		})
+		drv2, err := driver.New(nodes2[0].raft, nodes2[0].fsm, nodes2[0].dbPath,
+			driver.WithPageSize(4096), driver.WithName("shared-hint"))
 		Expect(err).NotTo(HaveOccurred())
 		defer drv2.Close()
 
@@ -185,9 +181,8 @@ var _ = Describe("Driver", func() {
 		defer shutdownRaftCluster(nodes)
 		n := nodes[0]
 
-		drv, err := driver.New(n.raft, n.fsm, driver.Config{
-			DBPath: n.dbPath, PageSize: 4096, CheckpointInterval: 50 * time.Millisecond,
-		})
+		drv, err := driver.New(n.raft, n.fsm, n.dbPath,
+			driver.WithPageSize(4096), driver.WithCheckpointInterval(50*time.Millisecond))
 		Expect(err).NotTo(HaveOccurred())
 
 		db := openDB(drv)
@@ -215,9 +210,8 @@ var _ = Describe("Driver", func() {
 		defer shutdownRaftCluster(nodes)
 		n := nodes[0]
 
-		drv, err := driver.New(n.raft, n.fsm, driver.Config{
-			DBPath: n.dbPath, PageSize: 4096, CheckpointInterval: 50 * time.Millisecond,
-		})
+		drv, err := driver.New(n.raft, n.fsm, n.dbPath,
+			driver.WithPageSize(4096), driver.WithCheckpointInterval(50*time.Millisecond))
 		Expect(err).NotTo(HaveOccurred())
 		defer drv.Close()
 

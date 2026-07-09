@@ -197,6 +197,25 @@ cache.
 
 ---
 
+## Public API style
+
+Every public constructor (`New`, `Open`, `Start`, ...) on a public interface
+takes its required arguments directly as positional parameters — never
+bundled into a config/options struct alongside optional ones. Optional
+arguments use the **functional options pattern** instead: an unexported
+`options` struct carrying the defaults, `type Option func(*options)`,
+exported `WithXxx(...) Option` constructors, and a trailing `...Option`
+parameter on the real constructor. Rationale: a struct field can't
+distinguish "caller explicitly set the zero value" from "caller didn't set
+it at all," and a variadic `...Option` list can grow new options without
+breaking existing call sites, unlike adding a field to a struct that already
+has callers relying on its zero value. `driver/` (`driver/options.go`,
+`driver.New`) is the reference example. Older config-struct-based
+constructors (e.g. `internal/node.Config`) predate this convention and
+haven't been migrated.
+
+---
+
 ## Top gotchas (bite-marks from the design discussion)
 
 - **`SharedMemory` is opaque.** The exported interface has unexported methods;

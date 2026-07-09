@@ -214,10 +214,13 @@ anything outside this repo.
   responsibilities (keep-alive RW connection, checkpoint driver, config
   defaults) belong in the driver itself vs. stay caller-supplied. *(done)*
   Landed as a new standalone `driver/` package (not a refactor of
-  `internal/node` -- see "Deferred" below): `driver.New(r, fsm, cfg)` builds
-  the Gate, registers a process-unique gated+page-size-enforcing VFS, keeps
-  one dedicated connection alive to drive the follower checkpoint loop, and
-  the resulting `*driver.Driver` implements `database/sql/driver.Driver`/
+  `internal/node` -- see "Deferred" below): `driver.New(r, fsm, dbPath,
+  opts...)` -- required args direct, optional ones via functional options
+  (`WithPageSize`, `WithApplyTimeout`, `WithCheckpointInterval`, `WithName`;
+  CLAUDE.md "Public API style") -- builds the Gate, registers a
+  process-unique gated+page-size-enforcing VFS, keeps one dedicated
+  connection alive to drive the follower checkpoint loop, and the resulting
+  `*driver.Driver` implements `database/sql/driver.Driver`/
   `driver.DriverContext` by delegating to `ncruces/go-sqlite3/driver`'s
   `SQLite` type for all connection/statement/row machinery, injecting
   `PRAGMA synchronous=NORMAL` on every pooled connection. `sql.Register` is
@@ -257,6 +260,6 @@ anything outside this repo.
 - **Multiple databases on one RAFT cluster, keyed by `sql.Open`'s name
   argument** — `driver.Driver.Open`/`OpenConnector` currently ignore the
   `name` argument `database/sql` passes them; one `driver.Driver` always
-  serves the single `Config.DBPath` it was built with. Revisit if a use case
+  serves the single `dbPath` it was built with. Revisit if a use case
   needs one `hraft.Raft` (one RAFT log) fronting more than one logical
   SQLite database, dispatched by that name.

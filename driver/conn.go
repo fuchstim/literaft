@@ -18,7 +18,7 @@ var (
 // database/sql passes to Open/OpenConnector -- see the package doc comment
 // on sql.Open's reserved dbName argument.
 func (d *Driver) dsn() string {
-	return "file:" + d.cfg.DBPath + "?vfs=" + d.vfsName
+	return "file:" + d.dbPath + "?vfs=" + d.vfsName
 }
 
 // Open implements driver.Driver. name is ignored -- see dsn.

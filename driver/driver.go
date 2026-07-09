@@ -19,7 +19,7 @@
 //	   internal/node/node.go:53-163 for the reference pattern, including
 //	   the stale -wal/-shm discard and WAL-mode priming steps at
 //	   node.go:56-101 -- see the WAL-priming ordering note below */
-//	drv, err := driver.New(r, fsm, driver.Config{DBPath: "mydb.db", PageSize: 4096})
+//	drv, err := driver.New(r, fsm, "mydb.db", driver.WithPageSize(4096))
 //	sql.Register("mydb", drv)
 //	db, err := sql.Open("mydb", "") // second arg is reserved, unused for now
 //	defer db.Close()                // does NOT close drv -- see Driver.Close
@@ -29,15 +29,15 @@
 // sql.Register expects a driver.Driver value that already exists, so unlike
 // ncruces/go-sqlite3/driver's own package (which registers a stateless
 // singleton in an init()), this package deliberately does not call
-// sql.Register itself -- there is no live raft/FSM/Config to build a Driver
-// from at package-init time. Callers register the instance New returns,
-// under whatever alias they choose, once it exists. sql.Register panics on
-// a duplicate name, so a caller that rebuilds its Driver (e.g. on a config
-// reload) needs a fresh alias each time.
+// sql.Register itself -- there is no live raft/FSM/db path to build a
+// Driver from at package-init time. Callers register the instance New
+// returns, under whatever alias they choose, once it exists. sql.Register
+// panics on a duplicate name, so a caller that rebuilds its Driver (e.g. on
+// a config reload) needs a fresh alias each time.
 //
 // # WAL-mode priming and hraft.NewRaft ordering
 //
-// New primes cfg.DBPath's WAL-mode identity (mirroring
+// New primes dbPath's WAL-mode identity (mirroring
 // internal/node/node.go:91-101), but by the time New runs, the caller's
 // *hraft.Raft already exists -- and hraft.NewRaft starts a background
 // goroutine that can immediately begin replaying any already-committed-but-
@@ -71,7 +71,9 @@ import (
 // one running literaft database. See the package doc comment for the
 // construction flow.
 type Driver struct {
-	cfg     Config
+	dbPath             string
+	checkpointInterval time.Duration
+
 	raft    *hraft.Raft
 	gate    *raftadapter.Gate
 	vfsName string
@@ -99,7 +101,7 @@ type Driver struct {
 // (vendor/github.com/ncruces/go-sqlite3/vfs/registry.go), so a collision
 // would be a silent, hard-to-diagnose VFS swap rather than a startup
 // failure -- hence a random suffix, not just deduplication of hint. hint
-// (Config.Name) is a readability prefix only.
+// (WithName's value) is a readability prefix only.
 func nextVFSName(hint string) (string, error) {
 	if hint == "" {
 		hint = "literaft-driver"
@@ -132,48 +134,53 @@ func primeWAL(dbPath string) error {
 
 // New builds a Driver gating writes through r, whose FSM must be fsm (the
 // same instance passed to hraft.NewRaft) and whose Materializer/Snapshotter
-// the caller has already wired in. See the package doc comment for the
-// required caller-side WAL-priming/discard ordering relative to
-// hraft.NewRaft.
-func New(r *hraft.Raft, fsm *raftadapter.FSM, cfg Config) (*Driver, error) {
+// the caller has already wired in, serving the database at dbPath. See the
+// package doc comment for the required caller-side WAL-priming/discard
+// ordering relative to hraft.NewRaft, and CLAUDE.md "Public API style" for
+// why dbPath is a direct parameter while everything else is an Option.
+func New(r *hraft.Raft, fsm *raftadapter.FSM, dbPath string, opts ...Option) (*Driver, error) {
 	if r == nil {
 		return nil, errors.New("driver: raft is nil")
 	}
 	if fsm == nil {
 		return nil, errors.New("driver: fsm is nil")
 	}
-	if cfg.DBPath == "" {
-		return nil, errors.New("driver: Config.DBPath is required")
+	if dbPath == "" {
+		return nil, errors.New("driver: dbPath is required")
 	}
-	cfg = cfg.withDefaults()
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
 
-	if err := primeWAL(cfg.DBPath); err != nil {
+	if err := primeWAL(dbPath); err != nil {
 		return nil, err
 	}
 
-	vfsName, err := nextVFSName(cfg.Name)
+	vfsName, err := nextVFSName(o.name)
 	if err != nil {
 		return nil, err
 	}
 
-	gate := raftadapter.NewGate(r, fsm, cfg.ApplyTimeout)
-	vfs.RegisterGatePageSize(vfsName, sqlite3vfs.Find(""), gate, cfg.PageSize)
+	gate := raftadapter.NewGate(r, fsm, o.applyTimeout)
+	vfs.RegisterGatePageSize(vfsName, sqlite3vfs.Find(""), gate, o.pageSize)
 
-	keepAlive, err := sqlite3.Open("file:" + cfg.DBPath + "?vfs=" + vfsName)
+	keepAlive, err := sqlite3.Open("file:" + dbPath + "?vfs=" + vfsName)
 	if err != nil {
 		gate.Close()
 		sqlite3vfs.Unregister(vfsName)
-		return nil, fmt.Errorf("driver: opening keep-alive connection to %s: %w", cfg.DBPath, err)
+		return nil, fmt.Errorf("driver: opening keep-alive connection to %s: %w", dbPath, err)
 	}
 
 	d := &Driver{
-		cfg:            cfg,
-		raft:           r,
-		gate:           gate,
-		vfsName:        vfsName,
-		keepAlive:      keepAlive,
-		stopCheckpoint: make(chan struct{}),
-		checkpointDone: make(chan struct{}),
+		dbPath:             dbPath,
+		checkpointInterval: o.checkpointInterval,
+		raft:               r,
+		gate:               gate,
+		vfsName:            vfsName,
+		keepAlive:          keepAlive,
+		stopCheckpoint:     make(chan struct{}),
+		checkpointDone:     make(chan struct{}),
 	}
 	go d.runCheckpointDriver()
 	return d, nil
@@ -187,7 +194,7 @@ func New(r *hraft.Raft, fsm *raftadapter.FSM, cfg Config) (*Driver, error) {
 // internal/node/node.go's runCheckpointDriver exactly.
 func (d *Driver) runCheckpointDriver() {
 	defer close(d.checkpointDone)
-	ticker := time.NewTicker(d.cfg.CheckpointInterval)
+	ticker := time.NewTicker(d.checkpointInterval)
 	defer ticker.Stop()
 	for {
 		select {
