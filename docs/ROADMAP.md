@@ -212,7 +212,27 @@ anything outside this repo.
   embedding literaft doesn't require reimplementing `internal/node`'s
   plumbing. This is the natural point to decide which of `internal/node`'s
   responsibilities (keep-alive RW connection, checkpoint driver, config
-  defaults) belong in the driver itself vs. stay caller-supplied.
+  defaults) belong in the driver itself vs. stay caller-supplied. *(done)*
+  Landed as a new standalone `driver/` package (not a refactor of
+  `internal/node` -- see "Deferred" below): `driver.New(r, fsm, dbPath,
+  opts...)` -- required args direct, optional ones via functional options
+  (`WithPageSize`, `WithApplyTimeout`, `WithCheckpointInterval`, `WithName`;
+  CLAUDE.md "Public API style") -- builds the Gate, registers a
+  process-unique gated+page-size-enforcing VFS, keeps one dedicated
+  connection alive to drive the follower checkpoint loop, and the resulting
+  `*driver.Driver` implements `database/sql/driver.Driver`/
+  `driver.DriverContext` by delegating to `ncruces/go-sqlite3/driver`'s
+  `SQLite` type for all connection/statement/row machinery, injecting
+  `PRAGMA synchronous=NORMAL` on every pooled connection. `sql.Register` is
+  caller-driven, not an `init()`: the caller builds its own
+  `*hraft.Raft`/`*raftadapter.FSM` exactly as `internal/node.Start` does
+  (`internal/node/node.go`), passes them to `driver.New`, then registers the
+  result under its own chosen alias -- `sql.Open`'s second argument is
+  reserved and unused for now (see "Deferred" below). `LastRejection`/
+  `Ready` give parity with `internal/node.Node`'s equivalents for the same
+  reason the `vfs/File` result-code bullet above exists. Verified by
+  `driver/driver_test.go` against a real (non-stub) `apply.Applier`-backed
+  raft cluster, including an M1-style plain-VFS-external-reader check.
 
 ---
 
@@ -229,3 +249,17 @@ anything outside this repo.
   exists; keep the reqID field in the entry format now so the hook is ready.
 - **Linearizable reads** (leader lease / RAFT read-index) — RAFT-side, add when
   a use case needs it.
+- **Refactor `internal/node` to consume `driver/`** — `internal/node.Start`
+  wires raft transport/store/FSM/VFS/keep-alive/checkpoint plumbing by hand,
+  predating `driver/` (#31), which now does the VFS/Gate/keep-alive/
+  checkpoint half of that same job as a reusable package. Collapsing
+  `internal/node`'s equivalent code onto `driver.Driver` would remove the
+  duplication, but was out of scope for #31 itself (which added `driver/`
+  standalone, without touching `internal/node`/`cmd/literaft`). Revisit once
+  `driver/` has real external users to validate its API against.
+- **Multiple databases on one RAFT cluster, keyed by `sql.Open`'s name
+  argument** — `driver.Driver.Open`/`OpenConnector` currently ignore the
+  `name` argument `database/sql` passes them; one `driver.Driver` always
+  serves the single `dbPath` it was built with. Revisit if a use case
+  needs one `hraft.Raft` (one RAFT log) fronting more than one logical
+  SQLite database, dispatched by that name.
