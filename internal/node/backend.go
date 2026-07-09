@@ -137,21 +137,41 @@ func (b *dbBackend) closeAllLocked() error {
 // Backup opens its destination through the default (non-RAFT) VFS, since
 // dstURI here is a plain OS path rather than a "file:...?vfs=..." URI: the
 // temp file is a private, non-replicated export, not something the gate or
-// follower-apply should ever see. Unlike a raw file copy, Backup needs no
-// prior checkpoint -- it reads a consistent set of pages directly through
-// checkpointer's pager, resolving anything still only in the -wal exactly
-// as any other reader would, and the destination it produces is a single
+// follower-apply should ever see. The destination it produces is a single
 // self-contained file (a fresh connection defaults to non-WAL journal
 // mode), so there's nothing else to reconcile afterwards.
 //
-// The lock is held for this whole call, but only across the local backup,
-// not the (potentially much slower, over-the-network) transfer hraft does
-// later via the returned ReadCloser's consumer -- copying now is exactly
-// what decouples the two, so Apply/Restore/checkpointPassive aren't blocked
-// while a slow follower is still catching up.
+// Unlike a raw file copy, Backup doesn't need the source's .db file to
+// already be self-contained -- it resolves pages still only in the -wal
+// itself, the same as any other reader. But it does NOT hold one stable
+// MVCC snapshot across the whole call the way a normal read transaction
+// would: per sqlite3_backup_step's own docs, if the source is modified by
+// a *different* connection while a step is in flight, the backup restarts
+// from page 1 on the next step (only writes from checkpointer itself, which
+// none of this package ever does, update in place instead). On the leader,
+// client writes land via keeper -- a different connection -- so a busy
+// write workload can in principle keep restarting the backup. The
+// checkpoint below doesn't close that race (writes after it still race
+// Backup the same way), but it does shrink the amount of WAL Backup has to
+// walk before each attempt, which shrinks both the per-attempt cost and the
+// window in which a colliding write can land. It's best-effort: a busy
+// reader can make TRUNCATE only partially backfill, but Backup is correct
+// either way, so this doesn't retry or fail on partial completion the way
+// the old raw-copy approach had to.
+//
+// The lock is held for this whole call, but only across the local
+// checkpoint + backup, not the (potentially much slower, over-the-network)
+// transfer hraft does later via the returned ReadCloser's consumer --
+// copying now is exactly what decouples the two, so
+// Apply/Restore/checkpointPassive aren't blocked while a slow follower is
+// still catching up.
 func (b *dbBackend) Snapshot() (io.ReadCloser, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	if err := b.checkpointer.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return nil, fmt.Errorf("snapshot: checkpointing before backup: %w", err)
+	}
 
 	tmp, err := os.CreateTemp("", "literaft-snapshot-*")
 	if err != nil {
