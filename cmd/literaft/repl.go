@@ -16,8 +16,7 @@ import (
 // addVoterTimeout bounds how long ".addvoter" waits for hraft's own
 // raft.AddVoter to commit the configuration-change log entry -- not for the
 // new voter to finish catching up afterward, which happens asynchronously
-// via normal replication (or a snapshot install, docs/ROADMAP.md M6, if it's
-// too far behind).
+// via normal replication (or a snapshot install, if it's too far behind).
 const addVoterTimeout = 10 * time.Second
 
 // runREPL runs an interactive SQL loop against n's kept-alive connection,
@@ -43,10 +42,10 @@ const addVoterTimeout = 10 * time.Second
 // real SQL tokenizer, not here.
 //
 // One meta-command, ".addvoter <id> <address>", wraps hraft's own
-// raft.AddVoter (docs/ROADMAP.md M4's "join a running cluster" path) so an
-// operator can grow the cluster from the same session instead of a separate
-// tool. Like ".exit"/".quit" it must stand alone on its own line -- it's
-// recognized only when no SQL statement is being accumulated.
+// raft.AddVoter so an operator can grow the cluster from the same session
+// instead of a separate tool. Like ".exit"/".quit" it must stand alone on
+// its own line -- it's recognized only when no SQL statement is being
+// accumulated.
 func runREPL(n *node.Node, in io.Reader, out io.Writer) bool {
 	scanner := bufio.NewScanner(in)
 

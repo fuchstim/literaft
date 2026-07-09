@@ -20,8 +20,8 @@ type Entry struct {
 // commit frame to disk; any other error aborts the transaction, and the
 // commit frame never reaches disk (docs/DESIGN.md §write path steps 3-5).
 //
-// M2 uses AlwaysCommit, a single-node stub that always commits; M4 replaces
-// it with a real RAFT proposal via raft/.
+// AlwaysCommit is a single-node stub that always commits; raft/ supplies a
+// real one backed by a real RAFT proposal.
 type Gate interface {
 	Propose(Entry) error
 }
@@ -31,6 +31,6 @@ type GateFunc func(Entry) error
 
 func (f GateFunc) Propose(e Entry) error { return f(e) }
 
-// AlwaysCommit is the M2 stub gate: every proposal commits immediately, as
+// AlwaysCommit is a stub gate: every proposal commits immediately, as
 // if replication were a single-node no-op.
 var AlwaysCommit Gate = GateFunc(func(Entry) error { return nil })

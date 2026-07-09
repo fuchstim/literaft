@@ -33,7 +33,7 @@ type File struct {
 	// captured page images, catching a mismatch on the leader before it's
 	// ever proposed to RAFT rather than only after a follower's
 	// apply.Applier.Apply rejects it post-commit. 0 disables the check
-	// (M0-M2's default registration, and any test not opting in).
+	// (the default registration, and any test not opting in).
 	pageSize uint32
 
 	// walPageSize is the page size actually in effect for this WAL, used to

@@ -140,6 +140,9 @@ this file's context — update it *from* GitHub, not the other way around.
   convention (e.g. `tfuchs/m7-fault-injection`).
 - Open a PR against `master` that links back to the issue (e.g. `Closes #<n>`
   in the PR body) so merging it auto-closes the issue.
+- Exception: if the user explicitly asks in the current turn to commit/push
+  straight to `master` (not just approves a normal git action in passing),
+  that instruction overrides the branch+PR rule above.
 
 ---
 

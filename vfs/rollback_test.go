@@ -12,7 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// ROADMAP.md M3, follow-up to the page-cache-spill fix above: wal.c's
+// Follow-up to the page-cache-spill fix above: wal.c's
 // sqlite3WalUndo() only reverts pWal->hdr.mxFrame back to where the current
 // write transaction began -- it does not touch the offset space beyond
 // that. So a transaction that spills at least one frame and then rolls
@@ -28,7 +28,7 @@ import (
 // back frame's offset gets misread as a stale checksum fixup: written to
 // disk untouched, but never captured or proposed to the gate at all. That
 // would mean the write commits locally while completely bypassing RAFT.
-var _ = Describe("commit-frame interception across a rolled-back transaction (M3)", func() {
+var _ = Describe("commit-frame interception across a rolled-back transaction", func() {
 	It("still proposes a transaction whose first frame reuses a rolled-back transaction's offset", func() {
 		dir := GinkgoT().TempDir()
 
@@ -43,7 +43,7 @@ var _ = Describe("commit-frame interception across a rolled-back transaction (M3
 		// Spills at least one frame (tiny cache_size, full-table update)
 		// and then throws the transaction away. Never proposed to the
 		// gate, but its frame(s) stay physically in the WAL, inert, until
-		// overwritten -- exactly like the M2 gate-rejection path.
+		// overwritten -- exactly like the gate-rejection path.
 		const spillAndRollbackSQL = `
 			BEGIN;
 			UPDATE t SET v = v || 'r';

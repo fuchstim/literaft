@@ -16,7 +16,7 @@ import (
 // Figure-8 rule can retroactively commit an entry a node proposed during an
 // earlier, unfinished leadership stint once that SAME node regains
 // leadership and a subsequent entry in its new term commits and covers it.
-// Gate.drain (M5) exists specifically to make that safe: the stale entry
+// Gate.drain exists specifically to make that safe: the stale entry
 // necessarily has a lower log index than the new term's Barrier, so it's
 // applied *during* the drain, while the gate is still closed and no new
 // self-proposal can be racing to (mis)claim the self-apply marker. Neither

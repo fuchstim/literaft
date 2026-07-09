@@ -10,9 +10,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// docs/ROADMAP.md M6 "done when": a follower too far behind for normal log
-// replication catches up via a snapshot instead, and ends up
-// logically-equivalent to the leader.
+// A follower too far behind for normal log replication catches up via a
+// snapshot instead, and ends up logically-equivalent to the leader.
 //
 // TrailingLogs and SnapshotThreshold are set low enough that, after the
 // leader's automatic snapshot fires and compacts its log, a brand-new
@@ -20,9 +19,9 @@ import (
 // AppendEntries replay -- its needed starting index no longer exists in the
 // leader's log store. Only hraft's InstallSnapshot RPC (driving
 // raft.FSM.Snapshot on the leader and raft.FSM.Restore on the joiner) can
-// succeed, so a converging joiner here is real, end-to-end proof of the M6
-// mechanism, not just "eventually caught up somehow".
-var _ = Describe("snapshot-based catch-up (M6)", func() {
+// succeed, so a converging joiner here is real, end-to-end proof of the
+// snapshot mechanism, not just "eventually caught up somehow".
+var _ = Describe("snapshot-based catch-up", func() {
 	It("catches up a far-behind joiner via InstallSnapshot instead of log replay", func() {
 		h := &clusterHarness{
 			dir:               GinkgoT().TempDir(),

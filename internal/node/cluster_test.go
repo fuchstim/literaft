@@ -15,11 +15,11 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// docs/ROADMAP.md M4 "done when": a multi-node cluster replicates writes,
-// followers serve (possibly stale) reads, and killing/adding nodes
-// converges. This suite runs a real hraft cluster over TCP loopback (the
-// same node.Start production path a real deployment uses, not a
-// test-only stand-in) to exercise that end to end.
+// A multi-node cluster replicates writes, followers serve (possibly
+// stale) reads, and killing/adding nodes converges. This suite runs a
+// real hraft cluster over TCP loopback (the same node.Start production
+// path a real deployment uses, not a test-only stand-in) to exercise
+// that end to end.
 
 // freeTCPAddr grabs an OS-assigned port by briefly binding and releasing
 // it, then returns "127.0.0.1:<port>" so every node's initial bootstrap
@@ -44,8 +44,8 @@ type clusterHarness struct {
 	// snapshotThreshold/trailingLogs/snapshotInterval, when non-zero,
 	// override node.Config's own (hraft-default) values -- snapshot_test.go
 	// sets these low enough to force real, fast InstallSnapshot catch-up
-	// (docs/ROADMAP.md M6) instead of waiting on production-sized
-	// thresholds. Left zero, startNode gets node.Config's normal defaults.
+	// instead of waiting on production-sized thresholds. Left zero,
+	// startNode gets node.Config's normal defaults.
 	snapshotThreshold uint64
 	trailingLogs      uint64
 	snapshotInterval  time.Duration
@@ -81,12 +81,11 @@ func (h *clusterHarness) shutdown() {
 	}
 }
 
-// restart simulates a process restart of node i (docs/ROADMAP.md M7
-// "crash/restart recovery"): shuts it down and starts a fresh node.Node
-// against its exact original Config, in particular the same BindAddr --
-// the rest of the cluster's raft.Configuration (and its own persisted log)
-// still names that address, so a rebind to a new one would leave this
-// member permanently unreachable instead of rejoined.
+// restart simulates a process restart of node i: shuts it down and starts
+// a fresh node.Node against its exact original Config, in particular the
+// same BindAddr -- the rest of the cluster's raft.Configuration (and its
+// own persisted log) still names that address, so a rebind to a new one
+// would leave this member permanently unreachable instead of rejoined.
 func (h *clusterHarness) restart(i int) *node.Node {
 	GinkgoHelper()
 	Expect(h.nodes[i].Shutdown()).To(Succeed())
@@ -108,7 +107,7 @@ func (h *clusterHarness) indexOf(n *node.Node) int {
 	return -1
 }
 
-// leader waits for a node that's both the raft leader and Ready (docs' M5
+// leader waits for a node that's both the raft leader and Ready (the
 // gaining-leadership drain) -- callers immediately issue writes against the
 // result, which would otherwise race the drain and fail with a
 // raftadapter.CatchingUpError.
@@ -173,7 +172,7 @@ func queryInt(c *sqlite3.Conn, sql string) int64 {
 // nodeExec runs sql against n's kept-alive connection via WithDB, rather
 // than holding a *sqlite3.Conn returned from a since-removed DB() accessor
 // across the call -- exactly the pattern a concurrent snapshot install
-// (docs/ROADMAP.md M6/M7) could race.
+// could race.
 func nodeExec(n *node.Node, sql string) error {
 	GinkgoHelper()
 	return n.WithDB(func(c *sqlite3.Conn) error { return c.Exec(sql) })

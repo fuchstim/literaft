@@ -155,8 +155,7 @@ func (a *Applier) Apply(e raftvfs.Entry) error {
 // header a first Apply call should build on. Only valid when the -shm
 // wal-index is uninitialized; if the -wal file already has content in
 // that state, this is a crash-recovery scenario apply/ doesn't yet handle
-// (docs/ROADMAP.md M6) and bootstrap refuses rather than risk clobbering
-// it.
+// and bootstrap refuses rather than risk clobbering it.
 func (a *Applier) bootstrap() (header, error) {
 	fi, err := a.wal.Stat()
 	if err != nil {
@@ -164,7 +163,7 @@ func (a *Applier) bootstrap() (header, error) {
 	}
 	if fi.Size() != 0 {
 		return header{}, fmt.Errorf("-wal file already has %d bytes but the wal-index is uninitialized; "+
-			"recovery from an existing WAL isn't implemented yet (docs/ROADMAP.md M6)", fi.Size())
+			"recovery from an existing WAL isn't implemented yet", fi.Size())
 	}
 
 	var salt [saltSize]byte

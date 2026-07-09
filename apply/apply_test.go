@@ -38,8 +38,8 @@ func queryText(c *sqlite3.Conn, sql string) string {
 
 // externalRead runs sql as a one-shot read-only query via the stock
 // sqlite3 CLI -- an unmodified SQLite process outside this module
-// entirely, the same load-bearing check as vfs's M1 tests
-// (docs/ROADMAP.md M1), re-run here against a db this package built.
+// entirely, the same load-bearing check as vfs's external-reader
+// compatibility tests, re-run here against a db this package built.
 func externalRead(path, sql string) (string, error) {
 	sqlite3Path, err := exec.LookPath("sqlite3")
 	if err != nil {
@@ -60,16 +60,16 @@ func externalRead(path, sql string) (string, error) {
 	return out, nil
 }
 
-// ROADMAP.md M3: an entry captured on one instance applies on another and
-// both serve identical reads, including to an external reader (re-run M1
-// against an apply-built db).
-var _ = Describe("follower apply (M3)", func() {
+// An entry captured on one instance applies on another and both serve
+// identical reads, including to an external reader (re-run against an
+// apply-built db).
+var _ = Describe("follower apply", func() {
 	It("replays a leader's captured entries into a fresh follower with identical reads", func() {
 		dir := GinkgoT().TempDir()
 
 		// Leader: a normal literaft connection, but registered with a
-		// recording gate so the test can get at exactly what M2 captured,
-		// the same way gate_test.go does for M2.
+		// recording gate so the test can get at exactly what the
+		// commit-frame gate captured, the same way gate_test.go does.
 		var entries []raftvfs.Entry
 		gateName := "literaft-apply-test-leader"
 		raftvfs.RegisterGate(gateName, sqlite3vfs.Find(""), raftvfs.GateFunc(func(e raftvfs.Entry) error {
@@ -124,13 +124,13 @@ var _ = Describe("follower apply (M3)", func() {
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 2")).To(Equal("z"))
 		Expect(queryInt(follower, "SELECT count(*) FROM t WHERE id = 3")).To(Equal(int64(0)))
 
-		// Fail loudly, not skip: this re-runs M1's load-bearing
-		// external-reader check (CLAUDE.md/ROADMAP.md: "the whole premise
-		// depends on it") against an apply-built db specifically. A Skip
-		// here would let an environment missing the sqlite3 CLI pass
-		// quietly instead of surfacing that this claim was never checked.
+		// Fail loudly, not skip: this re-runs the load-bearing
+		// external-reader check (CLAUDE.md: "the whole premise depends on
+		// it") against an apply-built db specifically. A Skip here would
+		// let an environment missing the sqlite3 CLI pass quietly instead
+		// of surfacing that this claim was never checked.
 		if _, err := exec.LookPath("sqlite3"); err != nil {
-			Fail("stock sqlite3 CLI not found in PATH; required to re-run M1 against an apply-built db")
+			Fail("stock sqlite3 CLI not found in PATH; required to re-run the external-reader check against an apply-built db")
 		}
 
 		check, err := externalRead(followerPath, "PRAGMA integrity_check")
@@ -144,8 +144,9 @@ var _ = Describe("follower apply (M3)", func() {
 
 	// walindex.go's frameZero and hashTableOffsets both special-case
 	// wal-index page 0 (frames 1-4062, hashtableNPageOne) versus every later
-	// page, but the M3 test above only ever produces a handful of frames --
-	// never enough to actually exercise the page != 0 branches. A regression
+	// page, but the follower-apply test above only ever produces a handful
+	// of frames -- never enough to actually exercise the page != 0 branches.
+	// A regression
 	// here (e.g. an off-by-one in hashtableNPageOne+(page-1)*hashtableNPage)
 	// would silently corrupt any sufficiently large apply, undetected.
 	It("replays enough frames to overflow wal-index page 0 into page 1", func() {

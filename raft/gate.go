@@ -28,19 +28,19 @@ func (e *NotLeaderError) Error() string {
 
 // CatchingUpError is returned by Gate.Propose when this node has just won
 // an election but hasn't yet finished draining its apply backlog
-// (docs/ROADMAP.md M5 "gaining leadership"; docs/DESIGN.md §conflicts
-// "apply-behind"). The node genuinely is the raft leader -- unlike
-// NotLeaderError there's no other node to redirect to -- but its local
-// SQLite state may not yet reflect every entry the cluster has already
-// committed, so serving a write now could silently drop or reorder
-// causally-prior data. Callers should retry shortly rather than redirect.
+// (docs/DESIGN.md §conflicts "apply-behind"). The node genuinely is the
+// raft leader -- unlike NotLeaderError there's no other node to redirect
+// to -- but its local SQLite state may not yet reflect every entry the
+// cluster has already committed, so serving a write now could silently
+// drop or reorder causally-prior data. Callers should retry shortly
+// rather than redirect.
 type CatchingUpError struct{}
 
 func (CatchingUpError) Error() string {
 	return "raft: elected leader but still draining the apply backlog"
 }
 
-// Gate adapts a real hraft.Raft cluster to vfs.Gate (docs/ROADMAP.md M4).
+// Gate adapts a real hraft.Raft cluster to vfs.Gate.
 type Gate struct {
 	raft    *hraft.Raft
 	fsm     *FSM
@@ -67,8 +67,7 @@ type Gate struct {
 // (see FSM's doc comment). timeout bounds each hraft.Apply call.
 //
 // NewGate immediately starts a background watcher tracking r's leadership
-// transitions (docs/ROADMAP.md M5 "role transitions"); callers must Close
-// the Gate to stop it.
+// transitions; callers must Close the Gate to stop it.
 func NewGate(r *hraft.Raft, fsm *FSM, timeout time.Duration) *Gate {
 	g := &Gate{raft: r, fsm: fsm, timeout: timeout, stop: make(chan struct{})}
 	g.wg.Add(1)
@@ -131,8 +130,8 @@ func (g *Gate) setReady(v bool) {
 	g.readyMu.Unlock()
 }
 
-// drain implements docs/ROADMAP.md M5's "gaining leadership" step: commit a
-// current-term barrier (a no-op that only resolves once every
+// drain implements the "gaining leadership" step: commit a current-term
+// barrier (a no-op that only resolves once every
 // already-committed entry up to and including it has been sent through
 // FSM.Apply on this node) and only then open the gate. This is also what
 // makes the boolean self-apply marker in fsm.go safe: hraft's Figure-8 rule
@@ -185,8 +184,8 @@ func (g *Gate) drain(term uint64) {
 // Propose implements vfs.Gate. A rejected or ambiguous proposal (including
 // ErrLeadershipLost -- "proposed, outcome unknown") surfaces as a plain
 // error here, which vfs/file.go turns into an IOERR_WRITE, leaving no valid
-// commit frame on disk (docs/CLAUDE.md "Ambiguous commit"; already exercised
-// by the M2 abort-path tests).
+// commit frame on disk (docs/CLAUDE.md "Ambiguous commit"; already
+// exercised by the abort-path tests).
 //
 // The concrete error is also recorded for LastRejection: vfs/file.go's own
 // attempt to preserve it through sqlite3vfs.SystemError doesn't reliably

@@ -118,7 +118,7 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 
 		// A fresh write through the new leader must still follow ADR-005
 		// (materialized elsewhere, not by B itself). This is the Figure-8
-		// race the M5 drain exists to prevent: without it, the self-apply
+		// race the drain exists to prevent: without it, the self-apply
 		// marker could misfire against the just-drained backlog instead of
 		// this new entry, either losing the backlog or double-materializing
 		// this write.

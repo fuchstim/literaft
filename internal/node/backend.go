@@ -17,21 +17,20 @@ import (
 )
 
 // checkpointRetryDelay/checkpointRetryTimeout bound how long Snapshot waits
-// for a full TRUNCATE checkpoint (docs/ROADMAP.md M6): TRUNCATE only fully
-// backfills and truncates the -wal file once no reader still needs older WAL
-// content, so a lagging reader can make one attempt only partially succeed.
+// for a full TRUNCATE checkpoint: TRUNCATE only fully backfills and
+// truncates the -wal file once no reader still needs older WAL content, so
+// a lagging reader can make one attempt only partially succeed.
 const (
 	checkpointRetryDelay   = 20 * time.Millisecond
 	checkpointRetryTimeout = 5 * time.Second
 )
 
 // dbBackend owns every piece of this node's on-disk/SQLite state that a
-// snapshot install (docs/ROADMAP.md M6) must swap out as a unit: the
-// follower-apply handle and the two kept-alive SQLite connections
-// (CLAUDE.md's "keep >=1 RW connection open"). Before M6
-// nothing ever replaced these mid-flight, so Node held them as plain
-// fields; Restore needs to close and reopen all three together, so they're
-// centralized here behind one mutex.
+// snapshot install must swap out as a unit: the follower-apply handle and
+// the two kept-alive SQLite connections (CLAUDE.md's "keep >=1 RW
+// connection open"). Nothing ever replaced these mid-flight before Restore
+// existed, so Node held them as plain fields; Restore needs to close and
+// reopen all three together, so they're centralized here behind one mutex.
 //
 // One plain Mutex, not an RWMutex, guards applier/checkpointer: Apply,
 // Snapshot, Restore, and the checkpoint driver's tick all touch one or both,
@@ -139,8 +138,8 @@ func (b *dbBackend) closeAllLocked() error {
 	return errors.Join(errs...)
 }
 
-// Snapshot implements raftadapter.Snapshotter (docs/ROADMAP.md M6). It
-// drives a TRUNCATE checkpoint -- the natural snapshot cut point
+// Snapshot implements raftadapter.Snapshotter. It drives a TRUNCATE
+// checkpoint -- the natural snapshot cut point
 // (docs/DESIGN.md §checkpoint) -- so the .db file alone becomes a complete,
 // self-contained copy of the current state, then hands back a private copy
 // of those bytes.
@@ -219,10 +218,10 @@ func (b *dbBackend) checkpointTruncateLocked() error {
 	}
 }
 
-// Restore implements raftadapter.Snapshotter (docs/ROADMAP.md M6). It
-// replaces this node's entire .db with r's bytes and resets local WAL/apply
-// state to match, swapping in fresh handles for the applier and both
-// kept-alive SQLite connections.
+// Restore implements raftadapter.Snapshotter. It replaces this node's
+// entire .db with r's bytes and resets local WAL/apply state to match,
+// swapping in fresh handles for the applier and both kept-alive SQLite
+// connections.
 //
 // A failure partway through leaves this node's local state genuinely
 // broken (there is no in-place rollback of a half-completed file swap);
@@ -233,11 +232,11 @@ func (b *dbBackend) checkpointTruncateLocked() error {
 //
 // Restore can also run synchronously inside hraft.NewRaft's startup
 // restoreSnapshot, before Node.Start has opened keeper/checkpointer or
-// registered this node's VFS name (docs/ROADMAP.md M7 "crash/restart
-// recovery") -- attached distinguishes that case, since reopening against
-// an unregistered VFS name would fail. Start's own post-NewRaft code
-// unconditionally opens both connections and calls attachConns regardless
-// of whether a restore happened, so leaving them nil here is safe.
+// registered this node's VFS name -- attached distinguishes that case,
+// since reopening against an unregistered VFS name would fail. Start's
+// own post-NewRaft code unconditionally opens both connections and calls
+// attachConns regardless of whether a restore happened, so leaving them
+// nil here is safe.
 //
 // connMu is held for this whole call (not just around closing/reassigning
 // keeper) alongside mu: hraft's own contract already guarantees Restore
@@ -323,10 +322,10 @@ func (b *dbBackend) Restore(r io.Reader) error {
 }
 
 // removeWALFiles removes dbPath's -wal and -shm siblings, tolerating either
-// not existing. Shared by Node.Start (docs/ROADMAP.md M7 "crash/restart
-// recovery": every process start discards its local WAL tail) and Restore
-// (docs/ROADMAP.md M6: an installed snapshot's .db is already self-
-// contained, so any -wal/-shm on disk belongs to a superseded generation).
+// not existing. Shared by Node.Start (every process start discards its
+// local WAL tail) and Restore (an installed snapshot's .db is already
+// self-contained, so any -wal/-shm on disk belongs to a superseded
+// generation).
 func removeWALFiles(dbPath string) error {
 	if err := os.Remove(dbPath + "-wal"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing -wal: %w", err)

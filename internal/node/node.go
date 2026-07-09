@@ -1,7 +1,7 @@
 // Package node wires the RAFT-backed VFS (docs/DESIGN.md) into one running
 // process: a real hraft.Raft cluster member, the literaft VFS registered
 // against it, and the "keep >=1 RW connection open" + follower checkpoint
-// driver invariants CLAUDE.md calls for (docs/ROADMAP.md M4).
+// driver invariants CLAUDE.md calls for.
 package node
 
 import (
@@ -34,9 +34,8 @@ type Node struct {
 	vfsName   string
 
 	// backend owns the applier and the two kept-alive SQLite connections
-	// (keeper, checkpointer) -- everything a snapshot install
-	// (docs/ROADMAP.md M6) must close and reopen together as a unit. See
-	// internal/node/backend.go.
+	// (keeper, checkpointer) -- everything a snapshot install must close
+	// and reopen together as a unit. See internal/node/backend.go.
 	backend *dbBackend
 
 	stopCheckpoint chan struct{}
@@ -58,22 +57,22 @@ func Start(cfg Config) (*Node, error) {
 	}
 
 	// Discard any -wal/-shm left over from a previous life of this process
-	// (docs/ROADMAP.md M7 "crash/restart recovery") before anything else
-	// touches them. Local WAL fsync is skippable (docs/DESIGN.md
-	// §durability), so this node's own on-disk WAL tail is never trusted as
-	// durable; the RAFT log is. Must run before the priming connection
-	// below: that's a real SQLite connection, and if it saw a non-empty,
-	// non-corrupt -wal it could run SQLite's own walIndexRecover and
-	// resurrect the discarded tail's committed frames on its own --
-	// exactly the untrusted local-recovery path apply/README.md says is
-	// out of scope, defeating the RAFT-log-driven rebuild below. With a
-	// clean -wal, hraft's own startup replay (from its last local snapshot
-	// index, or from log index 1 if none -- restoreSnapshot/processLogs in
-	// vendor/github.com/hashicorp/raft) re-materializes everything via
-	// FSM.Apply -> apply.Applier.Apply. That's safe to replay more of than
-	// strictly necessary: RAFT entries are full page images, not deltas
-	// (CLAUDE.md), so re-applying an already-applied entry converges to the
-	// same state instead of corrupting it.
+	// before anything else touches them. Local WAL fsync is skippable
+	// (docs/DESIGN.md §durability), so this node's own on-disk WAL tail is
+	// never trusted as durable; the RAFT log is. Must run before the
+	// priming connection below: that's a real SQLite connection, and if it
+	// saw a non-empty, non-corrupt -wal it could run SQLite's own
+	// walIndexRecover and resurrect the discarded tail's committed frames
+	// on its own -- exactly the untrusted local-recovery path
+	// apply/README.md says is out of scope, defeating the RAFT-log-driven
+	// rebuild below. With a clean -wal, hraft's own startup replay (from
+	// its last local snapshot index, or from log index 1 if none --
+	// restoreSnapshot/processLogs in vendor/github.com/hashicorp/raft)
+	// re-materializes everything via FSM.Apply -> apply.Applier.Apply.
+	// That's safe to replay more of than strictly necessary: RAFT entries
+	// are full page images, not deltas (CLAUDE.md), so re-applying an
+	// already-applied entry converges to the same state instead of
+	// corrupting it.
 	if err := removeWALFiles(cfg.DBPath); err != nil {
 		return nil, fmt.Errorf("node: clearing stale -wal/-shm for %s: %w", cfg.DBPath, err)
 	}
@@ -246,8 +245,8 @@ func (n *Node) Raft() *hraft.Raft { return n.raft }
 // same VFS name) so they flow through the commit-frame gate.
 //
 // fn must not retain the *sqlite3.Conn it's given past WithDB's return: a
-// concurrent snapshot install (docs/ROADMAP.md M6 InstallSnapshot, which can
-// fire on a follower serving reads/writes at any time) closes and replaces
+// concurrent snapshot install (InstallSnapshot, which can fire on a
+// follower serving reads/writes at any time) closes and replaces
 // this connection, and WithDB's lock is what makes that safe -- a
 // previous DB() *sqlite3.Conn accessor let the pointer escape unprotected,
 // which ginkgo -race caught as a genuine use-after-free. That same lock also

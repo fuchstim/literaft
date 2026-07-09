@@ -25,14 +25,14 @@ import (
 // the whole suite.
 const externalTimeout = 10 * time.Second
 
-// ROADMAP.md M1: prove, before building anything else on top, that an
-// *unmodified* stock SQLite process can open our wrapper-VFS-written
-// database read-only and stay correct concurrently with local writes and
-// checkpoints. This is requirement #3, and the load-bearing risk is lock
-// interop: ncruces' default VFS uses OFD locks (F_OFD_SETLK), stock
-// SQLite's unix VFS uses classic POSIX advisory locks (F_SETLK) — see
-// docs/NCRUCES_NOTES.md. These tests drive the real system `sqlite3` CLI
-// as the external reader, not another ncruces connection.
+// Prove, before building anything else on top, that an *unmodified* stock
+// SQLite process can open our wrapper-VFS-written database read-only and
+// stay correct concurrently with local writes and checkpoints. This is
+// requirement #3, and the load-bearing risk is lock interop: ncruces'
+// default VFS uses OFD locks (F_OFD_SETLK), stock SQLite's unix VFS uses
+// classic POSIX advisory locks (F_SETLK) — see docs/NCRUCES_NOTES.md.
+// These tests drive the real system `sqlite3` CLI as the external reader,
+// not another ncruces connection.
 
 var sqlite3Path string
 
@@ -42,16 +42,16 @@ func init() {
 
 // requireExternalSQLite fails loudly, rather than skipping, if this
 // environment can't run the external-reader compatibility checks: CLAUDE.md
-// and ROADMAP.md call M1 the single most load-bearing verification in the
-// project ("the whole premise depends on it... if this fails, stop"). A
-// Skip here would let a CI environment missing the sqlite3 CLI (or lacking
-// the file-locking/shared-memory support requirement #3 depends on) pass
+// calls this the single most load-bearing verification in the project ("the
+// whole premise depends on it... if this fails, stop"). A Skip here would
+// let a CI environment missing the sqlite3 CLI (or lacking the
+// file-locking/shared-memory support requirement #3 depends on) pass
 // quietly instead of surfacing that the one claim the whole architecture is
 // staked on was never actually checked.
 func requireExternalSQLite() {
 	GinkgoHelper()
 	if sqlite3Path == "" {
-		Fail("stock sqlite3 CLI not found in PATH; required for external-reader compatibility tests (ROADMAP.md M1)")
+		Fail("stock sqlite3 CLI not found in PATH; required for external-reader compatibility tests")
 	}
 	if !sqlite3vfs.SupportsFileLocking || !sqlite3vfs.SupportsSharedMemory {
 		Fail("platform lacks the file locking or shared memory support requirement #3 depends on")
@@ -125,7 +125,7 @@ func (s *externalSession) exec(sql string) error {
 
 // queryLine sends sql, which must produce exactly one output line, and
 // returns it. Bounded by externalTimeout: a hang here means the external
-// reader never got to respond, which is itself the M1 finding to report.
+// reader never got to respond, which is itself the finding to report.
 func (s *externalSession) queryLine(sql string) (string, error) {
 	if err := s.exec(sql); err != nil {
 		return "", err
@@ -172,7 +172,7 @@ func (s *externalSession) close() error {
 	}
 }
 
-var _ = Describe("external reader compatibility (M1)", func() {
+var _ = Describe("external reader compatibility", func() {
 	BeforeEach(requireExternalSQLite)
 
 	It("never sees an in-flight, uncommitted local write", func() {

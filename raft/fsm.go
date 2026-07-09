@@ -31,8 +31,8 @@ type Materializer interface {
 //
 // That boolean marker is only safe because Gate never lets a *new*
 // self-proposal start until it has proven there's no leftover backlog from
-// an earlier leadership stint (docs/ROADMAP.md M5 "gaining leadership",
-// implemented by Gate.drain). Without that drain, a node could accumulate
+// an earlier leadership stint (the "gaining leadership" step implemented
+// by Gate.drain). Without that drain, a node could accumulate
 // backlog against itself, with no other leader involved, via hraft's
 // Figure-8 rule: an entry it appended while leader but never got committed
 // (e.g. it lost leadership mid-proposal, the scenario Gate.Propose's
@@ -55,7 +55,7 @@ type FSM struct {
 }
 
 // Snapshotter captures and restores this node's full database state for
-// RAFT snapshot-based (very-behind follower) catch-up (docs/ROADMAP.md M6).
+// RAFT snapshot-based (very-behind follower) catch-up.
 // internal/node's dbBackend satisfies this by driving a TRUNCATE checkpoint
 // (docs/DESIGN.md §checkpoint's "natural cut point") and swapping the
 // resulting .db file in as a unit.
@@ -156,7 +156,7 @@ func (f *FSM) Apply(log *hraft.Log) interface{} {
 	return nil
 }
 
-// Snapshot implements hraft.FSM (docs/ROADMAP.md M6). It delegates the
+// Snapshot implements hraft.FSM. It delegates the
 // actual state capture to the configured Snapshotter and wraps the result
 // for hraft's snapshot machinery.
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {

@@ -1,5 +1,5 @@
 // Package raft is the thin adapter between vfs.Gate/vfs.Entry and a real
-// hashicorp/raft cluster (docs/ROADMAP.md M4). The hashicorp/raft import is
+// hashicorp/raft cluster. The hashicorp/raft import is
 // aliased to hraft throughout so this package can keep the name CLAUDE.md's
 // repo layout gives it ("/raft/ - thin adapter over the chosen RAFT
 // library") without shadowing.

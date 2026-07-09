@@ -15,11 +15,11 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// ROADMAP.md M2: commit-frame interception with a stub gate. These tests
-// register the wrapper VFS with a custom (non-default) Gate so they can
-// observe exactly what the interception captured, and force the abort
-// branch on demand -- neither is possible through the package's default
-// AlwaysCommit registration used by the other test files.
+// Commit-frame interception with a stub gate. These tests register the
+// wrapper VFS with a custom (non-default) Gate so they can observe exactly
+// what the interception captured, and force the abort branch on demand --
+// neither is possible through the package's default AlwaysCommit
+// registration used by the other test files.
 
 // pageSizeProbe returns SQLite's actual default page size by asking a
 // throwaway in-memory connection, rather than assuming a value (CLAUDE.md:
@@ -79,7 +79,7 @@ func openGated(path string, gate raftvfs.Gate) *sqlite3.Conn {
 	return c
 }
 
-var _ = Describe("commit-frame interception (M2)", func() {
+var _ = Describe("commit-frame interception", func() {
 	It("captures exactly the frames SQLite writes for a committed transaction", func() {
 		dir := GinkgoT().TempDir()
 		const ddl = `

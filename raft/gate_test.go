@@ -116,7 +116,7 @@ func shutdownCluster(nodes []*testNode) {
 	}
 }
 
-// waitForLeader waits for a leader that has also finished its M5
+// waitForLeader waits for a leader that has also finished its
 // gaining-leadership drain (Gate.Ready), i.e. one that's actually ready to
 // accept a proposal -- not just one hraft currently reports as State() ==
 // Leader, which can be true for a moment before the drain completes.
@@ -268,9 +268,9 @@ var _ = Describe("Gate", func() {
 		// retroactively commit this stale, uncommitted "lost" entry (by
 		// covering it with a later current-term commit) -- exactly the
 		// apply-backlog-on-a-regained-leader scenario raft.FSM's self-apply
-		// flag is documented not to handle yet (docs/ROADMAP.md M5,
-		// "gaining leadership" drain). Asserting anything past the error
-		// here would be testing a guarantee M4 doesn't make.
+		// flag is documented not to handle on its own -- that's Gate.drain's
+		// "gaining leadership" job instead. Asserting anything past the error
+		// here would be testing a guarantee this Propose call alone doesn't make.
 		entry := vfs.Entry{Frames: []vfs.Frame{{Pgno: 1, Page: []byte("lost")}}, NTruncate: 1}
 		errCh := make(chan error, 1)
 		go func() { errCh <- leader.gate.Propose(entry) }()

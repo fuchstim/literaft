@@ -13,9 +13,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// docs/ROADMAP.md M7 "done when" (crash/restart recovery): a node whose
-// process restarts against its own prior DataDir/DBPath -- distinct from
-// cluster_test.go's "killed and permanently retired" or snapshot_test.go's
+// Crash/restart recovery: a node whose process restarts against its own
+// prior DataDir/DBPath -- distinct from cluster_test.go's "killed and
+// permanently retired" or snapshot_test.go's
 // "brand new joiner" cases, neither of which reuses existing on-disk state
 // -- ends up logically identical to the rest of the cluster, including to
 // an external reader, regardless of whether it was a follower or the
@@ -39,7 +39,7 @@ func assertRestarted(restarted *node.Node, dbPath string, wantRows int64) {
 	Expect(queryInt(external, "SELECT count(*) FROM t")).To(Equal(wantRows))
 }
 
-var _ = Describe("node restart (M7)", func() {
+var _ = Describe("node restart", func() {
 	It("recovers a follower restarted before any local snapshot has been taken", func() {
 		h := startCluster(3)
 		defer h.shutdown()
@@ -85,9 +85,9 @@ var _ = Describe("node restart (M7)", func() {
 	// startSnapshottingCluster mirrors snapshot_test.go's low thresholds so
 	// a local RAFT snapshot reliably exists by the time restart runs --
 	// the case that specifically exercises FSM.Snapshotter being wired
-	// before hraft.NewRaft (docs/ROADMAP.md M7's fix alongside the
-	// -wal/-shm discard: hraft.NewRaft synchronously restores this node's
-	// latest local snapshot on startup).
+	// before hraft.NewRaft (alongside the -wal/-shm discard: hraft.NewRaft
+	// synchronously restores this node's latest local snapshot on
+	// startup).
 	startSnapshottingCluster := func() *clusterHarness {
 		GinkgoHelper()
 		h := &clusterHarness{

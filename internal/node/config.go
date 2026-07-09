@@ -7,7 +7,7 @@ import (
 	hraft "github.com/hashicorp/raft"
 )
 
-// Config configures one literaft node process (docs/ROADMAP.md M4).
+// Config configures one literaft node process.
 type Config struct {
 	// ID uniquely identifies this node across the cluster's lifetime and
 	// becomes its hraft.ServerID.
@@ -46,8 +46,8 @@ type Config struct {
 
 	// SnapshotThreshold, SnapshotInterval, and TrailingLogs are wired
 	// straight onto hraft's raft.Config; they control how often this node
-	// takes a RAFT snapshot (raft.FSM.Snapshot, docs/ROADMAP.md M6) and how
-	// many log entries it retains past the last snapshot. Default to
+	// takes a RAFT snapshot (raft.FSM.Snapshot) and how many log entries it
+	// retains past the last snapshot. Default to
 	// hraft's own defaults (8192, 120s, 10240 -- see hashicorp/raft's
 	// DefaultConfig) when zero. Tests that need to force real, fast
 	// snapshotting (rather than waiting on production-sized thresholds)

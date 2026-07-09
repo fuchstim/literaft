@@ -1,5 +1,5 @@
 // Command literaft runs one node process: a real hraft cluster member
-// serving a RAFT-replicated SQLite database (docs/ROADMAP.md M4). Wiring
+// serving a RAFT-replicated SQLite database. Wiring
 // lives in internal/node; this is the flag parsing and process lifecycle
 // around it, plus an interactive SQL REPL (repl.go) on stdin/stdout for
 // exercising a running node by hand.

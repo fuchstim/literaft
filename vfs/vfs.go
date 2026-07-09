@@ -5,9 +5,9 @@
 // wrapped implementation, including the optional capability interfaces
 // (FileSharedMemory, FileLockState, FileCheckpoint, FileUnwrap, ...) so WAL
 // mode, shared memory, and external-reader compatibility keep working
-// unmodified. Open tags each file by type (database, WAL, journal) so later
-// milestones can add commit-frame interception on exactly the WAL write path
-// (see docs/DESIGN.md, docs/ROADMAP.md M0-M2).
+// unmodified. Open tags each file by type (database, WAL, journal) so
+// commit-frame interception can be added on exactly the WAL write path (see
+// docs/DESIGN.md).
 package vfs
 
 import (
@@ -22,7 +22,7 @@ func init() {
 	Register(Name, sqlite3vfs.Find(""))
 }
 
-// Register wraps base with the M2 stub gate (AlwaysCommit) and registers it
+// Register wraps base with the stub gate (AlwaysCommit) and registers it
 // under name, so it can be selected with "?vfs=<name>" in a SQLite URI DSN.
 func Register(name string, base sqlite3vfs.VFS) {
 	RegisterGate(name, base, AlwaysCommit)
@@ -30,7 +30,7 @@ func Register(name string, base sqlite3vfs.VFS) {
 
 // RegisterGate is like Register but lets the caller supply the gate that
 // decides whether each write transaction's commit frame may be published.
-// RAFT integration (M4) will supply the real one; tests use it to exercise
+// Real RAFT integration supplies the real one; tests use it to exercise
 // the abort branch. Page size isn't enforced (see RegisterGatePageSize).
 func RegisterGate(name string, base sqlite3vfs.VFS, gate Gate) {
 	sqlite3vfs.Register(name, WrapGate(base, gate))
@@ -49,7 +49,7 @@ func RegisterGatePageSize(name string, base sqlite3vfs.VFS, gate Gate, pageSize 
 	sqlite3vfs.Register(name, WrapGatePageSize(base, gate, pageSize))
 }
 
-// Wrap wraps base with the M2 stub gate (AlwaysCommit). Every other
+// Wrap wraps base with the stub gate (AlwaysCommit). Every other
 // operation is delegated to base unchanged.
 func Wrap(base sqlite3vfs.VFS) sqlite3vfs.VFS {
 	return WrapGate(base, AlwaysCommit)

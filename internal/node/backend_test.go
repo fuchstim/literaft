@@ -111,10 +111,11 @@ func pageSizeProbe() uint32 {
 	return uint32(queryInt(c, "PRAGMA page_size"))
 }
 
-// docs/ROADMAP.md M6 "done when": a Snapshot/Restore round trip must leave
-// the destination logically identical to the source, including to an
-// external, unmodified-VFS reader -- the same bar M1/M3 hold themselves to.
-var _ = Describe("dbBackend snapshot/restore (M6)", func() {
+// A Snapshot/Restore round trip must leave the destination logically
+// identical to the source, including to an external, unmodified-VFS
+// reader -- the same bar the external-reader and follower-apply tests
+// hold themselves to.
+var _ = Describe("dbBackend snapshot/restore", func() {
 	It("round-trips a database's full state via Snapshot and Restore", func() {
 		dir := GinkgoT().TempDir()
 		pageSize := pageSizeProbe()
@@ -141,9 +142,8 @@ var _ = Describe("dbBackend snapshot/restore (M6)", func() {
 		Expect(nodeQueryText(dst, "SELECT v FROM t WHERE id = 1")).To(Equal("row0"))
 		Expect(nodeQueryText(dst, "SELECT v FROM t WHERE id = 50")).To(Equal("row49"))
 
-		// External-reader compatibility (docs/ROADMAP.md M1/M3's bar): open
-		// the restored file with a completely plain, unmodified-VFS
-		// connection -- no "?vfs=" at all.
+		// External-reader compatibility: open the restored file with a
+		// completely plain, unmodified-VFS connection -- no "?vfs=" at all.
 		external, err := sqlite3.Open(dst.cfg.DBPath)
 		Expect(err).NotTo(HaveOccurred())
 		defer external.Close()
