@@ -9,9 +9,13 @@
 //     process restart is possible (nothing durable to restart from). For
 //     LogAdapter/Gate/FSM/driver-level tests that build their own
 //     log.SingleWriterLog, raftgate.Gate, or Driver on top of the raw nodes.
-//   - NewTCPCluster: real TCP transport, real BoltDB log store, real file
-//     snapshot store, on disk under a caller-provided directory, each node
-//     already wrapped in a real driver.Driver + *sql.DB. Supports
+//   - NewTCPCluster: real TCP transport and file snapshot store on disk
+//     under a caller-provided directory, each node already wrapped in a
+//     real driver.Driver + *sql.DB. The raft log/stable store is an
+//     in-memory raftsqlite.Store by default (WithOnDiskRaftStore switches
+//     it to a real file, for tests -- like sustained-throughput
+//     benchmarks -- that would otherwise grow the raft log large enough to
+//     exhaust the in-process WASM SQLite engine's memory). Supports
 //     RestartNode. For cluster/restart/snapshot/REPL-level tests that want
 //     the full production stack already assembled.
 package testutils
@@ -156,6 +160,7 @@ type options struct {
 	snapshotInterval  time.Duration
 	trailingLogs      uint64
 	logOutput         io.Writer
+	onDiskRaftStore   bool
 }
 
 func defaultOptions() options {
@@ -190,6 +195,18 @@ func WithTrailingLogs(n uint64) Option { return func(o *options) { o.trailingLog
 // Defaults to io.Discard.
 func WithLogOutput(w io.Writer) Option {
 	return func(o *options) { o.logOutput = w }
+}
+
+// WithOnDiskRaftStore (NewTCPCluster only) backs the raft log/stable store
+// with a real file under the node's data dir instead of the default
+// in-memory raftsqlite.Store. Use this for tests that sustain heavy write
+// volume for a while (e.g. a throughput benchmark): an in-memory store
+// holds every raft log entry in the WASM SQLite engine's own memory with
+// nothing to spill to disk, which a long enough burst can exhaust --
+// observed as ncruces' driver panicking on SQLITE_NOMEM mid-statement and
+// the node hanging forever afterward, not a clean error.
+func WithOnDiskRaftStore() Option {
+	return func(o *options) { o.onDiskRaftStore = true }
 }
 
 // fastRaftConfig shrinks hraft's election/heartbeat timing so

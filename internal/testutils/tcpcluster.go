@@ -11,11 +11,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
 	"github.com/fuchstim/literaft/log"
+	"github.com/fuchstim/literaft/raftsqlite"
 )
 
 // TCPCluster is a Cluster built by NewTCPCluster; it additionally supports
@@ -53,11 +53,15 @@ func FreeTCPAddr(t TB) string {
 }
 
 // NewTCPCluster builds n literaft nodes wired exactly like a real node
-// process: real TCP transport, a real BoltDB log store and file snapshot
-// store on disk under dir, and a real driver.Driver + *sql.DB registered
-// under a unique sql.Register alias. Supports RestartNode for
-// crash/restart-recovery tests, which NewInmemCluster's in-memory stores
-// can't (there'd be nothing durable to restart from).
+// process, minus one deliberate default: real TCP transport and file
+// snapshot store on disk under dir, a real driver.Driver + *sql.DB
+// registered under a unique sql.Register alias, but an in-memory raft
+// log/stable store (raftsqlite.New(":memory:")) rather than an on-disk one,
+// for test speed -- see WithOnDiskRaftStore for tests that need the latter.
+// Supports RestartNode for crash/restart-recovery tests, which
+// NewInmemCluster's in-memory stores can't (there'd still be a snapshot
+// store and FSM db durable enough to restart from, even with the raft log
+// itself gone -- hraft resyncs the rest from the cluster).
 func NewTCPCluster(t TB, dir string, n int, opts ...Option) *TCPCluster {
 	t.Helper()
 	o := defaultOptions()
@@ -150,9 +154,11 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 	return -1
 }
 
-// startTCPNode brings up one node exactly as a real node process does: a
-// real TCP transport, BoltDB log store, and file snapshot store under
-// s.dataDir, a real fsm.FSM over s.dbPath, a real hraft.Raft (which
+// startTCPNode brings up one node much as a real node process does: a real
+// TCP transport and file snapshot store under s.dataDir, an in-memory
+// raftsqlite log/stable store by default (o.onDiskRaftStore switches it to
+// a real file under s.dataDir instead), a real fsm.FSM over s.dbPath, a
+// real hraft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
 // restarting an already-bootstrapped node is a harmless no-op), a
 // log.SingleWriterLog adapting it, and a driver.Driver registered under a
@@ -169,9 +175,13 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 		t.Fatalf("testutils: MkdirAll(%s): %v", s.dataDir, err)
 	}
 
-	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(s.dataDir, "raft.db"))
+	raftStorePath := ":memory:"
+	if o.onDiskRaftStore {
+		raftStorePath = filepath.Join(s.dataDir, "raft.db")
+	}
+	raftStore, err := raftsqlite.New(raftStorePath)
 	if err != nil {
-		t.Fatalf("testutils: raftboltdb.NewBoltStore: %v", err)
+		t.Fatalf("testutils: raftsqlite.New: %v", err)
 	}
 
 	snapStore, err := raft.NewFileSnapshotStore(s.dataDir, 2, o.logOutput)
@@ -197,7 +207,7 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 		cfg.TrailingLogs = o.trailingLogs
 	}
 
-	r, err := raft.NewRaft(cfg, f, boltStore, boltStore, snapStore, transport)
+	r, err := raft.NewRaft(cfg, f, raftStore, raftStore, snapStore, transport)
 	if err != nil {
 		t.Fatalf("testutils: raft.NewRaft(%s): %v", s.id, err)
 	}
@@ -240,7 +250,7 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 			if err := f.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("fsm close: %w", err))
 			}
-			if err := boltStore.Close(); err != nil {
+			if err := raftStore.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("closing raft log store: %w", err))
 			}
 			if err := transport.Close(); err != nil {
