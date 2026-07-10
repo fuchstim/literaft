@@ -3,6 +3,8 @@ package walappender
 import (
 	"encoding/binary"
 	"sync/atomic"
+
+	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
 )
 
 // Wal-index layout constants, as defined by SQLite itself. All wal-index
@@ -20,6 +22,16 @@ const (
 	hashtableHash1    = 383                             // HASHTABLE_HASH_1
 	hashtableNSlot    = hashtableNPage * 2              // HASHTABLE_NSLOT, 8192
 	hashtableNPageOne = hashtableNPage - indexHdrSize/4 // HASHTABLE_NPAGE_ONE, 4062
+
+	// ckptInfoOffset is where the WalCkptInfo block (nBackfill, the
+	// aReadMark[] array, the aLock[] byte range the OS-level lock offsets
+	// index into, nBackfillAttempted, notUsed0) starts within region 0,
+	// right after the two WalIndexHdr copies.
+	ckptInfoOffset = 2 * hdrCopySize
+
+	// readMarkNotUsed is WAL_NREADER slot sentinel READMARK_NOT_USED:
+	// "no reader has claimed this mark".
+	readMarkNotUsed = 0xffffffff
 )
 
 // walIndexHeader is the in-memory form of one WalIndexHdr copy. salt is carried as
@@ -118,6 +130,34 @@ func writeWALIndexHeader(region0 []byte, h walIndexHeader) {
 func barrier() {
 	var b atomic.Bool
 	b.Swap(true)
+}
+
+// readNBackfill reads nBackfill from the wal-index's checkpoint-info block:
+// how many frames a checkpoint has already copied back into the database
+// file. A naturally-aligned 4-byte value doesn't need the tear-safe
+// two-copy treatment the multi-field header gets -- there's only one field
+// here, so there's nothing for a torn read to mix bytes between.
+func readNBackfill(region0 []byte) uint32 {
+	return binary.LittleEndian.Uint32(region0[ckptInfoOffset : ckptInfoOffset+4])
+}
+
+// resetCkptInfoForRewind clears nBackfill and the reader marks in the
+// checkpoint-info block once the wal-index header has been reset to an
+// empty log: mark 0 is always valid for an empty log and is left alone,
+// mark 1 goes back to 0, and marks 2..NReaders-1 are marked unclaimed so a
+// reader can't mistake a stale mark for a still-current one.
+func resetCkptInfoForRewind(region0 []byte) {
+	binary.LittleEndian.PutUint32(region0[ckptInfoOffset:ckptInfoOffset+4], 0)   // nBackfill
+	binary.LittleEndian.PutUint32(region0[ckptInfoOffset+4:ckptInfoOffset+8], 0) // aReadMark[1]
+	for i := 2; i < shm.NReaders; i++ {
+		off := ckptInfoOffset + 4 + i*4
+		binary.LittleEndian.PutUint32(region0[off:off+4], readMarkNotUsed)
+	}
+	// nBackfillAttempted follows nBackfill (4 bytes), aReadMark[NReaders]
+	// (4 bytes each), and aLock[nLocks] (1 byte each, nLocks == NReaders+3:
+	// WriteLock, CheckpointLock, RecoverLock plus the NReaders read locks).
+	nBackfillAttemptedOffset := ckptInfoOffset + 4 + shm.NReaders*4 + (shm.NReaders + 3)
+	binary.LittleEndian.PutUint32(region0[nBackfillAttemptedOffset:nBackfillAttemptedOffset+4], 0)
 }
 
 // framePage returns which 32KB wal-index page holds the hash-table entry
