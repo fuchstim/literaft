@@ -116,12 +116,16 @@ var _ = Describe("throughput", func() {
 		measureThroughput(experiment, db)
 	})
 
-	for _, n := range []int{1, 2, 5} {
+	for _, n := range []int{1, 2, 3, 5} {
 		It(fmt.Sprintf("measures a %d-node TCP cluster", n), func() {
 			experiment := gmeasure.NewExperiment(fmt.Sprintf("%d-node cluster", n))
 			AddReportEntry(experiment.Name, experiment)
 
-			c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), n)
+			// On-disk raft store: this benchmark sustains heavy write
+			// volume, and the default in-memory raftsqlite.Store has
+			// nothing to spill to -- a long enough burst exhausts the WASM
+			// SQLite engine's own memory (see WithOnDiskRaftStore's doc).
+			c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), n, testutils.WithOnDiskRaftStore(), testutils.WithSnapshotInterval(time.Second))
 			defer c.Shutdown()
 			leader := c.ReadyLeader()
 

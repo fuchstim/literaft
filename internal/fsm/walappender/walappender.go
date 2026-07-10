@@ -109,6 +109,14 @@ func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction) error {
 // takes WAL_WRITE_LOCK for its own duration and releases it before
 // returning, whether it succeeds or fails.
 func (a *WALAppender) AppendFrames(fs []*Frame) error {
+	// Run after SHM lock was released
+	defer func() {
+		if a.dirtyPageCount >= a.checkpointThresholdPages {
+			a.checkpoint()
+			a.dirtyPageCount = 0
+		}
+	}()
+
 	if err := a.shm.Lock(shm.WriteLock); err != nil {
 		return fmt.Errorf("failed to acquire WAL_WRITE_LOCK: %w", err)
 	}
@@ -160,10 +168,6 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 			hdr.frameCksum = cksum
 			hdr.change++
 			writeWALIndexHeader(region0, hdr)
-
-			if a.dirtyPageCount >= a.checkpointThresholdPages {
-				a.checkpoint()
-			}
 		}
 	}
 
