@@ -89,7 +89,9 @@ Implement the shm layer and materialize an entry into a local db.
 Wire `hashicorp/raft` in via `internal/raft/gate` (the gate) and
 `internal/raft/proto` (the entry wire format).
 
-- Leader: `Gate.Propose` proposes to RAFT, releases commit frame on quorum.
+- Leader: `Gate.ProposeTransaction` proposes through a `LogAdapter`
+  (`log.SingleWriterLog` for a real cluster) to RAFT, releases commit frame
+  on quorum.
 - Followers: `fsm.FSM.Apply` (RAFT's state machine callback) calls
   `internal/fsm/walappender`.
 - Reject follower-originated client writes with a leader hint (ADR-007).
@@ -112,17 +114,18 @@ churn itself; snapshot-based catch-up is split out into M6 below.
   `internal/fsm/walappender/shm/`'s apply path) already serializes any
   follower-apply against a still-in-flight local write. No additional code
   needed beyond verifying this via tests
-  (`internal/raft/gate/gate_test.go`'s "surfaces a lost-leadership proposal"
-  case).
-- **Gaining leadership:** `internal/raft/gate.Gate` tracks a `ready` flag,
-  closed (`false`) the instant a leadership term begins and opened only once
-  a current-term `hraft.Barrier` call returns — which by construction blocks
-  until every already-committed entry, including any backlog, has been sent
-  through `fsm.FSM.Apply` on this node (`Gate.drain`). `Gate.Propose` rejects
-  with `CatchingUpError` while closed.
+  (`log/singlewriter_test.go`'s "surfaces a lost-leadership proposal" case).
+- **Gaining leadership:** `log.SingleWriterLog` (the real hraft-backed
+  `raftgate.LogAdapter`) tracks a `ready` flag, closed (`false`) the instant
+  a leadership term begins and opened only once a current-term
+  `hraft.Barrier` call returns — which by construction blocks until every
+  already-committed entry, including any backlog, has been sent through
+  `fsm.FSM.Apply` on this node (`SingleWriterLog.drain`).
+  `SingleWriterLog.Apply` rejects with `CatchingUpError` while closed
+  (`Gate.ProposeTransaction` just forwards whatever its `LogAdapter` returns).
 - **Done when:** leadership churn under load never produces a torn WAL, a lost
   update, or a stale-state leader serving writes. Verified by
-  `internal/raft/gate/leadership_test.go`: a node with a real,
+  `log/leadership_test.go`: a node with a real,
   durably-replicated-but-unapplied backlog is handed leadership
   (`LeadershipTransferToServer`), stays un-`Ready` and rejects writes until
   the backlog drains, then applies it exactly once and correctly resumes
@@ -132,8 +135,8 @@ churn itself; snapshot-based catch-up is split out into M6 below.
   Figure-8 self-apply race" as a side effect of the drain. A later refactor
   changed the self-apply mechanism in a way that reopened exactly that race,
   fixed again as part of M7's `#41` below — see `DECISIONS.md` ADR-011.
-  `internal/raft/gate/figure8_test.go` is the spec that exercises it (a node
-  materializing its own stale entry, not just a different node's, unlike
+  `log/figure8_test.go` is the spec that exercises it (a node materializing
+  its own stale entry, not just a different node's, unlike
   `leadership_test.go` above).
 
 ## M6 — Snapshots & very-behind followers  *(done)*
@@ -206,13 +209,21 @@ size to M3's shm work.
   hraft's Figure-8 rule or replayed after this node's own `FSM.Restore`
   rewinds it to an older snapshot, used to be silently and permanently
   dropped instead of materialized. Fixed as part of the protobuf wire-format
-  rework below: `Header.Id` is now a per-proposal token, and `Gate.propose`
-  marks/unmarks it in `fsm.FSM.skipEntries` only for the duration of its own
-  `raft.Apply` call, so a retroactive commit that lands after that call has
-  already returned finds no marker and materializes normally. Both
-  regression tests that demonstrated the bug now pass as ordinary `It`s
-  (`internal/raft/gate/figure8_test.go`,
+  rework below: `Header.Id` is now a per-proposal token, and
+  `Gate.proposeTransaction` marks/unmarks it in `fsm.FSM.skipEntries` only for
+  the duration of its own `LogAdapter.Apply` call (`raft.Apply`, for a real
+  cluster), so a retroactive commit that lands after that call has already
+  returned finds no marker and materializes normally. Both regression tests
+  that demonstrated the bug now pass as ordinary `It`s (`log/figure8_test.go`,
   `internal/testutils/restart_test.go`).
+- [**Intermittent external-reader visibility flake in `restart_test.go` under
+  heavy parallel load**](https://github.com/fuchstim/literaft/issues/47) —
+  found while rebuilding this repo's test suite for the raftgate/`LogAdapter`
+  split (`DECISIONS.md` ADR-014): a plain external reader occasionally sees
+  fewer rows than the restarted node's own driver just confirmed, only under
+  a full, heavily parallel `ginkgo -r -p 20 --repeat` run, never in isolated
+  runs of just `internal/testutils`. Not yet root-caused — see the issue for
+  what's been ruled out so far. Not started.
 - [**Fault injection around the commit-frame gate**](https://github.com/fuchstim/literaft/issues/24)
   — crash between withhold and publish; between frame write and header
   advance. Not started.
@@ -232,11 +243,14 @@ size to M3's shm work.
   rather than through a hand-written wrapper. The oneof payload anticipates
   entry kinds other than `Transaction` sharing the same `Header`; `Header.Id`
   is a per-proposal token (see the self-apply-skip fix above), not a node
-  identifier. `vfs.Gate.Propose` and `internal/fsm/walappender`'s
-  `AppendTransaction` (renamed from `AppendEntry`) take `*raftproto.Transaction`
-  directly. No version tag/dual-decode path: a live cluster upgrade across
-  this wire-format change isn't supported, a clean-slate restart is assumed
-  instead.
+  identifier. `internal/fsm/walappender`'s `AppendTransaction` (renamed from
+  `AppendEntry`) takes `*raftproto.Transaction` directly; `vfs.Gate.ProposeTransaction`
+  instead takes the raw captured frames and `nTruncate`, and
+  `internal/raft/gate.Gate` builds the `*raftproto.Transaction` itself from
+  them (ADR-014), so `internal/vfs` doesn't need to import
+  `internal/raft/proto` at all. No version tag/dual-decode path: a live
+  cluster upgrade across this wire-format change isn't supported, a
+  clean-slate restart is assumed instead.
 - [**Consolidate duplicated WAL frame-format constants/layout between vfs and
   walappender**](https://github.com/fuchstim/literaft/issues/44) —
   `walHeaderSize`/`frameHeaderSize`, the pgno/nTruncate byte-offset layout,
@@ -261,17 +275,23 @@ anything outside this repo.
   copy.** *(done)* See M6 above; this was already true pre-refactor
   (`internal/node/backend.go`'s `Snapshot`) and remains true in
   `internal/fsm/snapshotter.Snapshotter`.
-- [**`internal/vfs.File` should translate `Gate.Propose` errors into the
-  right SQLite result code**](https://github.com/fuchstim/literaft/issues/28),
-  not always `sqlite3.IOERR_WRITE` (`internal/vfs/file.go`'s `writeFrameData`
-  commit branch — still has a `// TODO: Return sqlite3.BUSY for retriable
-  errors` as of this writing). A `CatchingUpError` should surface as
-  `sqlite3.BUSY` so a client retries instead of treating it as a hard I/O
-  failure; `NotLeaderError` needs its own mapping so a client-side redirect
-  can tell it apart from both. `Gate.LastRejection`/`Driver.LastRejection` —
-  not the returned result code — remain the reliable mechanism for now
-  (SQLite's own post-failure rollback destroys the one channel a result code
-  could otherwise ride through). Not started.
+- [**`internal/vfs.File` should translate `Gate.ProposeTransaction` errors
+  into the right SQLite result code**](https://github.com/fuchstim/literaft/issues/28),
+  not always `sqlite3.IOERR_WRITE` — **partially done, GitHub issue not yet
+  closed to match.** `internal/vfs/file.go`'s `writeFrameData` commit branch
+  no longer has its `// TODO: Return sqlite3.BUSY for retriable errors`: a new
+  `vfs.GateError(err, code)` wrapper (ADR-014) lets whatever's behind
+  `vfs.Gate` tag a rejection with the sqlite code it should surface as
+  instead of the `IOERR_WRITE` default, and `log.SingleWriterLog.Apply` uses
+  it so a `CatchingUpError` now surfaces as `sqlite3.BUSY` and a client
+  retries instead of treating it as a hard I/O failure. `NotLeaderError`
+  still has no mapping of its own — it surfaces as the `IOERR_WRITE`
+  default, same as before — so a client-side redirect still can't tell a
+  not-leader rejection apart from an arbitrary I/O failure by result code
+  alone. `Gate.LastRejection`/`Driver.LastRejection` — not the returned
+  result code — remain the reliable mechanism for that distinction in the
+  meantime (SQLite's own post-failure rollback destroys the one channel a
+  result code could otherwise ride through).
 - [**Collapse the FSM constructor + snapshotter-wiring into one call**](https://github.com/fuchstim/literaft/issues/29)
   — **looks done, GitHub issue not yet closed to match.** The pre-refactor
   API (`raft.NewFSM(materializer)` then a separate
@@ -283,26 +303,31 @@ anything outside this repo.
   wasn't done *as* this issue (it fell out of the broader "Refactor"
   commit), so the issue itself is still open on GitHub as of this writing.
 - **Write a top-level `README.md`** covering how to actually use the
-  package: minimal example wiring an `hraft.Raft` + `fsm.FSM` into
-  `driver.New`, the required PRAGMAs (CLAUDE.md's `journal_mode=WAL`,
+  package: minimal example wiring an `hraft.Raft` (via
+  `log.NewSingleWriterLog`) + `fsm.FSM` into `driver.New`, the required
+  PRAGMAs (CLAUDE.md's `journal_mode=WAL`,
   `synchronous=NORMAL` — `driver.Driver` already applies the latter to every
   pooled connection), the leader-only write restriction and how a caller
   sees/handles a not-leader rejection (`Driver.LastRejection`), and a
   pointer to `docs/` for the design rationale. There is still no repo-root
   `README.md`. Not started.
-- **`database/sql`-compatible driver.** *(done)* `driver.New(r, fsm,
-  opts...)` — required args direct, optional ones via functional options
-  (`WithApplyTimeout`; CLAUDE.md "Public API style") — builds the gate,
-  registers a process-unique gated VFS, and the resulting `*driver.Driver`
-  implements `database/sql/driver.Driver`/`driver.DriverContext` by
-  delegating to `ncruces/go-sqlite3/driver`'s `SQLite` type, injecting
-  `PRAGMA synchronous=NORMAL` on every pooled connection. Narrower than the
-  original version this replaced: no `WithPageSize`/`WithName`/
-  `WithCheckpointInterval` (page size comes from `fsm.PageSize()`,
-  checkpointing lives inside `internal/fsm/walappender` now, the VFS name is
-  always a random UUID) and, until reinstated alongside this repo's test
-  coverage, no `Ready()`/`LastRejection()`/`VFSName()` either — see
-  `DECISIONS.md` ADR-013.
+- **`database/sql`-compatible driver.** *(done)* `driver.New(fsm, log)` —
+  required args direct; `log` is a `raftgate.LogAdapter` the caller
+  constructs itself, e.g. `log.NewSingleWriterLog(r, opts...)` for a real
+  cluster, whose own optional args use functional options
+  (`log.WithApplyTimeout`; CLAUDE.md "Public API style") since `driver.New`
+  itself takes none anymore (ADR-014 moved them) — builds the gate, registers
+  a process-unique gated VFS, and the resulting `*driver.Driver` implements
+  `database/sql/driver.Driver`/`driver.DriverContext` by delegating to
+  `ncruces/go-sqlite3/driver`'s `SQLite` type, injecting `PRAGMA
+  synchronous=NORMAL` on every pooled connection. Narrower than the original
+  version this replaced: no `WithPageSize`/`WithName`/`WithCheckpointInterval`
+  (page size comes from `fsm.PageSize()`, checkpointing lives inside
+  `internal/fsm/walappender` now, the VFS name is always a random UUID), and
+  no `Ready()` — reinstated as a thin forwarder per ADR-013, then removed a
+  second time for good by ADR-014, since `Driver` only ever holds the narrow
+  `LogAdapter` interface now, which has no `Ready` method. `LastRejection()`
+  and `VFSName()` remain.
 - [**Speed up the node test suite**](https://github.com/fuchstim/literaft/issues/39)
   — **substantially addressed, differently than originally scoped.** The
   original ask (tighten hraft election/heartbeat timeouts, trim `Eventually`/

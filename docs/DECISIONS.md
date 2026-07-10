@@ -11,7 +11,8 @@ unnecessary constraint, the rejected-alternatives section is usually the answer.
 > `internal/raft/proto/`, and later dissolved `internal/node/` — see ADR-013).
 > ADR-011 through ADR-013 are new, documenting what that refactor changed and
 > a regression + a fix discovered while reinstating the test coverage it also
-> deleted.
+> deleted. ADR-014 documents a later, separate split of `raftgate.Gate` away
+> from hraft itself.
 
 ---
 
@@ -323,11 +324,12 @@ tests, `PIt`/pending at the time this bug was live — see "Status" below):
    drain (`Gate.drain`, a current-term `hraft.Barrier`) is supposed to make
    this safe by materializing it before serving new writes — but the entry's
    `NodeID` still equals this node's own ID, so it's skipped forever instead.
-   `internal/raft/gate/figure8_test.go` isolates a 3-node cluster, proposes
-   on the eventual leader while fully partitioned (so the entry commits
-   nowhere), reconnects only that node with one peer (deterministically
-   regains leadership), lets the drain run, and confirms the other two nodes
-   materialize the entry while the original proposer never does.
+   `internal/raft/gate/figure8_test.go` (moved to `log/figure8_test.go` by
+   ADR-014) isolates a 3-node cluster, proposes on the eventual leader while
+   fully partitioned (so the entry commits nowhere), reconnects only that
+   node with one peer (deterministically regains leadership), lets the drain
+   run, and confirms the other two nodes materialize the entry while the
+   original proposer never does.
 
 2. **An ordinary leader restart after taking its own RAFT snapshot** — no
    partition or leadership drama needed. `hraft.NewRaft` synchronously calls
@@ -357,6 +359,12 @@ immediately before its own `raft.Apply` and the deferred `UnskipEntry`
 immediately after that call returns, so the marker only ever covers the one
 in-flight proposal it belongs to — restoring exactly the transient scope the
 old `beginSelfApply`/`endSelfApply` had.
+
+(`New(r, fsm, timeout)` and `Gate.propose`'s direct `raft.Apply` call are as
+of this ADR; ADR-014 later split `raft.Apply` itself out from under `Gate`
+into a separate `LogAdapter`. The transient skip-marker scope this ADR fixes
+is unaffected — it just moved to `Gate.proposeTransaction` wrapping
+`LogAdapter.Apply` instead of `raft.Apply` directly.)
 
 ---
 
@@ -449,4 +457,75 @@ configured) — reinstated where a caller genuinely needs them
 (`Ready()`/`LastRejection()`/`VFSName()` were restored as thin forwarders
 while reinstating this repo's test coverage after the same refactor deleted
 it; see the git history around that work if the option surface needs
-revisiting again).
+revisiting again — though `Ready()` didn't last: ADR-014 removed it a
+second time, for an unrelated reason).
+
+---
+
+## ADR-014 — `raftgate.Gate` split from hraft; `log.SingleWriterLog` owns the cluster
+
+**Decision (no rationale recorded in the commit that made this change; this
+entry documents the resulting shape after the fact, same as ADR-013).**
+`internal/raft/gate.Gate` no longer holds a `*raft.Raft` or knows anything
+hraft-specific. It now depends on a new one-method interface it defines
+itself, `raftgate.LogAdapter` (`Apply(entry []byte) error`), and does nothing
+but: build an `internal/raft/proto.Entry` from a captured transaction,
+self-skip-mark it on `fsm.FSM` (ADR-011's mechanism, unchanged), marshal it,
+and hand the bytes to the `LogAdapter`. Everything that used to live on
+`Gate` and actually touched hraft — the `*raft.Raft` handle, `Ready`, the
+leadership watcher, the gaining-leadership drain (`Gate.drain`), the apply
+timeout, and the `NotLeaderError`/`CatchingUpError` types themselves — moved
+to a new top-level package, `log`, as `log.SingleWriterLog` (implementing
+`LogAdapter`). `raftgate.New`'s signature changed from `New(r *raft.Raft, fsm
+*fsm.FSM, timeout time.Duration)` to `New(fsm *fsm.FSM, log LogAdapter)`;
+`driver.New` followed the same shape, from `New(r *raft.Raft, fsm *fsm.FSM,
+opts ...Option)` to `New(fsm *fsm.FSM, log raftgate.LogAdapter)` — `driver`'s
+own `Option`/`WithApplyTimeout` are gone, replaced by `log.Option`/
+`log.WithApplyTimeout` passed to `log.NewSingleWriterLog` instead.
+`vfs.Gate`'s method also changed shape, from `Propose(*raftproto.Transaction)`
+to `ProposeTransaction(frames []*vfs.Frame, nTruncate uint32)`, so
+`internal/vfs` no longer needs to import `internal/raft/proto` at all — Gate
+builds the `Transaction` itself, from the frames it's handed.
+
+**What this cost.** `Driver.Ready()` (restored in ADR-013) is gone again, this
+time for good reason rather than an oversight: `Driver` only ever holds a
+`raftgate.LogAdapter`, a narrow interface with no `Ready` method, since not
+every `LogAdapter` need have a concept of "elected leader, draining a
+backlog" (that's specific to a real raft cluster). A caller that needs
+readiness — to decide whether to redirect a client away from a not-yet-drained
+leader — now has to hang onto its own concrete `*log.SingleWriterLog`
+alongside the `driver.Driver` it built from it, rather than asking `Driver`
+for it. `internal/testutils`'s TCP-tier `Node` gained a `Log
+*log.SingleWriterLog` field for exactly this: `Node.Driver.Ready()` stopped
+compiling, and `TCPCluster.ReadyLeader` now checks `Node.Log.Ready()`
+instead.
+
+**A related, easy-to-miss error-plumbing detail.** Since `CatchingUpError` is
+retriable (see `DESIGN.md §Role transitions`) while most gate rejections
+aren't, `log.SingleWriterLog.Apply` now tags it with a new
+`vfs.GateError(err, code)` wrapper carrying an explicit `sqlite3.ExtendedErrorCode`
+(`BUSY`), which `internal/vfs.File`'s write path checks for via `errors.As`
+and uses instead of its `IOERR_WRITE` default — the first time any rejection
+reason has been distinguished at the sqlite result-code level, closing a gap
+`ROADMAP.md` had tracked as a TODO. The first version of `GateError` didn't
+implement `Unwrap`, which silently broke `errors.As`/`errors.Is` discovery of
+the error it wrapped (e.g. recovering a `log.CatchingUpError` from
+`Driver.LastRejection()`) the moment it passed through `Gate.proposeTransaction`'s
+own `fmt.Errorf("...: %w", ...)` wrap — anonymously embedding an `error`
+field only promotes `Error() string`, not `Unwrap() error`. Fixed by adding
+`(*gateError).Unwrap`, caught by a test that fabricates exactly that
+double-wrapped shape (`log/leadership_test.go`'s premature-write case) and
+confirmed (by temporarily removing the fix) to fail without it.
+
+**Test relocation.** Everything under `internal/raft/gate/*_test.go` that
+exercised hraft-specific behavior through a real cluster (`gate_test.go`'s
+`NotLeaderError`/lost-leadership/materialization cases, `figure8_test.go`,
+`leadership_test.go`'s gaining-leadership drain) moved to `log/` (as
+`log/singlewriter_test.go`, `log/figure8_test.go`, `log/leadership_test.go`),
+built on a `raftgate.Gate` + `log.SingleWriterLog` pair per node rather than
+a `Gate` alone, since that pairing is what a real cluster actually wires
+together now. `internal/raft/gate`'s own tests shrank to what's left to
+verify without any raft cluster at all: proto-encoding of a captured
+transaction, the self-skip marker's transience (proven against a real
+`fsm.FSM`, no raft involved), `LastRejection` bookkeeping, and that
+`Gate`'s own error-wrapping preserves `errors.As`/`errors.Is` discoverability.

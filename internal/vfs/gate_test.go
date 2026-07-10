@@ -9,7 +9,6 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -22,9 +21,10 @@ import (
 // demand -- neither is possible through vfsName's shared always-commit
 // registration used by the other test files.
 
-// capturedEntry is one call to spyGate.Propose, recorded verbatim.
+// capturedEntry is one call to spyGate.ProposeTransaction, recorded
+// verbatim.
 type capturedEntry struct {
-	pages     []*raftproto.Page
+	pages     []*vfs.Frame
 	nTruncate uint32
 }
 
@@ -37,10 +37,10 @@ type spyGate struct {
 	reject  bool
 }
 
-func (g *spyGate) Propose(txn *raftproto.Transaction) error {
+func (g *spyGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.entries = append(g.entries, capturedEntry{txn.Pages, txn.NTruncate})
+	g.entries = append(g.entries, capturedEntry{frames, nTruncate})
 	if g.reject {
 		return errors.New("spyGate: rejected for test")
 	}
@@ -120,7 +120,7 @@ var _ = Describe("commit-frame interception", func() {
 		pages := map[uint32][]byte{}
 		for _, e := range entries {
 			for _, p := range e.pages {
-				pages[p.Pgno] = p.Data
+				pages[p.Pgno] = p.Page
 			}
 		}
 		Expect(pages).NotTo(BeEmpty())
@@ -206,7 +206,7 @@ var _ = Describe("commit-frame interception", func() {
 
 		afterRetry := gate.snapshot()
 		Expect(len(afterRetry)).To(Equal(beforeRetry+1),
-			"the retry must reach gate.Propose again, not bypass it as a stale checksum rewrite")
+			"the retry must reach gate.ProposeTransaction again, not bypass it as a stale checksum rewrite")
 		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(1)))
 	})
 

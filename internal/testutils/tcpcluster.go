@@ -15,6 +15,7 @@ import (
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
+	"github.com/fuchstim/literaft/log"
 )
 
 // TCPCluster is a Cluster built by NewTCPCluster; it additionally supports
@@ -91,14 +92,14 @@ func NewTCPCluster(t TB, dir string, n int, opts ...Option) *TCPCluster {
 }
 
 // ReadyLeader waits for a node that's both the raft leader and has
-// finished its Driver's gaining-leadership drain -- unlike Cluster.Leader,
+// finished its Log's gaining-leadership drain -- unlike Cluster.Leader,
 // safe to immediately issue a write against.
 func (c *TCPCluster) ReadyLeader() *Node {
 	c.t.Helper()
 	var leader *Node
 	Eventually(c.t, 10*time.Second, 20*time.Millisecond, func() bool {
 		for _, n := range c.nodes {
-			if n.Raft.State() == raft.Leader && n.Driver.Ready() {
+			if n.Raft.State() == raft.Leader && n.Log.Ready() {
 				leader = n
 				return true
 			}
@@ -153,8 +154,9 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 // real TCP transport, BoltDB log store, and file snapshot store under
 // s.dataDir, a real fsm.FSM over s.dbPath, a real hraft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
-// restarting an already-bootstrapped node is a harmless no-op), and a
-// driver.Driver registered under a fresh database/sql alias.
+// restarting an already-bootstrapped node is a harmless no-op), a
+// log.SingleWriterLog adapting it, and a driver.Driver registered under a
+// fresh database/sql alias.
 func startTCPNode(t TB, s nodeSpec, o options) *Node {
 	t.Helper()
 
@@ -207,7 +209,8 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 		}
 	}
 
-	drv := driver.New(r, f, driver.WithApplyTimeout(o.applyTimeout))
+	l := log.NewSingleWriterLog(r, log.WithApplyTimeout(o.applyTimeout))
+	drv := driver.New(f, l)
 	alias := "literaft-testutils-" + uuid.NewString()
 	sql.Register(alias, drv)
 	db, err := sql.Open(alias, "")
@@ -222,6 +225,7 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 		FSM:    f,
 		DBPath: s.dbPath,
 		Driver: drv,
+		Log:    l,
 		DB:     db,
 		shutdown: func() error {
 			var errs []error
@@ -229,6 +233,7 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 				errs = append(errs, err)
 			}
 			drv.Close()
+			l.Close()
 			if err := r.Shutdown().Error(); err != nil {
 				errs = append(errs, fmt.Errorf("raft shutdown: %w", err))
 			}

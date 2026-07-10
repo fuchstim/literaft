@@ -97,9 +97,9 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 		last := entries[len(entries)-1]
 		Expect(last.pages).NotTo(BeEmpty())
 		for _, page := range last.pages {
-			Expect(int64(len(page.Data))).To(Equal(pageSize))
+			Expect(int64(len(page.Page))).To(Equal(pageSize))
 			offset := (int64(page.Pgno) - 1) * pageSize
-			Expect(page.Data).To(Equal(referenceDB[offset:offset+pageSize]),
+			Expect(page.Page).To(Equal(referenceDB[offset:offset+pageSize]),
 				"captured page %d must match its final on-disk content", page.Pgno)
 		}
 

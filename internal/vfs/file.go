@@ -1,9 +1,9 @@
 package vfs
 
 import (
+	"errors"
 	"fmt"
 
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
@@ -199,14 +199,9 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	}
 
 	frames, nTruncate := f.capture, pending.header.nTruncate
-	txn := &raftproto.Transaction{Pages: make([]*raftproto.Page, len(frames)), NTruncate: nTruncate}
-	for i, frame := range frames {
-		txn.Pages[i] = &raftproto.Page{Pgno: frame.Pgno, Data: frame.Page}
-	}
-
 	f.capture = nil
 
-	if err := f.gate.Propose(txn); err != nil {
+	if err := f.gate.ProposeTransaction(frames, nTruncate); err != nil {
 		// Rejected: this transaction never committed, so no checksum
 		// rewrite window opens for it. headerPgno/dataOffsets must not
 		// survive into the next write, or a retry landing on the same
@@ -217,13 +212,21 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 		f.headerPgno = nil
 		f.dataOffsets = nil
 		f.txnDone = false
+
+		code := sqlite3.IOERR_WRITE
+		gateErr := &gateError{}
+		if errors.As(err, &gateErr) {
+			if gateErr.code != 0 {
+				code = gateErr.code
+			}
+		}
+
 		// Wrap, don't discard: err may carry a leader-redirect hint or
 		// retriability that a bare result code would lose. This is also
 		// not a fully reliable channel -- SQLite's automatic rollback
 		// after a failed commit can trigger further VFS calls that
 		// overwrite it before it reaches the caller.
-		// TODO: return sqlite3.BUSY for retriable errors
-		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
+		return 0, sqlite3vfs.SystemError(err, code)
 	}
 
 	// headerPgno/dataOffsets stay alive: a checksum rewrite, if one
