@@ -71,7 +71,7 @@ func run() error {
 		return errors.Join(boltStore.Close(), transport.Close(), fmt.Errorf("failed to open raft snapshot store: %w", err))
 	}
 
-	fsm, err := fsm.New(*id, *dbPath)
+	fsm, err := fsm.New(*dbPath)
 	if err != nil {
 		return errors.Join(boltStore.Close(), transport.Close(), fmt.Errorf("failed to create FSM: %w", err))
 	}

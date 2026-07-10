@@ -11,6 +11,7 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
+	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/vfs"
 
@@ -60,17 +61,10 @@ func probePageSize() uint32 {
 	return uint32(stmt.ColumnInt64(0))
 }
 
-// capture is one committed transaction's captured frames, in the shape a
-// real Gate.Propose call expects.
-type capture struct {
-	frames    []*vfs.Frame
-	nTruncate uint32
-}
-
 // funcGate adapts a function to vfs.Gate.
-type funcGate func(frames []*vfs.Frame, nTruncate uint32) error
+type funcGate func(txn *raftproto.Transaction) error
 
-func (f funcGate) Propose(frames []*vfs.Frame, nTruncate uint32) error { return f(frames, nTruncate) }
+func (f funcGate) Propose(txn *raftproto.Transaction) error { return f(txn) }
 
 // captureEntries runs each of stmts as its own committed transaction
 // against a fresh, local, single-node connection through internal/vfs --
@@ -81,11 +75,11 @@ func (f funcGate) Propose(frames []*vfs.Frame, nTruncate uint32) error { return 
 // Callers proposing more than one of the returned captures onto the same
 // node must do so in this same order, since later statements build on
 // earlier ones' schema/rows.
-func captureEntries(pageSize uint32, stmts ...string) []capture {
+func captureEntries(pageSize uint32, stmts ...string) []*raftproto.Transaction {
 	GinkgoHelper()
-	var got []capture
-	gate := funcGate(func(frames []*vfs.Frame, nTruncate uint32) error {
-		got = append(got, capture{frames, nTruncate})
+	var got []*raftproto.Transaction
+	gate := funcGate(func(txn *raftproto.Transaction) error {
+		got = append(got, txn)
 		return nil
 	})
 
@@ -157,7 +151,7 @@ func newGatedCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster
 	c := testutils.NewInmemCluster(t, n)
 	gates := make(map[*testutils.Node]*raftgate.Gate, n)
 	for _, node := range c.Nodes() {
-		gates[node] = raftgate.New(node.Raft, node.FSM.NodeID(), timeout)
+		gates[node] = raftgate.New(node.Raft, node.FSM, timeout)
 	}
 	return &gatedCluster{c, gates}
 }

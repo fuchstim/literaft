@@ -83,8 +83,8 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 			"the update proposal's nTruncate must be the post-commit database size")
 
 		pages := map[uint32][]byte{}
-		for _, f := range last.frames {
-			pages[f.Pgno] = f.Page
+		for _, p := range last.pages {
+			pages[p.Pgno] = p.Data
 		}
 		Expect(pages).NotTo(BeEmpty())
 		for pgno, data := range pages {

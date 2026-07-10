@@ -26,15 +26,15 @@ func TestWalappender(t *testing.T) {
 }
 
 // recordingGate implements vfs.Gate, recording every proposal (as the
-// raftproto.Entry wire shape a real Gate would produce) rather than ever
-// rejecting one, so a follower's AppendEntry can be driven with exactly
-// what a leader connection actually captured.
+// raftproto.Transaction a real Gate would receive) rather than ever
+// rejecting one, so a follower's AppendTransaction can be driven with
+// exactly what a leader connection actually captured.
 type recordingGate struct {
-	entries []*raftproto.Entry
+	entries []*raftproto.Transaction
 }
 
-func (g *recordingGate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
-	g.entries = append(g.entries, &raftproto.Entry{NodeID: "leader", Frames: frames, NTruncate: nTruncate})
+func (g *recordingGate) Propose(txn *raftproto.Transaction) error {
+	g.entries = append(g.entries, txn)
 	return nil
 }
 
@@ -121,7 +121,7 @@ func primeFollowerWALMode(path string) {
 	Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
 }
 
-var _ = Describe("WALAppender.AppendEntry", func() {
+var _ = Describe("WALAppender.AppendTransaction", func() {
 	It("replays a leader's captured entries into a fresh follower with identical reads", func() {
 		dir := GinkgoT().TempDir()
 
@@ -147,8 +147,8 @@ var _ = Describe("WALAppender.AppendEntry", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
-		for i, e := range gate.entries {
-			Expect(appender.AppendEntry(e)).To(Succeed(), "applying entry %d", i)
+		for i, txn := range gate.entries {
+			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -199,8 +199,8 @@ var _ = Describe("WALAppender.AppendEntry", func() {
 		}
 
 		var totalFrames int
-		for _, e := range gate.entries {
-			totalFrames += len(e.Frames)
+		for _, txn := range gate.entries {
+			totalFrames += len(txn.Pages)
 		}
 		Expect(totalFrames).To(BeNumerically(">", 4062),
 			"test setup must produce enough frames to actually exercise wal-index page 1")
@@ -214,8 +214,8 @@ var _ = Describe("WALAppender.AppendEntry", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
-		for i, e := range gate.entries {
-			Expect(appender.AppendEntry(e)).To(Succeed(), "applying entry %d", i)
+		for i, txn := range gate.entries {
+			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)

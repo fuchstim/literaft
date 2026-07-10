@@ -87,15 +87,15 @@ func (a *WALAppender) Close() error {
 	return errors.Join(a.db.Close(), a.f.Close(), a.shm.Close())
 }
 
-// AppendEntry appends e's frames to the local -wal
-func (a *WALAppender) AppendEntry(e *raftproto.Entry) error {
-	frames := make([]*Frame, len(e.Frames))
-	for i, f := range e.Frames {
+// AppendTransaction appends the frames in txn to the local -wal
+func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction) error {
+	frames := make([]*Frame, len(txn.Pages))
+	for i, p := range txn.Pages {
 		var nTruncate uint32
-		if i == len(e.Frames)-1 {
-			nTruncate = e.NTruncate
+		if i == len(txn.Pages)-1 {
+			nTruncate = txn.NTruncate
 		}
-		frames[i] = NewFrame(f.Pgno, nTruncate, f.Page)
+		frames[i] = NewFrame(p.Pgno, nTruncate, p.Data)
 	}
 
 	return a.AppendFrames(frames)

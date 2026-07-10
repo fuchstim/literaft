@@ -14,19 +14,8 @@ import (
 // hraft's Figure-8 rule can retroactively commit an entry a node proposed
 // during an earlier, unfinished leadership stint, once that same node
 // regains leadership and a later entry in its new term commits and covers
-// it. FSM.Apply's self-skip (entry.NodeID == f.NodeID()) is a static,
-// permanent property of the entry, not scoped to the one proposal that
-// originally published it -- so a node's own stale entry, retroactively
-// committed after it regains leadership, gets skipped forever, silently
-// and permanently dropping it from this node's own local disk even though
-// the rest of the cluster considers it committed.
-//
-// This is a known, tracked regression: the test below reliably
-// demonstrates it, which is why it's committed as PIt (pending) rather
-// than a normal It -- flip it back to It once the self-skip is made
-// transient (scoped to the specific in-flight proposal) instead of
-// permanent, and this should pass.
-var _ = PDescribe("Figure-8 self-apply safety", func() {
+// it.
+var _ = Describe("Figure-8 self-apply safety", func() {
 	It("materializes a node's own stale entry from an earlier leadership stint during its own later drain, exactly once", func() {
 		c := newGatedCluster(GinkgoT(), 3, time.Second)
 		defer c.Shutdown()
@@ -63,7 +52,7 @@ var _ = PDescribe("Figure-8 self-apply safety", func() {
 		}
 
 		proposeErr := make(chan error, 1)
-		go func() { proposeErr <- leaderGate.Propose(stale.frames, stale.nTruncate) }()
+		go func() { proposeErr <- leaderGate.Propose(stale) }()
 
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			return leader.Raft.State() == raft.Follower
@@ -118,7 +107,7 @@ var _ = PDescribe("Figure-8 self-apply safety", func() {
 		// A fresh self-proposal after the drain must still be materialized
 		// elsewhere, not by leader itself -- proving the drain didn't leave
 		// the self-apply check confused about which entry it applies to.
-		Expect(leaderGate.Propose(fresh.frames, fresh.nTruncate)).To(Succeed())
+		Expect(leaderGate.Propose(fresh)).To(Succeed())
 		testutils.Consistently(GinkgoT(), 200*time.Millisecond, 10*time.Millisecond, func() bool {
 			_, ok := tryNodeQueryInt(leader, "SELECT count(*) FROM fresh")
 			return !ok

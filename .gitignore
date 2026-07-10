@@ -1,3 +1,4 @@
 .claude
 go-sqlite3
 data
+bin

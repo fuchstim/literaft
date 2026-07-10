@@ -127,14 +127,14 @@ churn itself; snapshot-based catch-up is split out into M6 below.
   (`LeadershipTransferToServer`), stays un-`Ready` and rejects writes until
   the backlog drains, then applies it exactly once and correctly resumes
   ADR-005's self-skip for new writes.
-- **No longer true as originally written:** this milestone's own "done when"
-  bar, at the time it was written, included "closes the Figure-8 self-apply
-  race" as a side effect of the drain. A later refactor changed the
-  self-apply mechanism in a way that reopened exactly that race — see
-  `DECISIONS.md` ADR-011 and M7's `#41` below. `leadership_test.go` above
-  still passes because it never exercises a node materializing *its own*
-  stale entry (only a different node's); `internal/raft/gate/figure8_test.go`
-  is the (currently `PIt`/pending) spec that does.
+- **No longer true as originally written, later re-closed:** this milestone's
+  own "done when" bar, at the time it was written, included "closes the
+  Figure-8 self-apply race" as a side effect of the drain. A later refactor
+  changed the self-apply mechanism in a way that reopened exactly that race,
+  fixed again as part of M7's `#41` below — see `DECISIONS.md` ADR-011.
+  `internal/raft/gate/figure8_test.go` is the spec that exercises it (a node
+  materializing its own stale entry, not just a different node's, unlike
+  `leadership_test.go` above).
 
 ## M6 — Snapshots & very-behind followers  *(done)*
 
@@ -175,10 +175,9 @@ size to M3's shm work.
   same state rather than corrupting it. Verified by
   `internal/testutils/restart_test.go`: follower and leader restarts, both
   before and after a local snapshot exists, each checked against an external
-  unmodified-VFS reader (M1's bar) — except the "leader restarted after a
-  local snapshot" case, which is `PIt`/pending; see `#41` below, it's the
-  same bug as the Figure-8 case, hitting via an ordinary restart instead of a
-  partition.
+  unmodified-VFS reader (M1's bar), including the "leader restarted after a
+  local snapshot" case — see `#41` below, it hit the same bug as the
+  Figure-8 case, via an ordinary restart instead of a partition, now fixed.
 - **Reinstate the full test suite the "Refactor" commit deleted, and add new
   coverage.** *(done)* `97c63a7` deleted every test file in the repo
   (~3,150 lines across 19 files) alongside the package restructuring
@@ -201,15 +200,19 @@ size to M3's shm work.
   parsing instead of just disabling enforcement when passed `0`.** *(done)*
   Also found while reinstating tests; `Register` now panics on `pageSize ==
   0` rather than accept a value that desyncs frame-offset math.
-- **Found, tracked, *not* fixed: `fsm.FSM`'s self-apply skip regressed from
+- **Found, tracked, and fixed: `fsm.FSM`'s self-apply skip regressed from
   transient to permanent.** ([issue #41](https://github.com/fuchstim/literaft/issues/41),
   `DECISIONS.md` ADR-011) A node's own entry, retroactively committed via
   hraft's Figure-8 rule or replayed after this node's own `FSM.Restore`
-  rewinds it to an older snapshot, is silently and permanently dropped
-  instead of materialized. Two `PIt`/pending regression tests demonstrate it
+  rewinds it to an older snapshot, used to be silently and permanently
+  dropped instead of materialized. Fixed as part of the protobuf wire-format
+  rework below: `Header.Id` is now a per-proposal token, and `Gate.propose`
+  marks/unmarks it in `fsm.FSM.skipEntries` only for the duration of its own
+  `raft.Apply` call, so a retroactive commit that lands after that call has
+  already returned finds no marker and materializes normally. Both
+  regression tests that demonstrated the bug now pass as ordinary `It`s
   (`internal/raft/gate/figure8_test.go`,
-  `internal/testutils/restart_test.go`). Fix direction: restore a transient,
-  per-proposal self-skip instead of the current permanent per-entry one.
+  `internal/testutils/restart_test.go`).
 - [**Fault injection around the commit-frame gate**](https://github.com/fuchstim/literaft/issues/24)
   — crash between withhold and publish; between frame write and header
   advance. Not started.
@@ -220,11 +223,20 @@ size to M3's shm work.
   — confirm ≈1 txn/RAFT-round-trip, that batching multiple SQLite txns per
   entry raises it, and that read concurrency is unaffected. Not started.
 - [**Switch RAFT entry wire format to protobuf**](https://github.com/fuchstim/literaft/issues/42)
-  — replace `internal/raft/proto/entry.go`'s hand-rolled binary encoding
-  (`Entry.Encode`/`DecodeEntry`) with a protobuf-generated message, for
-  schema evolution and to shrink the hand-written bounds-checking surface
-  the fuzzing ticket above (#25) has to cover. Call sites: `gate.go`'s
-  `Gate.Propose`, `fsm.go`'s `FSM.Apply`. Not started.
+  *(done)* `internal/raft/proto/entry.proto` defines `Entry{ Header header;
+  oneof payload { Transaction transaction; } }`, `Header{ id }`,
+  `Transaction{ repeated Page pages; n_truncate }`, `Page{ pgno; data }` —
+  generated via `buf generate` + `protoc-gen-go` (`go generate`, wired to
+  `make generate`). Callers use the generated types directly
+  (`proto.Marshal`/`proto.Unmarshal` at the `gate.go`/`fsm.go` call sites)
+  rather than through a hand-written wrapper. The oneof payload anticipates
+  entry kinds other than `Transaction` sharing the same `Header`; `Header.Id`
+  is a per-proposal token (see the self-apply-skip fix above), not a node
+  identifier. `vfs.Gate.Propose` and `internal/fsm/walappender`'s
+  `AppendTransaction` (renamed from `AppendEntry`) take `*raftproto.Transaction`
+  directly. No version tag/dual-decode path: a live cluster upgrade across
+  this wire-format change isn't supported, a clean-slate restart is assumed
+  instead.
 - [**Consolidate duplicated WAL frame-format constants/layout between vfs and
   walappender**](https://github.com/fuchstim/literaft/issues/44) —
   `walHeaderSize`/`frameHeaderSize`, the pgno/nTruncate byte-offset layout,

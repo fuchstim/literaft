@@ -279,23 +279,19 @@ moved, and the comment silently becomes wrong. Say what's true right here.
   failure by the gate, which means a txn can fail locally yet commit
   cluster-wide. Client-request-ID dedup in the apply path is how you avoid
   double-apply on retry. (Deferred with forwarding, but keep the hook in mind.)
-- **The self-apply skip must be transient, not permanent — currently it's the
-  latter, and that's a known, tracked bug.** `fsm.FSM.Apply` (`fsm/fsm.go`)
-  currently skips materializing an entry whenever `entry.NodeID ==
-  f.NodeID()` — a static property of the entry that's true forever, not just
-  during the one proposal that originally published it via this node's own
-  SQLite write path. That breaks replay in at least two ways: (1) hraft's
-  Figure-8 rule retroactively committing a self-authored entry from an
-  earlier, unfinished leadership stint (`internal/raft/gate/figure8_test.go`,
-  `PIt`/pending) and (2) `FSM.Restore` resetting local state back to an
-  older local snapshot on startup, after which every self-authored entry
-  past that snapshot is skipped on replay even though the restore just made
-  it genuinely missing again (`internal/testutils/restart_test.go`'s
-  "recovers a leader restarted after it has taken a local snapshot",
-  `PIt`/pending too — this one needs nothing more exotic than an ordinary
-  restart). Both silently and permanently diverge that one node's local
-  disk from the cluster. Tracked as
-  [issue #41](https://github.com/fuchstim/literaft/issues/41); fix direction
-  is a transient, per-proposal marker (like the pre-refactor
-  `beginSelfApply`/`endSelfApply` this replaced), not a permanent per-entry
-  check.
+- **The self-apply skip must stay transient, never permanent.** `fsm.FSM.Apply`
+  (`fsm/fsm.go`) skips materializing an entry only while its `Header.Id` is
+  present in `f.skipEntries` — a marker `Gate.propose` sets before its own
+  `raft.Apply` call and clears (deferred) right after, scoped to that one
+  in-flight proposal. A static, permanent check (e.g. keying off a node ID
+  instead of a per-proposal token, as an earlier version of this code did)
+  breaks replay in at least two ways: (1) hraft's Figure-8 rule retroactively
+  committing a self-authored entry from an earlier, unfinished leadership
+  stint (`internal/raft/gate/figure8_test.go`), and (2) `FSM.Restore`
+  resetting local state back to an older snapshot on startup, after which
+  every self-authored entry past that snapshot needs to replay normally,
+  since the restore just made it genuinely missing again
+  (`internal/testutils/restart_test.go`'s "recovers a leader restarted after
+  it has taken a local snapshot"). Both would silently and permanently
+  diverge that node's local disk from the cluster. Previously tracked as
+  [issue #41](https://github.com/fuchstim/literaft/issues/41).

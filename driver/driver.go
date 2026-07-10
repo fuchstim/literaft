@@ -24,7 +24,7 @@ func New(r *raft.Raft, fsm *fsm.FSM, opts ...Option) *Driver {
 
 	vfsName := uuid.NewString()
 
-	gate := raftgate.New(r, fsm.NodeID(), o.applyTimeout)
+	gate := raftgate.New(r, fsm, o.applyTimeout)
 	vfs.Register(vfsName, sqlite3vfs.Find("os"), gate, fsm.PageSize())
 
 	return &Driver{gate, fsm.DBPath(), vfsName}

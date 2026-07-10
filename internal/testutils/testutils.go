@@ -231,7 +231,7 @@ func NewInmemCluster(t TB, n int, opts ...Option) *Cluster {
 		id := fmt.Sprintf("n%d", i)
 		addr, trans := raft.NewInmemTransportWithTimeout("", 50*time.Millisecond)
 		dbPath := dir + "/" + id + ".db"
-		f, err := fsm.New(id, dbPath, o.fsmOpts...)
+		f, err := fsm.New(dbPath, o.fsmOpts...)
 		if err != nil {
 			t.Fatalf("testutils: fsm.New(%s): %v", id, err)
 		}

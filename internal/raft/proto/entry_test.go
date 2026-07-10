@@ -1,15 +1,14 @@
 package raftproto_test
 
 import (
-	"encoding/binary"
-	"math"
 	"testing"
 
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
-	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"google.golang.org/protobuf/proto"
 )
 
 func TestEntry(t *testing.T) {
@@ -18,81 +17,107 @@ func TestEntry(t *testing.T) {
 }
 
 var _ = Describe("Entry encoding", func() {
-	It("round-trips a multi-frame entry", func() {
+	// proto.Equal, not gomega's (reflect.DeepEqual-based) Equal, is required
+	// to compare generated messages: they carry unexported caching/internal
+	// state that reflect.DeepEqual sees but that isn't part of the message's
+	// semantic content.
+	It("round-trips a multi-page transaction entry", func() {
 		e := &raftproto.Entry{
-			NodeID: "leader-1",
-			Frames: []*vfs.Frame{
-				{Pgno: 1, Page: []byte("first page..............")},
-				{Pgno: 7, Page: []byte("second page.............")},
+			Header: &raftproto.Header{Id: "leader-1"},
+			Payload: &raftproto.Entry_Transaction{
+				Transaction: &raftproto.Transaction{
+					Pages: []*raftproto.Page{
+						{Pgno: 1, Data: []byte("first page..............")},
+						{Pgno: 7, Data: []byte("second page.............")},
+					},
+					NTruncate: 7,
+				},
 			},
-			NTruncate: 7,
 		}
 
-		decoded, err := raftproto.DecodeEntry(e.Encode())
+		b, err := proto.Marshal(e)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(decoded).To(Equal(e))
+
+		decoded := &raftproto.Entry{}
+		Expect(proto.Unmarshal(b, decoded)).To(Succeed())
+		Expect(proto.Equal(decoded, e)).To(BeTrue())
 	})
 
-	It("round-trips a single-frame entry", func() {
+	It("round-trips a single-page transaction entry", func() {
 		e := &raftproto.Entry{
-			NodeID:    "n0",
-			Frames:    []*vfs.Frame{{Pgno: 1, Page: []byte("only page")}},
-			NTruncate: 1,
+			Header: &raftproto.Header{Id: "n0"},
+			Payload: &raftproto.Entry_Transaction{
+				Transaction: &raftproto.Transaction{
+					Pages:     []*raftproto.Page{{Pgno: 1, Data: []byte("only page")}},
+					NTruncate: 1,
+				},
+			},
 		}
 
-		decoded, err := raftproto.DecodeEntry(e.Encode())
+		b, err := proto.Marshal(e)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(decoded).To(Equal(e))
+
+		decoded := &raftproto.Entry{}
+		Expect(proto.Unmarshal(b, decoded)).To(Succeed())
+		Expect(proto.Equal(decoded, e)).To(BeTrue())
 	})
 
-	It("round-trips an entry with an empty NodeID", func() {
+	It("round-trips an entry with an empty header id", func() {
 		e := &raftproto.Entry{
-			NodeID:    "",
-			Frames:    []*vfs.Frame{{Pgno: 1, Page: []byte("page")}},
-			NTruncate: 1,
+			Header: &raftproto.Header{Id: ""},
+			Payload: &raftproto.Entry_Transaction{
+				Transaction: &raftproto.Transaction{
+					Pages:     []*raftproto.Page{{Pgno: 1, Data: []byte("page")}},
+					NTruncate: 1,
+				},
+			},
 		}
 
-		decoded, err := raftproto.DecodeEntry(e.Encode())
+		b, err := proto.Marshal(e)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(decoded).To(Equal(e))
+
+		decoded := &raftproto.Entry{}
+		Expect(proto.Unmarshal(b, decoded)).To(Succeed())
+		Expect(proto.Equal(decoded, e)).To(BeTrue())
 	})
 
-	It("rejects truncated input", func() {
-		e := &raftproto.Entry{
-			NodeID:    "leader-1",
-			Frames:    []*vfs.Frame{{Pgno: 1, Page: []byte("some page data")}},
-			NTruncate: 1,
-		}
-		full := e.Encode()
+	It("leaves the payload oneof unset, and GetTransaction nil, for an entry with no payload", func() {
+		// FSM.Apply relies on GetTransaction returning nil for entries whose
+		// payload isn't a Transaction (future non-transaction entry kinds),
+		// rather than panicking or returning a zero-valued Transaction.
+		e := &raftproto.Entry{Header: &raftproto.Header{Id: "leader-1"}}
 
-		for cut := 0; cut < len(full); cut++ {
-			_, err := raftproto.DecodeEntry(full[:cut])
-			Expect(err).To(HaveOccurred(), "truncating to %d bytes should fail to decode", cut)
-		}
+		b, err := proto.Marshal(e)
+		Expect(err).NotTo(HaveOccurred())
+
+		decoded := &raftproto.Entry{}
+		Expect(proto.Unmarshal(b, decoded)).To(Succeed())
+		Expect(decoded.GetTransaction()).To(BeNil())
 	})
 
-	It("rejects a corrupted frame count without allocating based on it", func() {
-		// A count claiming far more frames than the remaining bytes could
-		// possibly encode must be rejected before it's ever used as a slice
-		// capacity -- otherwise a corrupted or malformed entry can force a
-		// multi-gigabyte allocation attempt instead of a clean decode error.
-		b := make([]byte, 8)
-		binary.BigEndian.PutUint32(b[0:4], 0)              // NodeID length 0
-		binary.BigEndian.PutUint32(b[4:8], math.MaxUint32) // frame count
-
-		_, err := raftproto.DecodeEntry(b)
+	It("rejects malformed input", func() {
+		// A lone 0xFF is an incomplete varint tag (continuation bit set,
+		// no following byte) -- not valid protobuf wire format, unlike a
+		// merely-empty or field-truncated (but still well-formed) message.
+		err := proto.Unmarshal([]byte{0xFF}, &raftproto.Entry{})
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("rejects trailing garbage", func() {
+	It("rejects trailing garbage after a valid encoding", func() {
 		e := &raftproto.Entry{
-			NodeID:    "leader-1",
-			Frames:    []*vfs.Frame{{Pgno: 1, Page: []byte("some page data")}},
-			NTruncate: 1,
+			Header: &raftproto.Header{Id: "leader-1"},
+			Payload: &raftproto.Entry_Transaction{
+				Transaction: &raftproto.Transaction{
+					Pages:     []*raftproto.Page{{Pgno: 1, Data: []byte("some page data")}},
+					NTruncate: 1,
+				},
+			},
 		}
-		full := append(e.Encode(), 0xFF)
+		b, err := proto.Marshal(e)
+		Expect(err).NotTo(HaveOccurred())
+		full := append(b, 0xFF)
 
-		_, err := raftproto.DecodeEntry(full)
+		err = proto.Unmarshal(full, &raftproto.Entry{})
 		Expect(err).To(HaveOccurred())
 	})
 })
