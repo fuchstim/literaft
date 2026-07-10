@@ -22,14 +22,19 @@ type Gate struct {
 	readyMu sync.RWMutex
 	ready   bool
 
-	stop chan struct{}
-	wg   sync.WaitGroup
+	lastErrMu sync.Mutex
+	lastErr   error
+
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // New returns a Gate proposing through r, whose FSM must be fsm (the
-// same FSM instance passed to hraft.NewRaft) -- Propose drives fsm's
-// self-apply marker so the leader's own entries aren't double-materialized.
-// timeout bounds each hraft.Apply call.
+// same FSM instance passed to hraft.NewRaft) -- Propose embeds nodeID in
+// every entry it proposes, which is how fsm.FSM.Apply recognizes and skips
+// materializing this node's own entries (ADR-005). timeout bounds each
+// hraft.Apply call.
 //
 // New immediately starts a background watcher tracking r's leadership
 // transitions; callers must Close the Gate to stop it.
@@ -41,10 +46,12 @@ func New(r *raft.Raft, nodeID string, timeout time.Duration) *Gate {
 }
 
 // Close stops the leadership watcher and any in-flight drain, waiting for
-// both to exit.
+// both to exit. Idempotent.
 func (g *Gate) Close() {
-	close(g.stop)
-	g.wg.Wait()
+	g.closeOnce.Do(func() {
+		close(g.stop)
+		g.wg.Wait()
+	})
 }
 
 // Ready reports whether this node is currently the raft leader *and* has
@@ -139,7 +146,22 @@ func (g *Gate) drain(term uint64) {
 
 // Propose implements vfs.Gate. A rejected or ambiguous proposal (including
 // ErrLeadershipLost -- "proposed, outcome unknown") surfaces as an error.
+//
+// The concrete error is also recorded for LastRejection: vfs/file.go's own
+// attempt to preserve it through sqlite3vfs.SystemError doesn't reliably
+// survive the round trip back through *sqlite3.Conn.Exec/Stmt.Step (SQLite's
+// own automatic rollback after a failed commit makes further, successful VFS
+// calls that clear it first), so a caller that holds this Gate directly has
+// a reliable way to recover which error this was.
 func (g *Gate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
+	err := g.propose(frames, nTruncate)
+	g.lastErrMu.Lock()
+	g.lastErr = err
+	g.lastErrMu.Unlock()
+	return err
+}
+
+func (g *Gate) propose(frames []*vfs.Frame, nTruncate uint32) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
 		return &NotLeaderError{Leader: leader}
@@ -149,7 +171,7 @@ func (g *Gate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
 		return CatchingUpError{}
 	}
 
-	e := &raftproto.Entry{g.nodeID, frames, nTruncate}
+	e := &raftproto.Entry{NodeID: g.nodeID, Frames: frames, NTruncate: nTruncate}
 
 	future := g.raft.Apply(e.Encode(), g.timeout)
 	if err := future.Error(); err != nil {
@@ -163,4 +185,12 @@ func (g *Gate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
 	}
 
 	return nil
+}
+
+// LastRejection returns the error from the most recently completed Propose
+// call (nil if that call succeeded, or if Propose has never been called).
+func (g *Gate) LastRejection() error {
+	g.lastErrMu.Lock()
+	defer g.lastErrMu.Unlock()
+	return g.lastErr
 }

@@ -17,7 +17,17 @@ import (
 
 // Register wraps base with the provided gate and registers it
 // under name, so it can be selected with "?vfs=<name>" in a SQLite URI DSN.
+//
+// pageSize must be the real, cluster-wide fixed SQLite page size (CLAUDE.md
+// invariant) -- it is not just an optional enforcement knob a caller can
+// skip by passing 0. File.WriteAt also uses it, unconditionally, to compute
+// frame-header offsets (walHeaderSize + n*(frameHeaderSize+pageSize)); a
+// wrong or zero value silently corrupts frame parsing rather than merely
+// disabling a check. Register panics if pageSize is 0.
 func Register(name string, base sqlite3vfs.VFS, gate Gate, pageSize uint32) {
+	if pageSize == 0 {
+		panic("vfs: pageSize must be the real, non-zero cluster page size")
+	}
 	sqlite3vfs.Register(name, &VFS{base, gate, pageSize})
 }
 

@@ -26,9 +26,14 @@ type File struct {
 	pending *pendingFrame
 	capture []*Frame
 
-	// pageSize is the page size used to
-	// tell a frame header write from a page-image write by offset alone
-	// (walHeaderSize + n*(frameHeaderSize+pageSize) is always a header).
+	// pageSize is the real, cluster-wide fixed SQLite page size (never 0 --
+	// vfs.Register panics rather than let one through) and does double
+	// duty: isFrameHeaderOffset uses it unconditionally to compute
+	// frame-header offsets (walHeaderSize + n*(frameHeaderSize+pageSize) is
+	// always a header), and writeFrameData separately uses it to reject a
+	// captured frame whose page image length doesn't match. A wrong value
+	// here doesn't just weaken the second check -- it desyncs the first,
+	// silently corrupting frame parsing for every write after that point.
 	pageSize uint32
 
 	// headerPgno and dataOffsets record, for the transaction currently
@@ -194,7 +199,7 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	pending := f.pending
 	f.pending = nil
 
-	if f.pageSize != 0 && len(p) != int(f.pageSize) {
+	if len(p) != int(f.pageSize) {
 		// Same reset as a gate rejection (writeFrameData's Propose-error
 		// branch below): this write is never captured or proposed, so
 		// leaving txnDone/headerPgno stale would expose the same

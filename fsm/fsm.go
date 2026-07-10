@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
@@ -17,6 +18,7 @@ var _ raft.FSM = (*FSM)(nil)
 type FSM struct {
 	nodeID, dbPath string
 	db             *sqlite3.Conn
+	dbLock         *os.File
 	pageSize       uint32
 	walAppender    *walappender.WALAppender
 	snapshotter    *snapshotter.Snapshotter
@@ -42,7 +44,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 	}
 
 	if err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("failed to enable WAL mode on database at path `%s`: %w", err)
+		return nil, fmt.Errorf("failed to enable WAL mode on database at path `%s`: %w", dbPath, err)
 	}
 
 	stmt, _, err := db.Prepare("PRAGMA page_size;")
@@ -64,6 +66,12 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 		return nil, fmt.Errorf("invalid page size %d returned from PRAGMA page_size", pageSize)
 	}
 
+	// Acquired only after WAL mode is enabled (enabling WAL mode requires exclusive lock)
+	dbLock, err := acquireSharedDBLock(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
 	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL appender: %w", err)
@@ -75,6 +83,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 		nodeID:      nodeID,
 		dbPath:      dbPath,
 		db:          db,
+		dbLock:      dbLock,
 		pageSize:    uint32(pageSize),
 		walAppender: walAppender,
 		snapshotter: snapshotter,
@@ -82,7 +91,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 }
 
 func (f *FSM) Close() error {
-	return errors.Join(f.db.Close(), f.walAppender.Close())
+	return errors.Join(f.db.Close(), f.walAppender.Close(), f.dbLock.Close())
 }
 
 func (f *FSM) NodeID() string {

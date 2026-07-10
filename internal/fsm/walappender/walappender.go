@@ -38,7 +38,9 @@ type WALAppender struct {
 //
 // WALAppender opens and maintains a single DB connection to prevent the WAL/SHM from being deleted.
 // This connection is also used to perform passive checkpoints, preventing unbounded WAL growth on
-// followers that are not performing any writes (outside of WALAppender).
+// followers that are not performing any writes (outside of WALAppender). See fsm.FSM's own doc
+// comment on why the WAL/-shm files themselves don't get deleted out from under this connection:
+// that's a main-db-file lock fsm holds, not anything this package does.
 //
 // A wal-index header with pageSize == 0 is treated as uninitialized (see
 // bootstrap) even though it otherwise looks structurally valid: real
@@ -54,13 +56,12 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 
 	f, err := os.OpenFile(dbPath+"-wal", os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(db.Close(), fmt.Errorf("failed to open -wal file at path `%s`: %w", dbPath+"-wal", err))
 	}
 
 	sm, err := shm.Open(dbPath + "-shm")
 	if err != nil {
-		f.Close()
-		return nil, err
+		return nil, errors.Join(db.Close(), f.Close(), fmt.Errorf("failed to open -shm file at path `%s`: %w", dbPath+"-shm", err))
 	}
 
 	w := &WALAppender{
