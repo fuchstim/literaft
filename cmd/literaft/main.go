@@ -59,6 +59,10 @@ func run() error {
 		return fmt.Errorf("failed to start raft transport on %s: %w", *bindAddr, err)
 	}
 
+	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create data dir %s: %w", *dataDir, err)
+	}
+
 	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(*dataDir, "raft.db"))
 	if err != nil {
 		return errors.Join(transport.Close(), fmt.Errorf("failed to open raft log store: %w", err))

@@ -45,27 +45,31 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 		return nil, fmt.Errorf("failed to enable WAL mode on database at path `%s`: %w", err)
 	}
 
-	stmt, _, err := db.Prepare("PRAGMA page_size")
+	stmt, _, err := db.Prepare("PRAGMA page_size;")
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare PRAGMA page_size statement: %w", err)
 	}
 	defer stmt.Close()
 
-	if err := stmt.Exec(); err != nil {
-		return nil, fmt.Errorf("failed to execute PRAGMA page_size statement: %w", err)
+	var pageSize uint32
+	for stmt.Step() {
+		pageSize = uint32(stmt.ColumnInt(0))
 	}
 
-	pageSize := stmt.ColumnInt(0)
+	if err := stmt.Reset(); err != nil {
+		return nil, fmt.Errorf("failed to reset PRAGMA page_size statement: %w", err)
+	}
+
 	if pageSize <= 0 {
 		return nil, fmt.Errorf("invalid page size %d returned from PRAGMA page_size", pageSize)
 	}
 
-	walAppender, err := walappender.Open(dbPath, uint32(pageSize), o.checkpointThresholdPages, o.checkpointInterval)
+	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL appender: %w", err)
 	}
 
-	snapshotter := snapshotter.New(dbPath, uint32(pageSize))
+	snapshotter := snapshotter.New(dbPath, pageSize)
 
 	return &FSM{
 		nodeID:      nodeID,
