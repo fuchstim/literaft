@@ -6,7 +6,6 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,7 +22,7 @@ func TestVFS(t *testing.T) {
 // test here that isn't specifically exercising the abort branch.
 type alwaysCommitGate struct{}
 
-func (alwaysCommitGate) Propose(txn *raftproto.Transaction) error { return nil }
+func (alwaysCommitGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error { return nil }
 
 // probePageSize returns SQLite's actual default page size by asking a
 // throwaway in-memory connection, rather than assuming a value. The

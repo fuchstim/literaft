@@ -26,14 +26,18 @@ func TestWalappender(t *testing.T) {
 }
 
 // recordingGate implements vfs.Gate, recording every proposal (as the
-// raftproto.Transaction a real Gate would receive) rather than ever
+// raftproto.Transaction a real Gate would build from it) rather than ever
 // rejecting one, so a follower's AppendTransaction can be driven with
 // exactly what a leader connection actually captured.
 type recordingGate struct {
 	entries []*raftproto.Transaction
 }
 
-func (g *recordingGate) Propose(txn *raftproto.Transaction) error {
+func (g *recordingGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
+	txn := &raftproto.Transaction{Pages: make([]*raftproto.Page, len(frames)), NTruncate: nTruncate}
+	for i, f := range frames {
+		txn.Pages[i] = &raftproto.Page{Pgno: f.Pgno, Data: f.Page}
+	}
 	g.entries = append(g.entries, txn)
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
+	"github.com/fuchstim/literaft/log"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
@@ -94,7 +95,10 @@ func run() error {
 
 	fmt.Fprintf(os.Stderr, "literaft: node %q listening on %s (db %s)\n", *id, *bindAddr, *dbPath)
 
-	d := driver.New(r, fsm)
+	log := log.NewSingleWriterLog(r)
+	defer log.Close()
+
+	d := driver.New(fsm, log)
 	defer d.Close()
 
 	sql.Register("literaft", d)

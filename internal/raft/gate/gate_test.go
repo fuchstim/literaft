@@ -2,141 +2,138 @@ package raftgate_test
 
 import (
 	"errors"
-	"time"
+	"path/filepath"
 
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/fuchstim/literaft/fsm"
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
-	"github.com/fuchstim/literaft/internal/testutils"
+	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-func findLeader(c *gatedCluster) *testutils.Node {
-	for _, n := range c.Nodes() {
-		if n.Raft.State() == raft.Leader {
-			return n
-		}
-	}
-	return nil
+// newTestFSM returns a real fsm.FSM over a fresh temp-dir SQLite file -- no
+// raft involved, since Gate's own logic (entry encoding, self-skip
+// bracketing, LastRejection) doesn't need a cluster to exercise. Cluster-
+// level concerns (leadership, Ready/drain, Figure-8) live in the log
+// package's tests instead, since that's where they're now implemented.
+func newTestFSM() *fsm.FSM {
+	GinkgoHelper()
+	dir := GinkgoT().TempDir()
+	f, err := fsm.New(filepath.Join(dir, "node.db"))
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { f.Close() })
+	return f
 }
 
 var _ = Describe("Gate", func() {
-	It("returns a NotLeaderError with a leader hint from a follower", func() {
-		c := newGatedCluster(GinkgoT(), 2, time.Second)
-		defer c.Shutdown()
-		c.ReadyLeader(GinkgoT())
+	It("builds a wire entry from the captured frames, with a fresh header id per proposal", func() {
+		f := newTestFSM()
+		l := &fakeLog{}
+		gate := raftgate.New(f, l)
 
-		var hint raft.ServerAddress
-		testutils.Eventually(GinkgoT(), 5*time.Second, 20*time.Millisecond, func() bool {
-			leader := findLeader(c)
-			if leader == nil {
-				return false
+		txns := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+		Expect(txns).To(HaveLen(1))
+		txn := txns[0]
+
+		Expect(gate.ProposeTransaction(txn.frames, txn.nTruncate)).To(Succeed())
+		Expect(gate.ProposeTransaction(txn.frames, txn.nTruncate)).To(Succeed())
+
+		entries := l.snapshot()
+		Expect(entries).To(HaveLen(2))
+
+		var first, second raftproto.Entry
+		Expect(proto.Unmarshal(entries[0], &first)).To(Succeed())
+		Expect(proto.Unmarshal(entries[1], &second)).To(Succeed())
+
+		for _, e := range []*raftproto.Entry{&first, &second} {
+			got := e.GetTransaction()
+			Expect(got).NotTo(BeNil())
+			Expect(got.NTruncate).To(Equal(txn.nTruncate))
+			Expect(got.Pages).To(HaveLen(len(txn.frames)))
+			for i, p := range got.Pages {
+				Expect(p.Pgno).To(Equal(txn.frames[i].Pgno))
+				Expect(p.Data).To(Equal(txn.frames[i].Page))
 			}
-			follower := c.Other(leader)
-			err := c.Gate(follower).Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("x")}}, NTruncate: 1})
-			if err == nil {
-				return false
-			}
-			var notLeader *raftgate.NotLeaderError
-			if !errors.As(err, &notLeader) || notLeader.Leader != leader.Addr {
-				return false
-			}
-			hint = notLeader.Leader
-			return true
-		}, "a NotLeaderError carrying the current leader's address")
-		Expect(hint).NotTo(BeEmpty())
-	})
-
-	// Propose's concrete error doesn't reliably survive the round trip back
-	// through *sqlite3.Conn.Exec/Stmt.Step, so LastRejection is the
-	// mechanism a caller holding the Gate directly should actually use.
-	It("exposes the most recent rejection via LastRejection, clearing it on the next success", func() {
-		c := newGatedCluster(GinkgoT(), 2, time.Second)
-		defer c.Shutdown()
-		leader, _ := c.ReadyLeader(GinkgoT())
-		follower := c.Other(leader)
-
-		Expect(c.Gate(follower).LastRejection()).To(BeNil(), "no proposal attempted yet")
-
-		err := c.Gate(follower).Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("x")}}, NTruncate: 1})
-		Expect(err).To(HaveOccurred())
-		var notLeader *raftgate.NotLeaderError
-		Expect(errors.As(c.Gate(follower).LastRejection(), &notLeader)).To(BeTrue(),
-			"LastRejection must return the same concrete error Propose returned")
-
-		pageSize := leader.FSM.PageSize()
-		entries := captureEntries(pageSize, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
-
-		var proposer *testutils.Node
-		testutils.Eventually(GinkgoT(), 5*time.Second, 20*time.Millisecond, func() bool {
-			l, g := c.ReadyLeader(GinkgoT())
-			if err := g.Propose(entries[0]); err != nil {
-				return false
-			}
-			proposer = l
-			return true
-		}, "a successful proposal on the current leader")
-
-		Expect(c.Gate(proposer).LastRejection()).To(BeNil(), "a successful proposal must clear the previous rejection")
-	})
-
-	It("commits a leader's proposal without the leader materializing its own entry, while the follower does", func() {
-		c := newGatedCluster(GinkgoT(), 2, time.Second)
-		defer c.Shutdown()
-		leader, gate := c.ReadyLeader(GinkgoT())
-		follower := c.Other(leader)
-
-		entries := captureEntries(leader.FSM.PageSize(),
-			"CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)",
-			"INSERT INTO t (id, v) VALUES (1, 'hello')",
-		)
-		for _, e := range entries {
-			Expect(gate.Propose(e)).To(Succeed())
 		}
 
-		// The leader publishes via its own SQLite write path in real usage
-		// (out of scope for this direct-Propose unit test); either way, its
-		// own fsm.FSM must never materialize its own entry via
-		// AppendTransaction -- there is nothing at all on the leader's disk for
-		// this table, since this test never opened a real gated connection
-		// on the leader to publish it any other way.
-		leaderConn, err := sqlite3.Open("file:" + leader.DBPath)
-		Expect(err).NotTo(HaveOccurred())
-		defer leaderConn.Close()
-		_, _, err = leaderConn.Prepare("SELECT count(*) FROM t")
-		Expect(err).To(HaveOccurred(), "the leader must not have materialized its own entry at all")
-
-		testutils.Eventually(GinkgoT(), 5*time.Second, 20*time.Millisecond, func() bool {
-			// Not nodeQueryInt: the table may not exist yet if the
-			// CREATE TABLE entry hasn't materialized on the follower yet,
-			// and that must retry, not fail the spec outright.
-			n, ok := tryNodeQueryInt(follower, "SELECT count(*) FROM t")
-			return ok && n == 1
-		}, "the follower to materialize the leader's proposal")
-		Expect(nodeQueryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal("hello"))
+		Expect(first.GetHeader().GetId()).NotTo(BeEmpty())
+		Expect(second.GetHeader().GetId()).NotTo(BeEmpty())
+		Expect(first.GetHeader().GetId()).NotTo(Equal(second.GetHeader().GetId()),
+			"each proposal must get its own self-apply skip marker")
 	})
 
-	It("surfaces a lost-leadership proposal as an error", func() {
-		c := newGatedCluster(GinkgoT(), 2, time.Second)
-		defer c.Shutdown()
-		leader, gate := c.ReadyLeader(GinkgoT())
-		follower := c.Other(leader)
+	// The self-apply skip marker (fsm.FSM.SkipEntry/UnskipEntry) must stay
+	// transient, scoped to exactly the one ProposeTransaction call that set
+	// it -- see CLAUDE.md's "self-apply skip must stay transient" gotcha.
+	It("skips materializing its own entry on the FSM only while ProposeTransaction is in flight", func() {
+		f := newTestFSM()
+		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]
 
-		// Kill the follower so the leader's in-flight proposal can never
-		// reach quorum; it must eventually give up once its leader lease
-		// expires, resolving Propose's blocking call with an error -- the
-		// "ambiguous commit" case.
-		Expect(follower.Raft.Shutdown().Error()).To(Succeed())
+		var duringApply bool
+		l := &fakeLog{}
+		l.apply = func(entry []byte) error {
+			// Simulate hraft applying this exact entry synchronously, as it
+			// would for a single-node cluster's own proposer before
+			// ProposeTransaction itself returns.
+			f.Apply(&raft.Log{Data: entry})
+			duringApply = tableExists(f.DBPath(), "t")
+			return nil
+		}
+		gate := raftgate.New(f, l)
 
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- gate.Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("lost")}}, NTruncate: 1})
-		}()
+		Expect(gate.ProposeTransaction(txn.frames, txn.nTruncate)).To(Succeed())
+		Expect(duringApply).To(BeFalse(), "the proposer's own entry must not materialize while still in flight")
 
-		Eventually(errCh, 5*time.Second, 10*time.Millisecond).Should(Receive(HaveOccurred()))
+		// The marker is scoped to that one call: once ProposeTransaction has
+		// returned, replaying the exact same entry (as a follower or a
+		// later resend would) must materialize normally.
+		entries := l.snapshot()
+		Expect(entries).To(HaveLen(1))
+		f.Apply(&raft.Log{Data: entries[0]})
+		Expect(tableExists(f.DBPath(), "t")).To(BeTrue())
+	})
+
+	// ProposeTransaction's concrete error doesn't reliably survive the round
+	// trip back through *sqlite3.Conn.Exec/Stmt.Step, so LastRejection is
+	// the mechanism a caller holding the Gate directly should actually use.
+	It("exposes the most recent rejection via LastRejection, clearing it on the next success", func() {
+		f := newTestFSM()
+		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]
+
+		l := &fakeLog{apply: func(entry []byte) error { return errors.New("fakeLog: rejected") }}
+		gate := raftgate.New(f, l)
+
+		Expect(gate.LastRejection()).To(BeNil(), "no proposal attempted yet")
+
+		err := gate.ProposeTransaction(txn.frames, txn.nTruncate)
+		Expect(err).To(HaveOccurred())
+		Expect(gate.LastRejection()).To(Equal(err))
+
+		l.apply = nil
+		Expect(gate.ProposeTransaction(txn.frames, txn.nTruncate)).To(Succeed())
+		Expect(gate.LastRejection()).To(BeNil(), "a successful proposal must clear the previous rejection")
+	})
+
+	// vfs.File relies on errors.As to recover a *gateError's carried sqlite
+	// code (internal/vfs/file.go), so Gate's own error wrapping must not
+	// break that chain.
+	It("wraps a LogAdapter error without breaking errors.Is discovery of the concrete cause", func() {
+		f := newTestFSM()
+		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]
+
+		sentinel := vfs.GateError(errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY))
+		l := &fakeLog{apply: func(entry []byte) error { return sentinel }}
+		gate := raftgate.New(f, l)
+
+		err := gate.ProposeTransaction(txn.frames, txn.nTruncate)
+		Expect(err).To(HaveOccurred())
+		Expect(errors.Is(err, sentinel)).To(BeTrue(),
+			"a rejected LogAdapter error must stay discoverable through Gate's own wrap")
 	})
 })

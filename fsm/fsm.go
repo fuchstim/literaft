@@ -26,9 +26,9 @@ type FSM struct {
 	snapshotter *snapshotter.Snapshotter
 
 	// skipEntriesMu guards skipEntries: SkipEntry/UnskipEntry run on the
-	// proposing goroutine (Gate.propose), while Apply runs on hraft's own
-	// apply goroutine -- an unsynchronized map access from both would be a
-	// data race.
+	// proposing goroutine (raftgate.Gate.proposeTransaction), while Apply
+	// runs on hraft's own apply goroutine -- an unsynchronized map access
+	// from both would be a data race.
 	skipEntriesMu sync.Mutex
 	skipEntries   map[string]struct{}
 }

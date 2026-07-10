@@ -85,7 +85,7 @@ compatibility, commit-frame gate, shm + follower apply, real
 leadership-churn ordering work, and real snapshot take/install — a multi-node
 cluster replicates writes, followers serve reads, killing/adding nodes
 converges, a node that regains leadership with an apply backlog drains it
-(`raft.Gate`'s `Ready`/`Barrier` drain) before serving local writes again, and
+(`log.SingleWriterLog`'s `Ready`/`Barrier` drain) before serving local writes again, and
 a follower too far behind for normal log replication catches up via
 `raft.FSM.Snapshot`/`Restore` (a `TRUNCATE`-checkpointed `.db` swapped in as a
 unit by `internal/node`'s `dbBackend`) instead. Current work is **Milestone 7**
@@ -170,15 +170,20 @@ this file's context — update it *from* GitHub, not the other way around.
         snapshotter/              – RAFT snapshot capture/restore via SQLite's
                                      online backup API
     raft/
-        gate/                     – thin adapter over hashicorp/raft (the commit-
-                                     frame gate: Propose/Ready/drain)
+        gate/                     – thin, hraft-agnostic commit-frame gate: builds a
+                                     RAFT entry and proposes it through a
+                                     raftgate.LogAdapter
         proto/                    – RAFT log entry wire format (encode/decode)
     testutils/                    – test-only cluster harnesses (in-memory and
                                      real TCP+BoltDB), used by _test.go files
                                      across the module
+/log/                             – log.SingleWriterLog: the real hraft-backed
+                                     raftgate.LogAdapter, owning *hraft.Raft,
+                                     leader/ready/drain state, and
+                                     NotLeaderError/CatchingUpError
 /driver/                          – database/sql-compatible driver: wires a
-                                     caller-supplied hraft.Raft + fsm.FSM into
-                                     a gate + registered VFS + database/sql.Driver
+                                     caller-supplied fsm.FSM + raftgate.LogAdapter
+                                     into a gate + registered VFS + database/sql.Driver
 /cmd/literaft/                    – node process entrypoint (flag parsing,
                                      lifecycle) + an interactive SQL REPL
 ```
@@ -244,8 +249,8 @@ parameter on the real constructor. Rationale: a struct field can't
 distinguish "caller explicitly set the zero value" from "caller didn't set
 it at all," and a variadic `...Option` list can grow new options without
 breaking existing call sites, unlike adding a field to a struct that already
-has callers relying on its zero value. `driver/` (`driver/options.go`,
-`driver.New`) is the reference example. Older config-struct-based
+has callers relying on its zero value. `log/` (`log/options.go`,
+`log.NewSingleWriterLog`) is the reference example. Older config-struct-based
 constructors (e.g. `internal/node.Config`) predate this convention and
 haven't been migrated.
 
@@ -281,13 +286,14 @@ moved, and the comment silently becomes wrong. Say what's true right here.
   double-apply on retry. (Deferred with forwarding, but keep the hook in mind.)
 - **The self-apply skip must stay transient, never permanent.** `fsm.FSM.Apply`
   (`fsm/fsm.go`) skips materializing an entry only while its `Header.Id` is
-  present in `f.skipEntries` — a marker `Gate.propose` sets before its own
-  `raft.Apply` call and clears (deferred) right after, scoped to that one
-  in-flight proposal. A static, permanent check (e.g. keying off a node ID
-  instead of a per-proposal token, as an earlier version of this code did)
-  breaks replay in at least two ways: (1) hraft's Figure-8 rule retroactively
-  committing a self-authored entry from an earlier, unfinished leadership
-  stint (`internal/raft/gate/figure8_test.go`), and (2) `FSM.Restore`
+  present in `f.skipEntries` — a marker `Gate.proposeTransaction` sets before
+  its own `LogAdapter.Apply` call (`raft.Apply`, for a real cluster) and
+  clears (deferred) right after, scoped to that one in-flight proposal. A
+  static, permanent check (e.g. keying off a node ID instead of a
+  per-proposal token, as an earlier version of this code did) breaks replay
+  in at least two ways: (1) hraft's Figure-8 rule retroactively committing a
+  self-authored entry from an earlier, unfinished leadership stint
+  (`log/figure8_test.go`), and (2) `FSM.Restore`
   resetting local state back to an older snapshot on startup, after which
   every self-authored entry past that snapshot needs to replay normally,
   since the restore just made it genuinely missing again

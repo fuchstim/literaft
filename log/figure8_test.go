@@ -1,4 +1,4 @@
-package raftgate_test
+package log_test
 
 import (
 	"time"
@@ -26,6 +26,7 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 		// alone with leader below so leader deterministically regains
 		// leadership without racing an election against the third.
 		leader, leaderGate := c.ReadyLeader(GinkgoT())
+		leaderLog := c.Log(leader)
 		var helper, thirdWheel *testutils.Node
 		for _, n := range c.Nodes() {
 			if n == leader {
@@ -39,8 +40,8 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 		}
 
 		pageSize := leader.FSM.PageSize()
-		stale := captureEntries(pageSize, "CREATE TABLE stale (id INTEGER PRIMARY KEY)")[0]
-		fresh := captureEntries(pageSize, "CREATE TABLE fresh (id INTEGER PRIMARY KEY)")[0]
+		stale := captureTransactions(pageSize, "CREATE TABLE stale (id INTEGER PRIMARY KEY)")[0]
+		fresh := captureTransactions(pageSize, "CREATE TABLE fresh (id INTEGER PRIMARY KEY)")[0]
 
 		// Fully isolate all three from each other: whatever leader appends
 		// to its own log next must survive only there (with no quorum
@@ -52,7 +53,7 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 		}
 
 		proposeErr := make(chan error, 1)
-		go func() { proposeErr <- leaderGate.Propose(stale) }()
+		go func() { proposeErr <- leaderGate.ProposeTransaction(stale.frames, stale.nTruncate) }()
 
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			return leader.Raft.State() == raft.Follower
@@ -77,7 +78,7 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 		leader.Transport.Connect(helper.Addr, helper.Transport)
 		helper.Transport.Connect(leader.Addr, leader.Transport)
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
-			return leader.Raft.State() == raft.Leader && leaderGate.Ready()
+			return leader.Raft.State() == raft.Leader && leaderLog.Ready()
 		}, "leader to regain leadership with only helper reachable")
 
 		// Now bring thirdWheel back in to catch up normally; leader is
@@ -90,9 +91,9 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 
 		// The Figure-8 case itself: stale was never committed during
 		// leader's first term, but is still in leader's log, so this new
-		// term's Barrier (Gate.drain) commits and covers it -- and it must
-		// be materialized through an ordinary FSM.Apply on leader itself,
-		// not lost, not double-applied.
+		// term's Barrier (SingleWriterLog's drain) commits and covers it --
+		// and it must be materialized through an ordinary FSM.Apply on
+		// leader itself, not lost, not double-applied.
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			_, okHelper := tryNodeQueryInt(helper, "SELECT count(*) FROM stale")
 			_, okThird := tryNodeQueryInt(thirdWheel, "SELECT count(*) FROM stale")
@@ -107,7 +108,7 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 		// A fresh self-proposal after the drain must still be materialized
 		// elsewhere, not by leader itself -- proving the drain didn't leave
 		// the self-apply check confused about which entry it applies to.
-		Expect(leaderGate.Propose(fresh)).To(Succeed())
+		Expect(leaderGate.ProposeTransaction(fresh.frames, fresh.nTruncate)).To(Succeed())
 		testutils.Consistently(GinkgoT(), 200*time.Millisecond, 10*time.Millisecond, func() bool {
 			_, ok := tryNodeQueryInt(leader, "SELECT count(*) FROM fresh")
 			return !ok

@@ -7,8 +7,8 @@
 //   - NewInmemCluster: in-memory transport/log/stable/snapshot store, real
 //     fsm.FSM per node under its own temp-dir SQLite file. Fast; no real
 //     process restart is possible (nothing durable to restart from). For
-//     Gate/FSM/driver-level tests that build their own Gate or Driver on
-//     top of the raw nodes.
+//     LogAdapter/Gate/FSM/driver-level tests that build their own
+//     log.SingleWriterLog, raftgate.Gate, or Driver on top of the raw nodes.
 //   - NewTCPCluster: real TCP transport, real BoltDB log store, real file
 //     snapshot store, on disk under a caller-provided directory, each node
 //     already wrapped in a real driver.Driver + *sql.DB. Supports
@@ -27,6 +27,7 @@ import (
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
+	"github.com/fuchstim/literaft/log"
 )
 
 // TB is the subset of testing.TB (and Ginkgo's GinkgoTInterface, which
@@ -46,10 +47,11 @@ type Node struct {
 	FSM    *fsm.FSM
 	DBPath string
 
-	// Driver and DB are only populated by NewTCPCluster; NewInmemCluster
-	// leaves them nil since its callers build their own Gate or Driver
-	// on top of Raft/FSM with test-specific options.
+	// Driver, Log, and DB are only populated by NewTCPCluster; NewInmemCluster
+	// leaves them nil since its callers build their own LogAdapter/Gate or
+	// Driver on top of Raft/FSM with test-specific options.
 	Driver *driver.Driver
+	Log    *log.SingleWriterLog
 	DB     *sql.DB
 
 	// Transport is only populated by NewInmemCluster, for tests that need
@@ -168,7 +170,7 @@ func WithFSMOptions(opts ...fsm.Option) Option {
 	return func(o *options) { o.fsmOpts = opts }
 }
 
-// WithApplyTimeout bounds each hraft.Apply call the cluster's Gates/Drivers
+// WithApplyTimeout bounds each hraft.Apply call the cluster's Logs/Drivers
 // (NewTCPCluster only) make. Defaults to 2s.
 func WithApplyTimeout(d time.Duration) Option {
 	return func(o *options) { o.applyTimeout = d }

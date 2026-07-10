@@ -1,4 +1,4 @@
-package driver
+package log
 
 import "time"
 
@@ -14,8 +14,8 @@ func defaultOptions() options {
 	}
 }
 
-// WithApplyTimeout bounds each hraft.Apply call the Gate makes. Defaults to
-// 5s.
+// WithApplyTimeout bounds each hraft.Apply call the SingleWriterLog makes.
+// Defaults to 5s.
 func WithApplyTimeout(d time.Duration) Option {
 	return func(o *options) { o.applyTimeout = d }
 }
