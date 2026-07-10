@@ -8,8 +8,8 @@ import (
 	"github.com/ncruces/go-sqlite3"
 
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
+	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/testutils"
-	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -37,7 +37,7 @@ var _ = Describe("Gate", func() {
 				return false
 			}
 			follower := c.Other(leader)
-			err := c.Gate(follower).Propose([]*vfs.Frame{{Pgno: 1, Page: []byte("x")}}, 1)
+			err := c.Gate(follower).Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("x")}}, NTruncate: 1})
 			if err == nil {
 				return false
 			}
@@ -62,7 +62,7 @@ var _ = Describe("Gate", func() {
 
 		Expect(c.Gate(follower).LastRejection()).To(BeNil(), "no proposal attempted yet")
 
-		err := c.Gate(follower).Propose([]*vfs.Frame{{Pgno: 1, Page: []byte("x")}}, 1)
+		err := c.Gate(follower).Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("x")}}, NTruncate: 1})
 		Expect(err).To(HaveOccurred())
 		var notLeader *raftgate.NotLeaderError
 		Expect(errors.As(c.Gate(follower).LastRejection(), &notLeader)).To(BeTrue(),
@@ -74,7 +74,7 @@ var _ = Describe("Gate", func() {
 		var proposer *testutils.Node
 		testutils.Eventually(GinkgoT(), 5*time.Second, 20*time.Millisecond, func() bool {
 			l, g := c.ReadyLeader(GinkgoT())
-			if err := g.Propose(entries[0].frames, entries[0].nTruncate); err != nil {
+			if err := g.Propose(entries[0]); err != nil {
 				return false
 			}
 			proposer = l
@@ -95,13 +95,13 @@ var _ = Describe("Gate", func() {
 			"INSERT INTO t (id, v) VALUES (1, 'hello')",
 		)
 		for _, e := range entries {
-			Expect(gate.Propose(e.frames, e.nTruncate)).To(Succeed())
+			Expect(gate.Propose(e)).To(Succeed())
 		}
 
 		// The leader publishes via its own SQLite write path in real usage
 		// (out of scope for this direct-Propose unit test); either way, its
 		// own fsm.FSM must never materialize its own entry via
-		// AppendEntry -- there is nothing at all on the leader's disk for
+		// AppendTransaction -- there is nothing at all on the leader's disk for
 		// this table, since this test never opened a real gated connection
 		// on the leader to publish it any other way.
 		leaderConn, err := sqlite3.Open("file:" + leader.DBPath)
@@ -133,7 +133,9 @@ var _ = Describe("Gate", func() {
 		Expect(follower.Raft.Shutdown().Error()).To(Succeed())
 
 		errCh := make(chan error, 1)
-		go func() { errCh <- gate.Propose([]*vfs.Frame{{Pgno: 1, Page: []byte("lost")}}, 1) }()
+		go func() {
+			errCh <- gate.Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("lost")}}, NTruncate: 1})
+		}()
 
 		Eventually(errCh, 5*time.Second, 10*time.Millisecond).Should(Receive(HaveOccurred()))
 	})

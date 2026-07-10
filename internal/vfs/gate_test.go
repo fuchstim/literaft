@@ -9,6 +9,7 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
+	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -23,12 +24,12 @@ import (
 
 // capturedEntry is one call to spyGate.Propose, recorded verbatim.
 type capturedEntry struct {
-	frames    []*vfs.Frame
+	pages     []*raftproto.Page
 	nTruncate uint32
 }
 
 // spyGate records every proposal it sees (whether or not it's told to
-// reject it), so tests can inspect the captured frames independently of
+// reject it), so tests can inspect the captured pages independently of
 // whatever data ended up on disk.
 type spyGate struct {
 	mu      sync.Mutex
@@ -36,10 +37,10 @@ type spyGate struct {
 	reject  bool
 }
 
-func (g *spyGate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
+func (g *spyGate) Propose(txn *raftproto.Transaction) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.entries = append(g.entries, capturedEntry{frames, nTruncate})
+	g.entries = append(g.entries, capturedEntry{txn.Pages, txn.NTruncate})
 	if g.reject {
 		return errors.New("spyGate: rejected for test")
 	}
@@ -113,13 +114,13 @@ var _ = Describe("commit-frame interception", func() {
 		Expect(int64(last.nTruncate)).To(Equal(pageCount),
 			"the final proposal's nTruncate must be the post-commit database size")
 
-		// Union all captured frames -- later frames for a page win -- and
+		// Union all captured pages -- later frames for a page win -- and
 		// confirm every page named matches what the reference run actually
 		// persisted at that page number.
 		pages := map[uint32][]byte{}
 		for _, e := range entries {
-			for _, f := range e.frames {
-				pages[f.Pgno] = f.Page
+			for _, p := range e.pages {
+				pages[p.Pgno] = p.Data
 			}
 		}
 		Expect(pages).NotTo(BeEmpty())
@@ -151,7 +152,7 @@ var _ = Describe("commit-frame interception", func() {
 
 		snapshot := gate.snapshot()
 		rejected := snapshot[len(snapshot)-1]
-		Expect(len(rejected.frames)).To(BeNumerically(">", 1),
+		Expect(len(rejected.pages)).To(BeNumerically(">", 1),
 			"test setup should exercise a multi-frame transaction, not just the commit frame")
 
 		// mxFrame never advanced: the rejected row must not be visible.

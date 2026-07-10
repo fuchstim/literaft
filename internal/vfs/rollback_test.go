@@ -95,12 +95,12 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 				"mistaken for a checksum-only rewrite of the rolled-back transaction's frame")
 
 		last := entries[len(entries)-1]
-		Expect(last.frames).NotTo(BeEmpty())
-		for _, frame := range last.frames {
-			Expect(int64(len(frame.Page))).To(Equal(pageSize))
-			offset := (int64(frame.Pgno) - 1) * pageSize
-			Expect(frame.Page).To(Equal(referenceDB[offset:offset+pageSize]),
-				"captured page %d must match its final on-disk content", frame.Pgno)
+		Expect(last.pages).NotTo(BeEmpty())
+		for _, page := range last.pages {
+			Expect(int64(len(page.Data))).To(Equal(pageSize))
+			offset := (int64(page.Pgno) - 1) * pageSize
+			Expect(page.Data).To(Equal(referenceDB[offset:offset+pageSize]),
+				"captured page %d must match its final on-disk content", page.Pgno)
 		}
 
 		Expect(gated.Close()).To(Succeed())

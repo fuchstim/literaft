@@ -5,30 +5,35 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ raft.FSM = (*FSM)(nil)
 
 type FSM struct {
-	nodeID, dbPath string
-	db             *sqlite3.Conn
-	dbLock         *os.File
-	pageSize       uint32
-	walAppender    *walappender.WALAppender
-	snapshotter    *snapshotter.Snapshotter
+	dbPath      string
+	db          *sqlite3.Conn
+	dbLock      *os.File
+	pageSize    uint32
+	walAppender *walappender.WALAppender
+	snapshotter *snapshotter.Snapshotter
+
+	// skipEntriesMu guards skipEntries: SkipEntry/UnskipEntry run on the
+	// proposing goroutine (Gate.propose), while Apply runs on hraft's own
+	// apply goroutine -- an unsynchronized map access from both would be a
+	// data race.
+	skipEntriesMu sync.Mutex
+	skipEntries   map[string]struct{}
 }
 
-func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
-	if nodeID == "" {
-		return nil, fmt.Errorf("nodeID is required")
-	}
-
+func New(dbPath string, opts ...Option) (*FSM, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("dbPath is required")
 	}
@@ -80,22 +85,19 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 	snapshotter := snapshotter.New(dbPath, pageSize)
 
 	return &FSM{
-		nodeID:      nodeID,
 		dbPath:      dbPath,
 		db:          db,
 		dbLock:      dbLock,
 		pageSize:    uint32(pageSize),
 		walAppender: walAppender,
 		snapshotter: snapshotter,
+
+		skipEntries: make(map[string]struct{}),
 	}, nil
 }
 
 func (f *FSM) Close() error {
 	return errors.Join(f.db.Close(), f.walAppender.Close(), f.dbLock.Close())
-}
-
-func (f *FSM) NodeID() string {
-	return f.nodeID
 }
 
 func (f *FSM) DBPath() string {
@@ -104,6 +106,18 @@ func (f *FSM) DBPath() string {
 
 func (f *FSM) PageSize() uint32 {
 	return f.pageSize
+}
+
+func (f *FSM) SkipEntry(id string) {
+	f.skipEntriesMu.Lock()
+	defer f.skipEntriesMu.Unlock()
+	f.skipEntries[id] = struct{}{}
+}
+
+func (f *FSM) UnskipEntry(id string) {
+	f.skipEntriesMu.Lock()
+	defer f.skipEntriesMu.Unlock()
+	delete(f.skipEntries, id)
 }
 
 // Apply implements hraft.FSM.
@@ -121,16 +135,24 @@ func (f *FSM) Apply(log *raft.Log) any {
 		return nil
 	}
 
-	entry, err := raftproto.DecodeEntry(log.Data)
-	if err != nil {
-		panic(fmt.Sprintf("failed to decode committed entry at index %d: %v", log.Index, err))
+	entry := &raftproto.Entry{}
+	if err := proto.Unmarshal(log.Data, entry); err != nil {
+		panic(fmt.Sprintf("failed to unmarshal committed entry at index %d: %v", log.Index, err))
 	}
 
-	if entry.NodeID == f.NodeID() {
+	f.skipEntriesMu.Lock()
+	_, skip := f.skipEntries[entry.GetHeader().GetId()]
+	f.skipEntriesMu.Unlock()
+	if skip {
 		return nil
 	}
 
-	if err := f.walAppender.AppendEntry(entry); err != nil {
+	txn := entry.GetTransaction()
+	if txn == nil {
+		return nil
+	}
+
+	if err := f.walAppender.AppendTransaction(txn); err != nil {
 		panic(fmt.Sprintf("failed to append entry at index %d: %v", log.Index, err))
 	}
 

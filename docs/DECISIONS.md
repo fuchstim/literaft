@@ -76,8 +76,9 @@ leader write throughput is one txn per round-trip.
 `DESIGN.md`) described the entry format as carrying "a client request ID (for
 future dedup)". No such field was ever actually added, before or after the
 refactor — `ROADMAP.md`'s "Deferred" section still correctly lists
-client-request-ID dedup as unbuilt. The `NodeID` field the current format
-does carry serves a different, narrower purpose — see ADR-011.
+client-request-ID dedup as unbuilt. `Header.Id`, the per-proposal token the
+current format does carry, serves a different, narrower purpose (the
+self-apply skip) and must not be conflated with this — see ADR-011.
 
 ---
 
@@ -104,10 +105,12 @@ Reimplementing it on the leader would add risk for zero benefit. The follower ha
 no SQLite writer to do the publish, so it must — and that's where our own
 shm code and the format-sensitive tear-safe reimplementation live.
 
-**How "is this my own entry" is decided has changed since this ADR was
+**How "is this my own entry" is decided has changed twice since this ADR was
 written** — originally a transient marker set only around the specific
-`hraft.Apply` call publishing it, now a permanent `entry.NodeID == f.NodeID()`
-check. See ADR-011; that change is a regression, not a refinement of this ADR.
+`hraft.Apply` call publishing it, then (a regression, not a refinement of
+this ADR) a permanent `entry.NodeID == f.NodeID()` check, now fixed back to
+a transient, per-proposal marker (`Header.Id` in `fsm.FSM.skipEntries`). See
+ADR-011.
 
 ---
 
@@ -310,8 +313,8 @@ contain what it published the first time (see below). The permanent
 *every* time `FSM.Apply` ever sees it, on this node, forever — including in
 both scenarios where that skip is actively wrong.
 
-**Two concrete, reproducible failure modes** (both demonstrated by `PIt`/
-pending regression tests rather than fixed — see below):
+**Two concrete, reproducible failure modes** (both demonstrated by regression
+tests, `PIt`/pending at the time this bug was live — see "Status" below):
 
 1. **hraft's Figure-8 rule.** A node's own proposal can be left uncommitted
    when it loses leadership mid-proposal (ADR-007's "ambiguous commit"). If
@@ -343,18 +346,17 @@ pending regression tests rather than fixed — see below):
 
 **Status.** Tracked as
 [issue #41](https://github.com/fuchstim/literaft/issues/41) (milestone M7).
-Not fixed as part of reinstating test coverage — both scenarios are committed
-as `PIt` (Ginkgo "pending") specs precisely so the suite stays green while the
-regression stays visible and reproducible, rather than either silently
-passing or permanently failing CI for a known issue.
+Fixed alongside issue #42's protobuf wire-format rework. Both scenarios were
+committed as `PIt` (Ginkgo "pending") specs while the regression stayed
+visible and reproducible; both now pass as ordinary `It`s.
 
-**Fix direction.** Restore a transient, per-proposal self-skip instead of a
-permanent per-entry one — scoped to the specific in-flight `hraft.Apply`
-call the way the old marker was, not keyed off `NodeID` alone.
-`internal/raft/gate.Gate` no longer holds a reference to the `fsm.FSM` at all
-(unlike the old `NewGate(r, fsm, timeout)`), so restoring this needs either
-giving `Gate` that reference back or threading a per-proposal marker through
-some other channel `FSM.Apply` can observe.
+**Fix.** `raftgate.Gate` holds a `*fsm.FSM` reference again (`New(r, fsm,
+timeout)`), and each `raft.Log`'s `Entry.Header.Id` is now a per-proposal
+UUID rather than a static node ID. `Gate.propose` calls `fsm.FSM.SkipEntry`
+immediately before its own `raft.Apply` and the deferred `UnskipEntry`
+immediately after that call returns, so the marker only ever covers the one
+in-flight proposal it belongs to — restoring exactly the transient scope the
+old `beginSelfApply`/`endSelfApply` had.
 
 ---
 

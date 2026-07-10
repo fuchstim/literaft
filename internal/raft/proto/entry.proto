@@ -4,16 +4,32 @@ package raftproto;
 
 option go_package = "github.com/fuchstim/literaft/internal/raft/proto;raftproto";
 
-// EntryData is the generated wire format for Entry (see entry.go), used for
-// a raft.Log's Data field. Named distinctly from Entry so the hand-written
-// domain type and the generated wire type can coexist in the same package.
-message EntryData {
-  string node_id = 1;
-  repeated FrameData frames = 2;
-  uint32 n_truncate = 3;
+// Entry is a raft.Log's Data payload: this is our own wire format, unrelated
+// to the WAL's on-disk format. The payload oneof anticipates entry kinds
+// other than Transaction (e.g. config changes) sharing the same Header.
+message Entry {
+  Header header = 1;
+  oneof payload {
+    Transaction transaction = 2;
+  }
 }
 
-message FrameData {
+// Header.id is a per-proposal unique token (not a node ID): fsm.FSM uses it
+// as a transient marker to skip materializing an entry this node's own
+// still-in-flight Propose call already applied via its live SQLite write
+// path, without permanently associating the entry with the node that
+// authored it.
+message Header {
+  string id = 1;
+}
+
+// Transaction is a whole committed write transaction's captured pages.
+message Transaction {
+  repeated Page pages = 1;
+  uint32 n_truncate = 2; // post-commit database size in pages
+}
+
+message Page {
   uint32 pgno = 1;
-  bytes page = 2;
+  bytes data = 2;
 }

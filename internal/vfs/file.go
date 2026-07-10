@@ -3,6 +3,7 @@ package vfs
 import (
 	"fmt"
 
+	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
@@ -198,9 +199,14 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	}
 
 	frames, nTruncate := f.capture, pending.header.nTruncate
+	txn := &raftproto.Transaction{Pages: make([]*raftproto.Page, len(frames)), NTruncate: nTruncate}
+	for i, frame := range frames {
+		txn.Pages[i] = &raftproto.Page{Pgno: frame.Pgno, Data: frame.Page}
+	}
+
 	f.capture = nil
 
-	if err := f.gate.Propose(frames, nTruncate); err != nil {
+	if err := f.gate.Propose(txn); err != nil {
 		// Rejected: this transaction never committed, so no checksum
 		// rewrite window opens for it. headerPgno/dataOffsets must not
 		// survive into the next write, or a retry landing on the same

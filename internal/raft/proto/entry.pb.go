@@ -21,32 +21,34 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// EntryData is the generated wire format for Entry (see entry.go), used for
-// a raft.Log's Data field. Named distinctly from Entry so the hand-written
-// domain type and the generated wire type can coexist in the same package.
-type EntryData struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Frames        []*FrameData           `protobuf:"bytes,2,rep,name=frames,proto3" json:"frames,omitempty"`
-	NTruncate     uint32                 `protobuf:"varint,3,opt,name=n_truncate,json=nTruncate,proto3" json:"n_truncate,omitempty"`
+// Entry is a raft.Log's Data payload: this is our own wire format, unrelated
+// to the WAL's on-disk format. The payload oneof anticipates entry kinds
+// other than Transaction (e.g. config changes) sharing the same Header.
+type Entry struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Header *Header                `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*Entry_Transaction
+	Payload       isEntry_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *EntryData) Reset() {
-	*x = EntryData{}
+func (x *Entry) Reset() {
+	*x = Entry{}
 	mi := &file_entry_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *EntryData) String() string {
+func (x *Entry) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*EntryData) ProtoMessage() {}
+func (*Entry) ProtoMessage() {}
 
-func (x *EntryData) ProtoReflect() protoreflect.Message {
+func (x *Entry) ProtoReflect() protoreflect.Message {
 	mi := &file_entry_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -58,55 +60,169 @@ func (x *EntryData) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use EntryData.ProtoReflect.Descriptor instead.
-func (*EntryData) Descriptor() ([]byte, []int) {
+// Deprecated: Use Entry.ProtoReflect.Descriptor instead.
+func (*Entry) Descriptor() ([]byte, []int) {
 	return file_entry_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *EntryData) GetNodeId() string {
+func (x *Entry) GetHeader() *Header {
 	if x != nil {
-		return x.NodeId
-	}
-	return ""
-}
-
-func (x *EntryData) GetFrames() []*FrameData {
-	if x != nil {
-		return x.Frames
+		return x.Header
 	}
 	return nil
 }
 
-func (x *EntryData) GetNTruncate() uint32 {
+func (x *Entry) GetPayload() isEntry_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *Entry) GetTransaction() *Transaction {
+	if x != nil {
+		if x, ok := x.Payload.(*Entry_Transaction); ok {
+			return x.Transaction
+		}
+	}
+	return nil
+}
+
+type isEntry_Payload interface {
+	isEntry_Payload()
+}
+
+type Entry_Transaction struct {
+	Transaction *Transaction `protobuf:"bytes,2,opt,name=transaction,proto3,oneof"`
+}
+
+func (*Entry_Transaction) isEntry_Payload() {}
+
+// Header.id is a per-proposal unique token (not a node ID): fsm.FSM uses it
+// as a transient marker to skip materializing an entry this node's own
+// still-in-flight Propose call already applied via its live SQLite write
+// path, without permanently associating the entry with the node that
+// authored it.
+type Header struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Header) Reset() {
+	*x = Header{}
+	mi := &file_entry_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Header) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Header) ProtoMessage() {}
+
+func (x *Header) ProtoReflect() protoreflect.Message {
+	mi := &file_entry_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Header.ProtoReflect.Descriptor instead.
+func (*Header) Descriptor() ([]byte, []int) {
+	return file_entry_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Header) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// Transaction is a whole committed write transaction's captured pages.
+type Transaction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Pages         []*Page                `protobuf:"bytes,1,rep,name=pages,proto3" json:"pages,omitempty"`
+	NTruncate     uint32                 `protobuf:"varint,2,opt,name=n_truncate,json=nTruncate,proto3" json:"n_truncate,omitempty"` // post-commit database size in pages
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Transaction) Reset() {
+	*x = Transaction{}
+	mi := &file_entry_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Transaction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Transaction) ProtoMessage() {}
+
+func (x *Transaction) ProtoReflect() protoreflect.Message {
+	mi := &file_entry_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Transaction.ProtoReflect.Descriptor instead.
+func (*Transaction) Descriptor() ([]byte, []int) {
+	return file_entry_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Transaction) GetPages() []*Page {
+	if x != nil {
+		return x.Pages
+	}
+	return nil
+}
+
+func (x *Transaction) GetNTruncate() uint32 {
 	if x != nil {
 		return x.NTruncate
 	}
 	return 0
 }
 
-type FrameData struct {
+type Page struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Pgno          uint32                 `protobuf:"varint,1,opt,name=pgno,proto3" json:"pgno,omitempty"`
-	Page          []byte                 `protobuf:"bytes,2,opt,name=page,proto3" json:"page,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *FrameData) Reset() {
-	*x = FrameData{}
-	mi := &file_entry_proto_msgTypes[1]
+func (x *Page) Reset() {
+	*x = Page{}
+	mi := &file_entry_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *FrameData) String() string {
+func (x *Page) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*FrameData) ProtoMessage() {}
+func (*Page) ProtoMessage() {}
 
-func (x *FrameData) ProtoReflect() protoreflect.Message {
-	mi := &file_entry_proto_msgTypes[1]
+func (x *Page) ProtoReflect() protoreflect.Message {
+	mi := &file_entry_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -117,21 +233,21 @@ func (x *FrameData) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use FrameData.ProtoReflect.Descriptor instead.
-func (*FrameData) Descriptor() ([]byte, []int) {
-	return file_entry_proto_rawDescGZIP(), []int{1}
+// Deprecated: Use Page.ProtoReflect.Descriptor instead.
+func (*Page) Descriptor() ([]byte, []int) {
+	return file_entry_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *FrameData) GetPgno() uint32 {
+func (x *Page) GetPgno() uint32 {
 	if x != nil {
 		return x.Pgno
 	}
 	return 0
 }
 
-func (x *FrameData) GetPage() []byte {
+func (x *Page) GetData() []byte {
 	if x != nil {
-		return x.Page
+		return x.Data
 	}
 	return nil
 }
@@ -140,15 +256,20 @@ var File_entry_proto protoreflect.FileDescriptor
 
 const file_entry_proto_rawDesc = "" +
 	"\n" +
-	"\ventry.proto\x12\traftproto\"q\n" +
-	"\tEntryData\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12,\n" +
-	"\x06frames\x18\x02 \x03(\v2\x14.raftproto.FrameDataR\x06frames\x12\x1d\n" +
+	"\ventry.proto\x12\traftproto\"y\n" +
+	"\x05Entry\x12)\n" +
+	"\x06header\x18\x01 \x01(\v2\x11.raftproto.HeaderR\x06header\x12:\n" +
+	"\vtransaction\x18\x02 \x01(\v2\x16.raftproto.TransactionH\x00R\vtransactionB\t\n" +
+	"\apayload\"\x18\n" +
+	"\x06Header\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"S\n" +
+	"\vTransaction\x12%\n" +
+	"\x05pages\x18\x01 \x03(\v2\x0f.raftproto.PageR\x05pages\x12\x1d\n" +
 	"\n" +
-	"n_truncate\x18\x03 \x01(\rR\tnTruncate\"3\n" +
-	"\tFrameData\x12\x12\n" +
+	"n_truncate\x18\x02 \x01(\rR\tnTruncate\".\n" +
+	"\x04Page\x12\x12\n" +
 	"\x04pgno\x18\x01 \x01(\rR\x04pgno\x12\x12\n" +
-	"\x04page\x18\x02 \x01(\fR\x04pageB<Z:github.com/fuchstim/literaft/internal/raft/proto;raftprotob\x06proto3"
+	"\x04data\x18\x02 \x01(\fR\x04dataB<Z:github.com/fuchstim/literaft/internal/raft/proto;raftprotob\x06proto3"
 
 var (
 	file_entry_proto_rawDescOnce sync.Once
@@ -162,18 +283,22 @@ func file_entry_proto_rawDescGZIP() []byte {
 	return file_entry_proto_rawDescData
 }
 
-var file_entry_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_entry_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_entry_proto_goTypes = []any{
-	(*EntryData)(nil), // 0: raftproto.EntryData
-	(*FrameData)(nil), // 1: raftproto.FrameData
+	(*Entry)(nil),       // 0: raftproto.Entry
+	(*Header)(nil),      // 1: raftproto.Header
+	(*Transaction)(nil), // 2: raftproto.Transaction
+	(*Page)(nil),        // 3: raftproto.Page
 }
 var file_entry_proto_depIdxs = []int32{
-	1, // 0: raftproto.EntryData.frames:type_name -> raftproto.FrameData
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1, // 0: raftproto.Entry.header:type_name -> raftproto.Header
+	2, // 1: raftproto.Entry.transaction:type_name -> raftproto.Transaction
+	3, // 2: raftproto.Transaction.pages:type_name -> raftproto.Page
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_entry_proto_init() }
@@ -181,13 +306,16 @@ func file_entry_proto_init() {
 	if File_entry_proto != nil {
 		return
 	}
+	file_entry_proto_msgTypes[0].OneofWrappers = []any{
+		(*Entry_Transaction)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_entry_proto_rawDesc), len(file_entry_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

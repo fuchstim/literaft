@@ -5,8 +5,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/fuchstim/literaft/fsm"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 )
@@ -16,7 +19,7 @@ var _ vfs.Gate = (*Gate)(nil)
 // Gate adapts a real raft.Raft cluster to vfs.Gate.
 type Gate struct {
 	raft    *raft.Raft
-	nodeID  string
+	fsm     *fsm.FSM
 	timeout time.Duration
 
 	readyMu sync.RWMutex
@@ -31,15 +34,13 @@ type Gate struct {
 }
 
 // New returns a Gate proposing through r, whose FSM must be fsm (the
-// same FSM instance passed to hraft.NewRaft) -- Propose embeds nodeID in
-// every entry it proposes, which is how the FSM recognizes and skips
-// materializing this node's own entries. timeout bounds each hraft.Apply
+// same FSM instance passed to hraft.NewRaft). timeout bounds each hraft.Apply
 // call.
 //
 // New immediately starts a background watcher tracking r's leadership
 // transitions; callers must Close the Gate to stop it.
-func New(r *raft.Raft, nodeID string, timeout time.Duration) *Gate {
-	g := &Gate{raft: r, nodeID: nodeID, timeout: timeout, stop: make(chan struct{})}
+func New(r *raft.Raft, fsm *fsm.FSM, timeout time.Duration) *Gate {
+	g := &Gate{raft: r, fsm: fsm, timeout: timeout, stop: make(chan struct{})}
 	g.wg.Go(g.watchLeadership)
 
 	return g
@@ -147,15 +148,15 @@ func (g *Gate) drain(term uint64) {
 // (SQLite's own automatic rollback after a failed commit can clear it
 // first), so a caller that holds this Gate directly has a reliable way to
 // recover which error this was.
-func (g *Gate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
-	err := g.propose(frames, nTruncate)
+func (g *Gate) Propose(txn *raftproto.Transaction) error {
+	err := g.propose(txn)
 	g.lastErrMu.Lock()
 	g.lastErr = err
 	g.lastErrMu.Unlock()
 	return err
 }
 
-func (g *Gate) propose(frames []*vfs.Frame, nTruncate uint32) error {
+func (g *Gate) propose(txn *raftproto.Transaction) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
 		return &NotLeaderError{Leader: leader}
@@ -165,9 +166,19 @@ func (g *Gate) propose(frames []*vfs.Frame, nTruncate uint32) error {
 		return CatchingUpError{}
 	}
 
-	e := &raftproto.Entry{NodeID: g.nodeID, Frames: frames, NTruncate: nTruncate}
+	e := &raftproto.Entry{
+		Header:  &raftproto.Header{Id: uuid.NewString()},
+		Payload: &raftproto.Entry_Transaction{Transaction: txn},
+	}
+	g.fsm.SkipEntry(e.Header.Id)
+	defer g.fsm.UnskipEntry(e.Header.Id)
 
-	future := g.raft.Apply(e.Encode(), g.timeout)
+	b, err := proto.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entry: %w", err)
+	}
+
+	future := g.raft.Apply(b, g.timeout)
 	if err := future.Error(); err != nil {
 		return fmt.Errorf("failed to apply change: %w", err)
 	}

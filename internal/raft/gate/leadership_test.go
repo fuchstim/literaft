@@ -8,8 +8,8 @@ import (
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
+	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/testutils"
-	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -59,7 +59,7 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 		// storage and FSM application are decoupled in hraft. So these
 		// commit even though newLeader's FSM never gets to run for them yet.
 		for _, e := range entries {
-			Expect(oldGate.Propose(e.frames, e.nTruncate)).To(Succeed())
+			Expect(oldGate.Propose(e)).To(Succeed())
 		}
 		testutils.Consistently(GinkgoT(), 200*time.Millisecond, 10*time.Millisecond, func() bool {
 			_, ok := tryNodeQueryInt(newLeader, "SELECT count(*) FROM t")
@@ -85,7 +85,7 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 		// Rejected by the Ready() check before ever reaching raft.Apply, so
 		// the frame content here is never validated -- unlike entries
 		// above, it doesn't need to be real, valid page content.
-		proposeErr := newGate.Propose([]*vfs.Frame{{Pgno: 1, Page: []byte("premature")}}, 1)
+		proposeErr := newGate.Propose(&raftproto.Transaction{Pages: []*raftproto.Page{{Pgno: 1, Data: []byte("premature")}}, NTruncate: 1})
 		var catchingUp raftgate.CatchingUpError
 		Expect(errors.As(proposeErr, &catchingUp)).To(BeTrue(), "got %v (%T), not a CatchingUpError", proposeErr, proposeErr)
 
@@ -107,7 +107,7 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 		// misfire against the just-drained backlog instead of this new
 		// entry, either losing the backlog or double-materializing this
 		// write.
-		Expect(newGate.Propose(fresh.frames, fresh.nTruncate)).To(Succeed())
+		Expect(newGate.Propose(fresh)).To(Succeed())
 
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			_, ok := tryNodeQueryInt(oldLeader, "SELECT count(*) FROM fresh")

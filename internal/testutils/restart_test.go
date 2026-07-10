@@ -137,23 +137,11 @@ var _ = Describe("node restart", func() {
 		assertRestarted(restarted, 40)
 	})
 
-	// Same root cause as the Figure-8 self-apply regression, triggered here
-	// a far more mundane way: FSM.Apply's self-skip (entry.NodeID ==
-	// f.NodeID()) assumes a self-authored entry is already on local disk
-	// because it was published via this node's own live SQL write path
-	// when it happened. FSM.Restore (run synchronously on startup whenever
-	// a local snapshot exists) invalidates that assumption: it resets
-	// local state back to an *older* point, the snapshot, and every
-	// self-authored log entry after that snapshot -- entries this node's
-	// own local disk no longer actually has, having just been wound back
-	// -- still gets skipped on replay, exactly as if it were still safely
-	// on disk. A node that was leader long enough to take its own
-	// snapshot and then restarts permanently loses every row it wrote
-	// after that snapshot. Verified below (skip removed and confirmed
-	// failing, then restored) before being marked PIt: flip back to It
-	// once the self-skip is fixed to be transient/scoped rather than a
-	// permanent per-entry property.
-	PIt("recovers a leader restarted after it has taken a local snapshot", func() {
+	// FSM.Restore (run on startup whenever a local snapshot exists) resets
+	// local state back to the snapshot, so every self-authored log entry
+	// after it must replay normally on restart rather than being skipped
+	// as already-applied.
+	It("recovers a leader restarted after it has taken a local snapshot", func() {
 		c := snapshottingCluster()
 		defer c.Shutdown()
 

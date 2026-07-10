@@ -177,7 +177,7 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 		t.Fatalf("testutils: raft.NewFileSnapshotStore: %v", err)
 	}
 
-	f, err := fsm.New(s.id, s.dbPath, o.fsmOpts...)
+	f, err := fsm.New(s.dbPath, o.fsmOpts...)
 	if err != nil {
 		t.Fatalf("testutils: fsm.New(%s): %v", s.id, err)
 	}
