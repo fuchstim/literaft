@@ -12,8 +12,8 @@ import (
 //
 // Required File methods (Close/ReadAt/Truncate/Sync/Size/Lock/Unlock/
 // CheckReservedLock/SectorSize/DeviceCharacteristics) are promoted unchanged
-// from the embedded base. WriteAt is overridden below to intercept the
-// commit frame on the WAL file.
+// from the embedded base. WriteAt is overridden to intercept the commit
+// frame on the WAL file.
 type File struct {
 	sqlite3vfs.File
 	kind FileType
@@ -26,55 +26,42 @@ type File struct {
 	pending *pendingFrame
 	capture []*Frame
 
-	// pageSize is the page size used to
-	// tell a frame header write from a page-image write by offset alone
-	// (walHeaderSize + n*(frameHeaderSize+pageSize) is always a header).
+	// pageSize is the real, cluster-wide fixed SQLite page size (never 0).
+	// It's used both to compute frame-header offsets and to validate a
+	// captured frame's page-image length. A wrong value here doesn't just
+	// weaken the length check -- it desyncs offset computation, silently
+	// corrupting frame parsing for every write after that point.
 	pageSize uint32
 
 	// headerPgno and dataOffsets record, for the transaction currently
 	// accumulating in capture, which WAL offsets already hold a captured
-	// frame's header (offset -> that frame's pgno) and page-image (offset
-	// -> index into capture) respectively. wal.c's walFrames() can revisit
-	// both after an earlier spill: re-dirtying an already-spilled page
-	// overwrites its data in place with a bare page-sized write (no
-	// header, since the header doesn't change), and committing such a
-	// transaction runs walRewriteChecksums(), which rewrites every
-	// affected frame's header -- including the just-written commit
-	// frame's own -- a second time with no paired data write, purely to
-	// fix the cumulative checksum chain. Both must be recognized as
-	// revisits of an already-captured frame, not new ones: missing the
-	// first silently under-captures the transaction, and missing the
-	// second desyncs the header/data pairing state machine so badly that
-	// a genuine commit frame can be mistaken for a checksum-only rewrite
-	// and never reach the gate at all (docs/WAL_FORMAT.md, wal.c
-	// walFrames/walRewriteChecksums).
+	// frame's header (offset -> pgno) or page image (offset -> index into
+	// capture). SQLite can revisit both after a spill: a re-dirtied
+	// already-spilled page is overwritten in place with a bare page-only
+	// write (no header), and committing can rewrite every affected frame's
+	// header a second time -- including the commit frame's own -- purely
+	// to fix the cumulative checksum chain, with no paired data write.
+	// Both must be recognized as revisits of an already-captured frame,
+	// not new ones, or the transaction ends up under-captured, or a
+	// genuine commit frame gets mistaken for a checksum-only rewrite and
+	// never reaches the gate.
 	//
-	// Both maps hold only the in-flight (or just-finished, mid-rewrite)
-	// transaction's own offsets, cleared lazily on the first header write
-	// that proves they no longer apply -- either a fresh offset once
-	// txnDone (walRewriteChecksums, if any, ran synchronously and is
-	// over), or any offset <= maxOffset (WAL checkpoint restart, or a
-	// transaction that spilled frames and then rolled back without ever
-	// setting txnDone: sqlite3WalUndo only reverts mxFrame back to where
-	// this connection's write transaction began, so the next
-	// transaction's first frame can land exactly on the aborted one's
-	// first frame's offset, not before it).
+	// Both maps hold only the in-flight (or just-finished) transaction's
+	// own offsets, cleared on the first header write that no longer fits:
+	// a fresh offset once txnDone (the checksum rewrite, if any, already
+	// ran), or any offset <= maxOffset (a checkpoint restart, or a
+	// transaction that spilled frames and rolled back without ever setting
+	// txnDone).
 	//
-	// A recorded offset+pgno match only proves a genuine walRewriteChecksums
-	// rewrite -- as opposed to a new frame coincidentally landing on an old,
-	// stale offset -- while txnDone is still true, since that rewrite can
-	// only happen synchronously right after this same transaction's own
-	// commit frame was processed (wal.c only calls it from within
-	// walFrames(), guarded by isCommit). Once txnDone is false, either the
-	// rewrite window is over (fresh offset, unrelated to any past pgno) or
-	// there never was one to begin with (rollback), so any offset match is
-	// coincidence, not evidence of a rewrite. This is why writeFrameData
-	// must reset both maps and txnDone the instant gate.Propose fails,
-	// rather than only on the next header write: a rejected commit's
-	// offsets (and possibly pgnos, by coincidence with a same-shape retry)
-	// are exactly as stale as a rolled-back transaction's, and the
-	// walRewriteChecksums window never opens for a transaction that never
-	// committed.
+	// An offset+pgno match only proves a genuine checksum rewrite -- as
+	// opposed to a new frame coincidentally landing on a stale offset --
+	// while txnDone is still true, since that rewrite can only happen
+	// synchronously right after this transaction's own commit frame was
+	// processed. Once txnDone is false, any offset match is coincidence,
+	// not evidence of a rewrite. This is why a failed gate proposal must
+	// reset both maps and txnDone immediately, not just on the next header
+	// write: a rejected commit's offsets are exactly as stale as a
+	// rolled-back transaction's.
 	headerPgno  map[int64]uint32
 	dataOffsets map[int64]int
 	maxOffset   int64
@@ -112,12 +99,9 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	case f.isFrameHeaderOffset(off):
 		h := parseFrameHeader(p)
 		if f.txnDone {
-			// walRewriteChecksums only ever runs synchronously right
-			// after this connection's own commit frame was processed, so
-			// a rewrite of one of its frames (same offset, same pgno) can
-			// only be genuine while that window is still open. Outside
-			// it, a matching offset+pgno is coincidence, not a rewrite --
-			// see below.
+			// A rewrite of this transaction's own frame (same offset,
+			// same pgno) can only be genuine while this window is open;
+			// once closed, a matching offset+pgno is coincidence.
 			if pgno, seen := f.headerPgno[off]; seen && pgno == h.pgno {
 				// The checksum bytes differ, pgno and commit marker don't:
 				// write through as-is, without restarting the header/data
@@ -126,16 +110,11 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 			}
 		}
 		if f.txnDone || off <= f.maxOffset {
-			// Either the previous transaction's commit-frame pairing
-			// already resolved and this write is no longer one of its
-			// checksum rewrites (so it must start a new transaction --
-			// walRewriteChecksums never touches offsets beyond its own
-			// commit frame), or the WAL rewound (checkpoint restart), or a
-			// transaction that spilled frames and then rolled back
-			// without ever setting txnDone left this offset (and possibly
-			// this exact pgno, by coincidence) tracked with nothing to
-			// legitimately rewrite it. In every case this offset's
-			// history no longer applies.
+			// Either the prior transaction's checksum-rewrite window is
+			// closed (this must be a new transaction), or the WAL rewound
+			// (a checkpoint restart, or a rolled-back spill that never
+			// set txnDone). Either way this offset's tracked history no
+			// longer applies.
 			f.headerPgno = nil
 			f.dataOffsets = nil
 			f.capture = nil
@@ -194,11 +173,10 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	pending := f.pending
 	f.pending = nil
 
-	if f.pageSize != 0 && len(p) != int(f.pageSize) {
-		// Same reset as a gate rejection (writeFrameData's Propose-error
-		// branch below): this write is never captured or proposed, so
-		// leaving txnDone/headerPgno stale would expose the same
-		// same-offset-retry bypass fixed there.
+	if len(p) != int(f.pageSize) {
+		// This write is never captured or proposed, so leaving
+		// txnDone/headerPgno stale would let a same-offset retry be
+		// mistaken for a checksum rewrite and bypass the gate.
 		f.headerPgno = nil
 		f.dataOffsets = nil
 		f.txnDone = false
@@ -223,37 +201,29 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	f.capture = nil
 
 	if err := f.gate.Propose(frames, nTruncate); err != nil {
-		// Rejected: no walRewriteChecksums window opens for a transaction
-		// that never committed, so headerPgno/dataOffsets must not survive
-		// into the next write. Leaving txnDone true (and the old offsets
-		// keyed by their now-stale pgnos) would let a retry that happens to
-		// land on the same WAL offset with the same pgno be mistaken for a same-transaction checksum rewrite and
-		// written straight through, bypassing capture and the gate
-		// entirely. That's not just a leader-side gate bypass: since the
-		// stale-match branch never calls gate.Propose again, it also skips
-		// the leader check, so a retried follower-local write could be
-		// silently accepted with zero RAFT involvement.
+		// Rejected: this transaction never committed, so no checksum
+		// rewrite window opens for it. headerPgno/dataOffsets must not
+		// survive into the next write, or a retry landing on the same
+		// offset+pgno could pass straight through as a same-transaction
+		// rewrite -- bypassing both capture and the gate, which for a
+		// follower-local retry means silent acceptance with zero RAFT
+		// involvement.
 		f.headerPgno = nil
 		f.dataOffsets = nil
 		f.txnDone = false
-		// Wrap, don't discard: gate.Propose can return a *NotLeaderError
-		// (with a leader-redirect hint) or a CatchingUpError, and a bare result code would lose that
-		// distinction. sqlite3vfs.SystemError attaches err so it's reachable
-		// via errors.As from whatever wraps this return value -- but it is
-		// NOT a reliable channel by itself: SQLite's own automatic rollback
-		// after a failed commit makes further, successful VFS calls before
-		// conn.Exec/Stmt.Step returns to Go, and each one clears the single
-		// slot this detail travels through (ncruces' wrp.SysError), win or
-		// lose.
-		// TODO: Return sqlite3.BUSY for retriable errors (ex. CatchingUpError)
+		// Wrap, don't discard: err may carry a leader-redirect hint or
+		// retriability that a bare result code would lose. This is also
+		// not a fully reliable channel -- SQLite's automatic rollback
+		// after a failed commit can trigger further VFS calls that
+		// overwrite it before it reaches the caller.
+		// TODO: return sqlite3.BUSY for retriable errors
 		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
 	}
 
-	// headerPgno/dataOffsets stay alive: walRewriteChecksums, if it runs,
-	// rewrites frame headers at these exact offsets next, still inside
-	// this same WriteAt sequence. txnDone marks that the next unseen (or
-	// pgno-mismatched) header offset belongs to a new transaction, safe
-	// to clear them for.
+	// headerPgno/dataOffsets stay alive: a checksum rewrite, if one
+	// happens, targets these exact offsets next, still within this same
+	// WriteAt sequence. txnDone marks that the next unseen (or
+	// pgno-mismatched) header offset belongs to a new transaction.
 	f.txnDone = true
 
 	if _, err := f.File.WriteAt(pending.headerRaw[:], pending.offset); err != nil {

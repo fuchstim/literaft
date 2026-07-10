@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
@@ -17,6 +18,7 @@ var _ raft.FSM = (*FSM)(nil)
 type FSM struct {
 	nodeID, dbPath string
 	db             *sqlite3.Conn
+	dbLock         *os.File
 	pageSize       uint32
 	walAppender    *walappender.WALAppender
 	snapshotter    *snapshotter.Snapshotter
@@ -42,7 +44,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 	}
 
 	if err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("failed to enable WAL mode on database at path `%s`: %w", err)
+		return nil, fmt.Errorf("failed to enable WAL mode on database at path `%s`: %w", dbPath, err)
 	}
 
 	stmt, _, err := db.Prepare("PRAGMA page_size;")
@@ -64,6 +66,12 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 		return nil, fmt.Errorf("invalid page size %d returned from PRAGMA page_size", pageSize)
 	}
 
+	// Acquired only after WAL mode is enabled (enabling WAL mode requires exclusive lock)
+	dbLock, err := acquireSharedDBLock(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
 	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL appender: %w", err)
@@ -75,6 +83,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 		nodeID:      nodeID,
 		dbPath:      dbPath,
 		db:          db,
+		dbLock:      dbLock,
 		pageSize:    uint32(pageSize),
 		walAppender: walAppender,
 		snapshotter: snapshotter,
@@ -82,7 +91,7 @@ func New(nodeID, dbPath string, opts ...Option) (*FSM, error) {
 }
 
 func (f *FSM) Close() error {
-	return errors.Join(f.db.Close(), f.walAppender.Close())
+	return errors.Join(f.db.Close(), f.walAppender.Close(), f.dbLock.Close())
 }
 
 func (f *FSM) NodeID() string {
@@ -99,18 +108,14 @@ func (f *FSM) PageSize() uint32 {
 
 // Apply implements hraft.FSM.
 //
-// A decode or materialization failure panics rather than returning the error
-// as hraft's generic response value. hraft has no "apply failed, stop
-// advancing" concept: processLogs advances lastApplied unconditionally after
-// dispatching a batch, and every follower-received entry (plus any
-// retroactively-committed Figure-8 entry from an earlier leadership stint) is
-// applied with no local future to receive a response at all -- so a returned
-// error here is silently discarded forever, while lastApplied has already
-// moved past the entry that failed. Every later entry then applies on top of
-// a base state this node never actually reached, permanently and silently
-// diverging it from the cluster. An FSM that can't apply a committed entry deterministically
-// has no safe way to keep participating, so it must stop the process instead
-// of limping on with corrupted state.
+// A decode or materialization failure panics rather than returning the
+// error as hraft's generic response value. hraft advances past a failed
+// entry unconditionally with no way to signal the failure back, so a
+// returned error here would be silently discarded while every later entry
+// applies on top of a base state this node never actually reached --
+// permanently and silently diverging it from the cluster. An FSM that
+// can't apply a committed entry deterministically must stop the process
+// rather than limp on with corrupted state.
 func (f *FSM) Apply(log *raft.Log) any {
 	if log.Type != raft.LogCommand {
 		return nil

@@ -1,13 +1,12 @@
 // Package vfs implements the RAFT-backed SQLite VFS.
 //
-// It wraps ncruces' default VFS with a pass-through layer that
-// changes nothing observable: every VFS and File method delegates to the
-// wrapped implementation, including the optional capability interfaces
+// It wraps ncruces' default VFS with a pass-through layer that changes
+// nothing observable: every VFS and File method delegates to the wrapped
+// implementation, including the optional capability interfaces
 // (FileSharedMemory, FileLockState, FileCheckpoint, FileUnwrap, ...) so WAL
 // mode, shared memory, and external-reader compatibility keep working
 // unmodified. Open tags each file by type (database, WAL, journal) so
-// commit-frame interception can be added on exactly the WAL write path (see
-// docs/DESIGN.md).
+// commit-frame interception can be added on exactly the WAL write path.
 package vfs
 
 import (
@@ -17,7 +16,16 @@ import (
 
 // Register wraps base with the provided gate and registers it
 // under name, so it can be selected with "?vfs=<name>" in a SQLite URI DSN.
+//
+// pageSize must be the real, cluster-wide fixed SQLite page size -- not
+// just an optional enforcement knob a caller can skip by passing 0. It's
+// also used unconditionally to compute frame-header offsets, so a wrong or
+// zero value silently corrupts frame parsing rather than merely disabling
+// a check. Register panics if pageSize is 0.
 func Register(name string, base sqlite3vfs.VFS, gate Gate, pageSize uint32) {
+	if pageSize == 0 {
+		panic("vfs: pageSize must be the real, non-zero cluster page size")
+	}
 	sqlite3vfs.Register(name, &VFS{base, gate, pageSize})
 }
 

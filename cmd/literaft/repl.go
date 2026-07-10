@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/ncruces/go-sqlite3"
 )
 
 // addVoterTimeout bounds how long ".addvoter" waits for hraft's own
@@ -18,19 +17,18 @@ import (
 // via normal replication (or a snapshot install, if it's too far behind).
 const addVoterTimeout = 10 * time.Second
 
-// runREPL runs an interactive SQL loop against n's kept-alive connection,
-// reading from in and writing prompts/results/errors to out, until in
-// reaches EOF or the user enters .exit/.quit. Every statement runs through
-// node.Node.WithDB, so it goes through the exact same commit-frame gate
-// (docs/DESIGN.md) as any other client write: on a follower, or a leader
-// still draining its apply backlog, that write fails and the error is
-// printed rather than crashing the loop.
+// runREPL runs an interactive SQL loop against db, reading from in and
+// writing prompts/results/errors to out, until in reaches EOF or the user
+// enters .exit/.quit. Every statement goes through the same commit-frame
+// gate as any other client write: on a follower, or a leader still
+// draining its apply backlog, that write fails and the error is printed
+// rather than crashing the loop.
 //
 // It returns true if the user explicitly typed .exit/.quit, false if it
 // stopped because in reached EOF. Callers must treat those two differently:
 // a headless/daemonized launch (stdin redirected from /dev/null, as under
 // systemd or a detached background process) hits EOF on the very first
-// read, and a piped script (docs' `literaft ... < seed.sql`) hits it the
+// read, and a piped script (e.g. `literaft ... < seed.sql`) hits it the
 // moment the script ends -- neither means "the operator wants this node
 // process to exit", only .exit/.quit does.
 //
@@ -136,10 +134,17 @@ func runStatement(db *sql.DB, sql string, out io.Writer) {
 		}
 		strRow := make([]string, len(row))
 		for i, val := range row {
-			if val == nil {
+			switch v := val.(type) {
+			case nil:
 				strRow[i] = "NULL"
-			} else {
-				strRow[i] = fmt.Sprintf("%v", val)
+			case []byte:
+				// A BLOB column: database/sql's generic any scan target
+				// returns its raw bytes, which %v would otherwise render as
+				// a numeric slice literal rather than SQLite CLI-style
+				// output.
+				strRow[i] = fmt.Sprintf("<blob %d bytes>", len(v))
+			default:
+				strRow[i] = fmt.Sprintf("%v", v)
 			}
 		}
 		fmt.Fprintln(out, strings.Join(strRow, "\t"))
@@ -151,49 +156,5 @@ func runStatement(db *sql.DB, sql string, out io.Writer) {
 
 	if len(cols) == 0 {
 		fmt.Fprintln(out, "OK")
-	}
-}
-
-// runStmt steps stmt to completion, printing a tab-separated header and one
-// line per result row for a query, or "OK" for a statement with no result
-// columns.
-func runStmt(stmt *sqlite3.Stmt, out io.Writer) error {
-	cols := stmt.ColumnCount()
-	if cols > 0 {
-		names := make([]string, cols)
-		for i := range names {
-			names[i] = stmt.ColumnName(i)
-		}
-		fmt.Fprintln(out, strings.Join(names, "\t"))
-	}
-
-	for stmt.Step() {
-		row := make([]string, cols)
-		for i := range row {
-			row[i] = columnText(stmt, i)
-		}
-		fmt.Fprintln(out, strings.Join(row, "\t"))
-	}
-	if err := stmt.Err(); err != nil {
-		return err
-	}
-
-	if cols == 0 {
-		fmt.Fprintln(out, "OK")
-	}
-	return nil
-}
-
-// columnText renders one column of the statement's current row as text,
-// special-casing NULL and BLOB (whose raw bytes ColumnText would otherwise
-// mangle as text).
-func columnText(stmt *sqlite3.Stmt, col int) string {
-	switch stmt.ColumnType(col) {
-	case sqlite3.NULL:
-		return "NULL"
-	case sqlite3.BLOB:
-		return fmt.Sprintf("<blob %d bytes>", len(stmt.ColumnRawBlob(col)))
-	default:
-		return stmt.ColumnText(col)
 	}
 }

@@ -80,7 +80,7 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 ## Current status & milestone
 
 **M0–M6 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
-compatibility, commit-frame gate, vendored shm + follower apply, real
+compatibility, commit-frame gate, shm + follower apply, real
 `hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), the
 leadership-churn ordering work, and real snapshot take/install — a multi-node
 cluster replicates writes, followers serve reads, killing/adding nodes
@@ -146,25 +146,42 @@ this file's context — update it *from* GitHub, not the other way around.
 
 ---
 
-## Repo layout (proposed)
+## Repo layout
 
 ```
-/CLAUDE.md                 – this file
-/docs/                     – design, decisions, roadmap, format & library notes
+/CLAUDE.md                        – this file
+/docs/                            – design, decisions, roadmap, format & library notes
 /go.mod
-/vfs/                      – the RAFT VFS: wraps ncruces' default VFS + File
-    vfs.go                 – VFS wrapper (Open tags files, delegates)
-    file.go                – File wrapper; xWrite commit-frame interception
-    walframe.go            – WAL frame header parse/build (on-disk format)
-/shm/                      – VENDORED copy of ncruces' shm implementation
-    (copied so follower-apply can drive mxFrame / page-map / write lock)
-/apply/                    – follower-apply: RAFT entry -> local -wal + wal-index
-/raft/                     – thin adapter over the chosen RAFT library
-/cmd/ or /internal/        – node process wiring, keeps a RW conn alive
+/fsm/                             – owns a node's SQLite connection, walappender,
+    fsm.go                          snapshotter, and the external-reader-safety
+    options.go                      db lock; implements hraft.FSM directly
+    dblock.go, lock_{linux,darwin}.go
+/internal/
+    vfs/                          – the RAFT VFS: wraps ncruces' default VFS + File
+        vfs.go, file.go             (Open tags files, xWrite intercepts the WAL
+        frame.go, gate.go            commit frame; walframe.go parses/builds
+        walframe.go                 WAL frame headers, on-disk format)
+    fsm/
+        walappender/              – follower-apply: RAFT entry -> local -wal + wal-index
+            walappender.go, walindex.go, checksum.go, frame.go
+            shm/                  – custom mmap+lock implementation of the SQLite
+                                     wal-index shared memory (so follower-apply
+                                     can drive mxFrame / page-map / write lock)
+        snapshotter/              – RAFT snapshot capture/restore via SQLite's
+                                     online backup API
+    raft/
+        gate/                     – thin adapter over hashicorp/raft (the commit-
+                                     frame gate: Propose/Ready/drain)
+        proto/                    – RAFT log entry wire format (encode/decode)
+    testutils/                    – test-only cluster harnesses (in-memory and
+                                     real TCP+BoltDB), used by _test.go files
+                                     across the module
+/driver/                          – database/sql-compatible driver: wires a
+                                     caller-supplied hraft.Raft + fsm.FSM into
+                                     a gate + registered VFS + database/sql.Driver
+/cmd/literaft/                    – node process entrypoint (flag parsing,
+                                     lifecycle) + an interactive SQL REPL
 ```
-
-Adjust as the code takes shape; keep `shm/` clearly marked as vendored + its
-upstream commit hash recorded (see `docs/NCRUCES_NOTES.md`).
 
 ---
 
@@ -174,7 +191,25 @@ Standard Go. The engine is pure Go (wazero), no cgo.
 
 ```
 go build ./...
-go test ./...
+```
+
+Run tests via the `ginkgo` CLI, not `go test ./...` directly — this repo's
+suites are Ginkgo/Gomega. Use `-p 20` to run with real parallelism (much
+faster); drop to `-p 1` when actively debugging a specific failure, since
+parallel output interleaves and timing-sensitive tests behave differently
+under concurrent load.
+
+```
+ginkgo -r -p 20 ./...
+```
+
+To check whether a test is flaky, use `--repeat N` (runs the suite N+1
+times, must pass every time) rather than `--until-it-fails` wrapped in a
+shell timeout — `--repeat` has a real, deterministic stopping point instead
+of needing an external time bound:
+
+```
+ginkgo --repeat 10 ./path/to/package/...
 ```
 
 Platform: develop on Linux (amd64/arm64) or macOS — those have full file-lock +
@@ -216,11 +251,20 @@ haven't been migrated.
 
 ---
 
+## Code comments
+
+Keep comments brief and factual — state what's non-obvious, not a
+mini-essay. Don't reference other functions, files, issues, or PRs by name;
+a pointer like that goes stale the moment the referenced thing is renamed or
+moved, and the comment silently becomes wrong. Say what's true right here.
+
+---
+
 ## Top gotchas (bite-marks from the design discussion)
 
 - **`SharedMemory` is opaque.** The exported interface has unexported methods;
-  you cannot drive it. Follower-apply needs a **vendored copy** of the concrete
-  shm impl. See `docs/NCRUCES_NOTES.md`.
+  you cannot drive it. Follower-apply needs its own implementation of the
+  concrete shm impl. See `docs/NCRUCES_NOTES.md`.
 - **wal-index page-map ≠ our future OCC pagemap.** "Update the shm page map"
   during apply means the *wal-index's* pgno→frame hash slots (SQLite format,
   required so readers find frames). The OCC pgno→hash/version map from the
@@ -235,3 +279,23 @@ haven't been migrated.
   failure by the gate, which means a txn can fail locally yet commit
   cluster-wide. Client-request-ID dedup in the apply path is how you avoid
   double-apply on retry. (Deferred with forwarding, but keep the hook in mind.)
+- **The self-apply skip must be transient, not permanent — currently it's the
+  latter, and that's a known, tracked bug.** `fsm.FSM.Apply` (`fsm/fsm.go`)
+  currently skips materializing an entry whenever `entry.NodeID ==
+  f.NodeID()` — a static property of the entry that's true forever, not just
+  during the one proposal that originally published it via this node's own
+  SQLite write path. That breaks replay in at least two ways: (1) hraft's
+  Figure-8 rule retroactively committing a self-authored entry from an
+  earlier, unfinished leadership stint (`internal/raft/gate/figure8_test.go`,
+  `PIt`/pending) and (2) `FSM.Restore` resetting local state back to an
+  older local snapshot on startup, after which every self-authored entry
+  past that snapshot is skipped on replay even though the restore just made
+  it genuinely missing again (`internal/testutils/restart_test.go`'s
+  "recovers a leader restarted after it has taken a local snapshot",
+  `PIt`/pending too — this one needs nothing more exotic than an ordinary
+  restart). Both silently and permanently diverge that one node's local
+  disk from the cluster. Tracked as
+  [issue #41](https://github.com/fuchstim/literaft/issues/41); fix direction
+  is a transient, per-proposal marker (like the pre-refactor
+  `beginSelfApply`/`endSelfApply` this replaced), not a permanent per-entry
+  check.

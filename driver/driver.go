@@ -34,3 +34,20 @@ func (d *Driver) Close() {
 	d.gate.Close()
 	sqlite3vfs.Unregister(d.vfsName)
 }
+
+// Ready reports whether this Driver's raft is currently the leader and has
+// finished draining its apply backlog for the current term. A client write
+// attempted before Ready returns true will fail its gate with a
+// raftgate.CatchingUpError.
+func (d *Driver) Ready() bool { return d.gate.Ready() }
+
+// LastRejection returns the concrete error from this Driver's most recently
+// completed write proposal (nil if it succeeded, or if none has been made
+// yet). This is the reliable way to recover whether a rejected write was a
+// *raftgate.NotLeaderError or a raftgate.CatchingUpError: that distinction
+// doesn't reliably survive the round trip back through database/sql, which
+// by then may report only a generic error.
+func (d *Driver) LastRejection() error { return d.gate.LastRejection() }
+
+// VFSName returns the name this Driver registered its gated VFS under.
+func (d *Driver) VFSName() string { return d.vfsName }
