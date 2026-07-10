@@ -18,8 +18,8 @@ import (
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
 	"github.com/fuchstim/literaft/log"
+	"github.com/fuchstim/literaft/raftsqlite"
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 	hclogwrapper "github.com/zaffka/zap-to-hclog"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -77,34 +77,34 @@ func run() error {
 		return fmt.Errorf("failed to create data dir %s: %w", *dataDir, err)
 	}
 
-	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(*dataDir, "raft.db"))
+	raftStore, err := raftsqlite.New(filepath.Join(*dataDir, "raft.db"))
 	if err != nil {
-		return errors.Join(transport.Close(), fmt.Errorf("failed to open raft log store: %w", err))
+		return errors.Join(transport.Close(), fmt.Errorf("failed to open raft store: %w", err))
 	}
 
 	snapshotStore, err := raft.NewFileSnapshotStoreWithLogger(*dataDir, 2, hclogwrapper.Wrap(logger.Named("raft-snapshot")))
 	if err != nil {
-		return errors.Join(boltStore.Close(), transport.Close(), fmt.Errorf("failed to open raft snapshot store: %w", err))
+		return errors.Join(raftStore.Close(), transport.Close(), fmt.Errorf("failed to open raft snapshot store: %w", err))
 	}
 
 	fsm, err := fsm.New(*dbPath)
 	if err != nil {
-		return errors.Join(boltStore.Close(), transport.Close(), fmt.Errorf("failed to create FSM: %w", err))
+		return errors.Join(raftStore.Close(), transport.Close(), fmt.Errorf("failed to create FSM: %w", err))
 	}
 
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(*id)
 	raftConfig.Logger = hclogwrapper.Wrap(logger.Named("raft"))
 
-	r, err := raft.NewRaft(raftConfig, fsm, boltStore, boltStore, snapshotStore, transport)
+	r, err := raft.NewRaft(raftConfig, fsm, raftStore, raftStore, snapshotStore, transport)
 	if err != nil {
-		return errors.Join(fsm.Close(), boltStore.Close(), transport.Close(), fmt.Errorf("failed to start raft: %w", err))
+		return errors.Join(fsm.Close(), raftStore.Close(), transport.Close(), fmt.Errorf("failed to start raft: %w", err))
 	}
 
 	if *bootstrap {
 		err = r.BootstrapCluster(raft.Configuration{Servers: bootstrapServers}).Error()
 		if err != nil && !errors.Is(err, raft.ErrCantBootstrap) {
-			return errors.Join(r.Shutdown().Error(), fsm.Close(), boltStore.Close(), transport.Close(), fmt.Errorf("failed to bootstrap cluster: %w", err))
+			return errors.Join(r.Shutdown().Error(), fsm.Close(), raftStore.Close(), transport.Close(), fmt.Errorf("failed to bootstrap cluster: %w", err))
 		}
 	}
 
@@ -120,7 +120,7 @@ func run() error {
 
 	db, err := sql.Open("literaft", "")
 	if err != nil {
-		return errors.Join(r.Shutdown().Error(), fsm.Close(), boltStore.Close(), transport.Close(), fmt.Errorf("failed to open database: %w", err))
+		return errors.Join(r.Shutdown().Error(), fsm.Close(), raftStore.Close(), transport.Close(), fmt.Errorf("failed to open database: %w", err))
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -150,7 +150,7 @@ func run() error {
 	}
 
 	logger.Info("shutting down")
-	return errors.Join(db.Close(), r.Shutdown().Error(), fsm.Close(), boltStore.Close(), transport.Close())
+	return errors.Join(db.Close(), r.Shutdown().Error(), fsm.Close(), raftStore.Close(), transport.Close())
 }
 
 // parsePeers parses a comma-separated "id=addr" list into the raft.Server

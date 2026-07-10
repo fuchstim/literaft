@@ -264,6 +264,28 @@ size to M3's shm work.
   `internal/walformat`); checksum computation and wal-index/shm handling
   stay walappender-only (real architectural split, not duplication). Not
   started.
+- [**Replace raft-boltdb with a SQLite-backed LogStore/StableStore**](https://github.com/fuchstim/literaft/issues/51)
+  `raft-boltdb` fsyncs on every write transaction by default,
+  capping write throughput well below what WAL-mode SQLite can sustain --
+  follows directly from the throughput benchmark above. New top-level
+  `raftsqlite` package implements `raft.LogStore`/`raft.StableStore` over
+  `github.com/ncruces/go-sqlite3` via `database/sql`, journal_mode=WAL +
+  synchronous=NORMAL (same durability-from-quorum philosophy as the
+  replicated database itself), with a single pooled connection
+  (`SetMaxOpenConns(1)`) so an in-memory DSN stays private to one `Store`
+  with no need for SQLite's shared-cache mode. Matches raft-boltdb's exact
+  error semantics hraft depends on: `raft.ErrLogNotFound` by identity for a
+  missing log index, and an error whose `.Error()` is literally `"not
+  found"` for a missing stable-store key (hraft does a string compare, not
+  a sentinel check). Wired into `cmd/literaft/main.go` (on-disk) and
+  `internal/testutils`'s `NewTCPCluster` (in-memory by default; discovered
+  along the way that a long enough sustained write burst against an
+  in-memory store exhausts the wazero/WASM SQLite engine's own memory,
+  since there's nothing to spill to disk -- ncruces' driver panics on
+  `SQLITE_NOMEM` mid-statement, and unwinding through a deferred
+  `Tx.Rollback()` hangs the node rather than surfacing a clean error;
+  `testutils.WithOnDiskRaftStore()` opts a given cluster, such as the
+  throughput benchmark, into a real file instead).
 
 ## M8 — Library polish & packaging
 
