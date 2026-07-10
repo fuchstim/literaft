@@ -220,11 +220,16 @@ size to M3's shm work.
   — confirm ≈1 txn/RAFT-round-trip, that batching multiple SQLite txns per
   entry raises it, and that read concurrency is unaffected. Not started.
 - [**Switch RAFT entry wire format to protobuf**](https://github.com/fuchstim/literaft/issues/42)
-  — replace `internal/raft/proto/entry.go`'s hand-rolled binary encoding
-  (`Entry.Encode`/`DecodeEntry`) with a protobuf-generated message, for
-  schema evolution and to shrink the hand-written bounds-checking surface
-  the fuzzing ticket above (#25) has to cover. Call sites: `gate.go`'s
-  `Gate.Propose`, `fsm.go`'s `FSM.Apply`. Not started.
+  *(done)* `internal/raft/proto/entry.proto` defines `EntryData`/`FrameData`
+  (named apart from the hand-written `Entry`/`vfs.Frame` domain types so both
+  can live in the same package); generated via `buf generate` +
+  `protoc-gen-go` (`go generate`, wired to `make generate`). `Entry.Encode`/
+  `DecodeEntry` stay the public API but are now thin wrappers converting
+  to/from `EntryData` and calling `proto.Marshal`/`proto.Unmarshal` — no call
+  site changes needed in `gate.go`'s `Gate.Propose` or `fsm.go`'s
+  `FSM.Apply`. No version tag/dual-decode path: a live cluster upgrade across
+  this wire-format change isn't supported, a clean-slate restart is assumed
+  instead.
 - [**Consolidate duplicated WAL frame-format constants/layout between vfs and
   walappender**](https://github.com/fuchstim/literaft/issues/44) —
   `walHeaderSize`/`frameHeaderSize`, the pgno/nTruncate byte-offset layout,

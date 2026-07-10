@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package raftproto;
+
+option go_package = "github.com/fuchstim/literaft/internal/raft/proto;raftproto";
+
+// EntryData is the generated wire format for Entry (see entry.go), used for
+// a raft.Log's Data field. Named distinctly from Entry so the hand-written
+// domain type and the generated wire type can coexist in the same package.
+message EntryData {
+  string node_id = 1;
+  repeated FrameData frames = 2;
+  uint32 n_truncate = 3;
+}
+
+message FrameData {
+  uint32 pgno = 1;
+  bytes page = 2;
+}
