@@ -20,6 +20,9 @@ import (
 	"github.com/fuchstim/literaft/log"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	hclogwrapper "github.com/zaffka/zap-to-hclog"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func main() {
@@ -37,12 +40,24 @@ func run() error {
 		dbPath    = flag.String("db", "", "path to the SQLite database file this node serves (required)")
 		bootstrap = flag.Bool("bootstrap", false, "bootstrap a new cluster with -peers (only on the initial voters, once)")
 		peers     = flag.String("peers", "", "comma-separated id=addr list of every initial voter, including this node; required with -bootstrap")
+		logLevel  = flag.String("log-level", "info", "log level (debug, info, warn, error, fatal, panic)")
 	)
 	flag.Parse()
 
 	if *id == "" || *bindAddr == "" || *dataDir == "" || *dbPath == "" {
 		return fmt.Errorf("-id, -bind, -data-dir, and -db are required")
 	}
+
+	lvl, err := zapcore.ParseLevel(*logLevel)
+	if err != nil {
+		return fmt.Errorf("invalid log level %q: %w", *logLevel, err)
+	}
+
+	logger, err := zap.NewDevelopment(zap.IncreaseLevel(lvl))
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	defer logger.Sync()
 
 	var bootstrapServers []raft.Server
 	if *bootstrap {
@@ -53,7 +68,7 @@ func run() error {
 		}
 	}
 
-	transport, err := raft.NewTCPTransport(*bindAddr, nil, 3, 10*time.Second, os.Stderr)
+	transport, err := raft.NewTCPTransportWithLogger(*bindAddr, nil, 3, 10*time.Second, hclogwrapper.Wrap(logger.Named("raft-transport")))
 	if err != nil {
 		return fmt.Errorf("failed to start raft transport on %s: %w", *bindAddr, err)
 	}
@@ -67,7 +82,7 @@ func run() error {
 		return errors.Join(transport.Close(), fmt.Errorf("failed to open raft log store: %w", err))
 	}
 
-	snapshotStore, err := raft.NewFileSnapshotStore(*dataDir, 2, os.Stderr)
+	snapshotStore, err := raft.NewFileSnapshotStoreWithLogger(*dataDir, 2, hclogwrapper.Wrap(logger.Named("raft-snapshot")))
 	if err != nil {
 		return errors.Join(boltStore.Close(), transport.Close(), fmt.Errorf("failed to open raft snapshot store: %w", err))
 	}
@@ -79,7 +94,7 @@ func run() error {
 
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(*id)
-	raftConfig.LogOutput = os.Stderr
+	raftConfig.Logger = hclogwrapper.Wrap(logger.Named("raft"))
 
 	r, err := raft.NewRaft(raftConfig, fsm, boltStore, boltStore, snapshotStore, transport)
 	if err != nil {
@@ -93,7 +108,7 @@ func run() error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "literaft: node %q listening on %s (db %s)\n", *id, *bindAddr, *dbPath)
+	logger.Info("node listening", zap.String("id", *id), zap.String("bind", *bindAddr), zap.String("db", *dbPath))
 
 	log := log.NewSingleWriterLog(r)
 	defer log.Close()
@@ -134,7 +149,7 @@ func run() error {
 		}
 	}
 
-	fmt.Fprintln(os.Stderr, "literaft: shutting down")
+	logger.Info("shutting down")
 	return errors.Join(db.Close(), r.Shutdown().Error(), fsm.Close(), boltStore.Close(), transport.Close())
 }
 
