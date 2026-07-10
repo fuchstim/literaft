@@ -1,5 +1,5 @@
 // Package testutils builds real, disk-backed literaft node clusters for
-// tests. cmd/literaft/main.go's run() wires a real hraft transport/store, a
+// tests. A real literaft node process wires a real hraft transport/store, a
 // real fsm.FSM, and a real driver.Driver into one process; this package
 // generalizes that same wiring to n nodes across two tiers so package tests
 // don't have to hand-wire hraft themselves:

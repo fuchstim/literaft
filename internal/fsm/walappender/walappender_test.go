@@ -27,8 +27,7 @@ func TestWalappender(t *testing.T) {
 
 // recordingGate implements vfs.Gate, recording every proposal (as the
 // raftproto.Entry wire shape a real Gate would produce) rather than ever
-// rejecting one -- gate_test.go's "always commit but observe everything"
-// stand-in, reused here to drive a follower's AppendEntry with exactly
+// rejecting one, so a follower's AppendEntry can be driven with exactly
 // what a leader connection actually captured.
 type recordingGate struct {
 	entries []*raftproto.Entry
@@ -81,13 +80,11 @@ func externalRead(path, sql string) (string, error) {
 }
 
 // pageSizeProbe returns SQLite's actual default page size by asking a
-// throwaway in-memory connection, rather than assuming a value (CLAUDE.md:
-// verify, don't assume). internal/vfs.File.isFrameHeaderOffset uses the
-// pageSize passed to Register directly to compute frame-header offsets
-// (walHeaderSize + n*(frameHeaderSize+pageSize)), not just to enforce a
-// mismatch -- unlike the old package, passing 0 here doesn't merely
-// disable enforcement, it breaks offset detection outright, so every test
-// in this file must register with the real page size.
+// throwaway in-memory connection, rather than assuming a value. The
+// registered VFS uses this value directly to compute frame-header offsets,
+// not just to enforce a mismatch -- passing 0 breaks offset detection
+// outright, so every test in this file must register with the real page
+// size.
 func pageSizeProbe() uint32 {
 	GinkgoHelper()
 	c, err := sqlite3.Open(":memory:")
@@ -164,11 +161,10 @@ var _ = Describe("WALAppender.AppendEntry", func() {
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 2")).To(Equal("z"))
 		Expect(queryInt(follower, "SELECT count(*) FROM t WHERE id = 3")).To(Equal(int64(0)))
 
-		// Fail loudly, not skip: CLAUDE.md calls external-reader
-		// compatibility the single most load-bearing verification in the
-		// project. A Skip here would let an environment missing the
-		// sqlite3 CLI pass quietly instead of surfacing that this claim
-		// was never checked for a walappender-built db specifically.
+		// Fail loudly, not skip: a Skip here would let an environment
+		// missing the sqlite3 CLI pass quietly instead of surfacing that
+		// external-reader compatibility was never checked for a
+		// walappender-built db specifically.
 		if _, err := exec.LookPath("sqlite3"); err != nil {
 			Fail("stock sqlite3 CLI not found in PATH; required to re-run the external-reader check against a walappender-built db")
 		}
@@ -182,12 +178,11 @@ var _ = Describe("WALAppender.AppendEntry", func() {
 		Expect(rows).To(Equal("1|a\n2|z"))
 	})
 
-	// walindex.go's frameZero and hashTableOffsets both special-case
-	// wal-index page 0 (frames 1-4062) versus every later page, but the
-	// round-trip test above only ever produces a handful of frames -- never
-	// enough to exercise the page != 0 branches. A regression here (e.g. an
-	// off-by-one in hashtableNPageOne+(page-1)*hashtableNPage) would
-	// silently corrupt any sufficiently large apply, undetected.
+	// Wal-index page 0 (frames 1-4062) is special-cased versus every later
+	// page, but the round-trip test above only ever produces a handful of
+	// frames -- never enough to exercise the page != 0 branches. A
+	// regression here would silently corrupt any sufficiently large apply,
+	// undetected.
 	It("replays enough frames to overflow wal-index page 0 into page 1", func() {
 		dir := GinkgoT().TempDir()
 

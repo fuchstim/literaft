@@ -26,13 +26,12 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 
 		// Force a real, deterministic apply backlog on newLeader by holding
 		// its own -shm's WAL_WRITE_LOCK externally, via a second raw handle
-		// on the same path (same protocol newLeader's own walAppender
-		// uses -- see internal/fsm/walappender/shm's own "second opener
-		// joins the mapping" test). newLeader's real fsm.FSM.Apply calls
-		// walAppender.AppendFrames for every non-self-originated committed
-		// entry, and AppendFrames blocks acquiring this exact lock -- so
-		// while it's held externally, newLeader's FSM genuinely cannot
-		// apply anything, however fast hraft itself replicates.
+		// on the same path (the same protocol newLeader's own walAppender
+		// uses). newLeader's FSM.Apply calls AppendFrames for every
+		// non-self-originated committed entry, and AppendFrames blocks
+		// acquiring this exact lock -- so while it's held externally,
+		// newLeader's FSM genuinely cannot apply anything, however fast
+		// hraft itself replicates.
 		lock, err := shm.Open(newLeader.DBPath + "-shm")
 		Expect(err).NotTo(HaveOccurred())
 		defer lock.Close()
@@ -46,10 +45,9 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 		)
 		// Captured independently (its own local db, own schema) rather
 		// than continuing off entries above: entries never materializes on
-		// oldLeader at all (oldLeader authored them, so its own fsm.FSM
-		// self-skips them the same way the "leader doesn't materialize its
-		// own entry" test's leader does -- real usage instead publishes
-		// them via oldLeader's own SQLite write path, out of scope for this
+		// oldLeader at all (oldLeader authored them, so its own FSM
+		// self-skips them; real usage instead publishes them via
+		// oldLeader's own SQLite write path, out of scope for this
 		// direct-Propose test). A "fresh" entry that referenced table t
 		// would therefore hit a nonexistent table once materialized on
 		// oldLeader; a self-contained CREATE TABLE has no such dependency.
@@ -103,12 +101,12 @@ var _ = Describe("Gate gaining-leadership drain", func() {
 			return newGate.Ready()
 		}, "newLeader's gate to become Ready once the drain completes")
 
-		// A fresh write through the new leader must still follow ADR-005
-		// (materialized elsewhere, not by newLeader itself). This is the
-		// Figure-8 race the drain exists to prevent: without it, the
-		// self-apply skip could misfire against the just-drained backlog
-		// instead of this new entry, either losing the backlog or
-		// double-materializing this write.
+		// A fresh write through the new leader must still be materialized
+		// elsewhere, not by newLeader itself. This is the Figure-8 race the
+		// drain exists to prevent: without it, the self-apply skip could
+		// misfire against the just-drained backlog instead of this new
+		// entry, either losing the backlog or double-materializing this
+		// write.
 		Expect(newGate.Propose(fresh.frames, fresh.nTruncate)).To(Succeed())
 
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {

@@ -12,33 +12,20 @@ import (
 )
 
 // hraft's Figure-8 rule can retroactively commit an entry a node proposed
-// during an earlier, unfinished leadership stint once that SAME node
-// regains leadership and a subsequent entry in its new term commits and
-// covers it. The old raft/fsm.go handled this with a *transient* self-apply
-// marker, set immediately before hraft.Apply and cleared the instant it
-// returned (success or failure) -- so if the entry was later retroactively
-// committed (necessarily well after that Propose call had already
-// returned), the marker was already false and FSM.Apply materialized it
-// normally, same as any other node's entry.
+// during an earlier, unfinished leadership stint, once that same node
+// regains leadership and a later entry in its new term commits and covers
+// it. FSM.Apply's self-skip (entry.NodeID == f.NodeID()) is a static,
+// permanent property of the entry, not scoped to the one proposal that
+// originally published it -- so a node's own stale entry, retroactively
+// committed after it regains leadership, gets skipped forever, silently
+// and permanently dropping it from this node's own local disk even though
+// the rest of the cluster considers it committed.
 //
-// fsm.FSM's current self-skip is different: entry.NodeID == f.NodeID(), a
-// static, permanent property of the entry rather than something scoped to
-// one in-flight proposal. A node's own stale entry, retroactively committed
-// after it regains leadership, still has its own NodeID on it forever --
-// so this check skips it every time FSM.Apply ever sees it, not just
-// during the original (already-resolved) proposal. That silently and
-// permanently drops the entry from this node's own local disk while the
-// rest of the cluster (which never skips it, since the NodeID doesn't
-// match) considers it committed -- exactly the "Apply must be strictly
-// in-order and gapless" invariant CLAUDE.md calls out.
-//
-// This is a known, tracked regression (see the CLAUDE.md gotcha linking the
-// GH issue this test's finding produced): the code below reliably
-// demonstrates it, which is why it's committed as PIt (pending) rather than
-// a normal It -- flip it back to It once the self-skip is fixed to be
-// transient (scoped to the specific in-flight proposal, e.g. by
-// NodeID+log index rather than NodeID alone) instead of permanent, and
-// this should pass.
+// This is a known, tracked regression: the test below reliably
+// demonstrates it, which is why it's committed as PIt (pending) rather
+// than a normal It -- flip it back to It once the self-skip is made
+// transient (scoped to the specific in-flight proposal) instead of
+// permanent, and this should pass.
 var _ = PDescribe("Figure-8 self-apply safety", func() {
 	It("materializes a node's own stale entry from an earlier leadership stint during its own later drain, exactly once", func() {
 		c := newGatedCluster(GinkgoT(), 3, time.Second)
@@ -115,11 +102,8 @@ var _ = PDescribe("Figure-8 self-apply safety", func() {
 		// The Figure-8 case itself: stale was never committed during
 		// leader's first term, but is still in leader's log, so this new
 		// term's Barrier (Gate.drain) commits and covers it -- and it must
-		// be materialized through an ordinary FSM.Apply on leader itself
-		// (ADR-005 self-skip only covers the original, already-resolved
-		// proposal, not a later, retroactive commit of the same entry --
-		// see this file's own top-of-file comment), not lost, not
-		// double-applied.
+		// be materialized through an ordinary FSM.Apply on leader itself,
+		// not lost, not double-applied.
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			_, okHelper := tryNodeQueryInt(helper, "SELECT count(*) FROM stale")
 			_, okThird := tryNodeQueryInt(thirdWheel, "SELECT count(*) FROM stale")
@@ -131,10 +115,9 @@ var _ = PDescribe("Figure-8 self-apply safety", func() {
 			return ok
 		}, "leader to materialize its own stale entry during its own later drain")
 
-		// A fresh self-proposal after the drain must still follow ADR-005
-		// (materialized elsewhere, not by leader itself) -- proving the
-		// drain didn't leave the self-apply check confused about which
-		// entry it applies to.
+		// A fresh self-proposal after the drain must still be materialized
+		// elsewhere, not by leader itself -- proving the drain didn't leave
+		// the self-apply check confused about which entry it applies to.
 		Expect(leaderGate.Propose(fresh.frames, fresh.nTruncate)).To(Succeed())
 		testutils.Consistently(GinkgoT(), 200*time.Millisecond, 10*time.Millisecond, func() bool {
 			_, ok := tryNodeQueryInt(leader, "SELECT count(*) FROM fresh")

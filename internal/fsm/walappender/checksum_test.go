@@ -25,8 +25,8 @@ var _ = Describe("checksum", func() {
 	})
 
 	It("computes SQLite's Fibonacci-weighted running sum for one 8-byte word pair", func() {
-		// s0 = seed0 + word0 + seed1; s1 = seed1 + word1 + s0 (wal.c's
-		// walChecksumBytes, one loop iteration by hand).
+		// s0 = seed0 + word0 + seed1; s1 = seed1 + word1 + s0 (one loop
+		// iteration by hand).
 		s0, s1 := checksum(0, 0, le(1, 2))
 		Expect(s0).To(Equal(uint32(1)))
 		Expect(s1).To(Equal(uint32(3)))

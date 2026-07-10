@@ -15,10 +15,10 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Register's pageSize is used unconditionally for frame-offset math
-// (isFrameHeaderOffset), not just to optionally enforce a page-size
-// mismatch -- passing 0 doesn't disable a check, it silently corrupts frame
-// parsing for every WAL write afterward. Register must refuse it outright.
+// Register's pageSize is used unconditionally for frame-offset math, not
+// just to optionally enforce a page-size mismatch -- passing 0 doesn't
+// disable a check, it silently corrupts frame parsing for every WAL write
+// afterward. Register must refuse it outright.
 var _ = Describe("Register", func() {
 	It("panics if pageSize is 0", func() {
 		Expect(func() {
@@ -27,14 +27,11 @@ var _ = Describe("Register", func() {
 	})
 })
 
-// SQLite's own vfsOpen dispatch always prefers OpenFilename over Open once a
-// VFS implements both, so every other test in this package -- all opened
-// via sqlite3.Open's URI DSNs -- exercises VFS.OpenFilename, never VFS.Open
-// itself; a real SQLite connection can't reach it once OpenFilename exists.
-// This calls the registered VFS's Open directly to cover that path. The
-// base vfsOS.Open only ever supports an empty name (temp files) and returns
-// _CANTOPEN for anything else, so that's the only call shape worth
-// exercising here.
+// SQLite prefers OpenFilename over Open once a VFS implements both, so
+// every other test in this package -- opened via sqlite3.Open's URI DSNs --
+// exercises VFS.OpenFilename, never VFS.Open itself. This calls the
+// registered VFS's Open directly to cover that path, using an empty name
+// (temp file), the only call shape the base VFS supports there.
 var _ = Describe("VFS.Open (the non-Filename path)", func() {
 	It("wraps a directly-opened temp file, and the wrapped file behaves like a plain file", func() {
 		v := sqlite3vfs.Find(vfsName)

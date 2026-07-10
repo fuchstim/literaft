@@ -11,12 +11,12 @@ import (
 )
 
 // Crash/restart recovery: a node whose process restarts against its own
-// prior data dir/db path -- distinct from cluster_test.go's "killed and
-// permanently retired" or snapshot_test.go's "brand new joiner" cases,
-// neither of which reuses existing on-disk state -- ends up logically
-// identical to the rest of the cluster, including to an external reader,
-// regardless of whether it was a follower or the leader, and regardless of
-// whether it had ever taken a local RAFT snapshot yet.
+// prior data dir/db path -- distinct from a node that's killed and
+// permanently retired, or a brand new joiner, neither of which reuses
+// existing on-disk state -- ends up logically identical to the rest of
+// the cluster, including to an external reader, regardless of whether it
+// was a follower or the leader, and regardless of whether it had ever
+// taken a local RAFT snapshot yet.
 
 // assertRestarted checks the bar every scenario below holds itself to:
 // correct row count on the restarted node itself, a clean integrity_check,
@@ -74,16 +74,16 @@ var _ = Describe("node restart", func() {
 
 		// The leader's own pre-restart -wal holds real-SQLite-written
 		// commit-path frames that were never previously touched by
-		// walAppender at all (ADR-005 self-skip) -- restart must rebuild
-		// those via replay just as faithfully as a follower's.
+		// walAppender at all -- restart must rebuild those via replay just
+		// as faithfully as a follower's.
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
 		assertRestarted(restarted, 20)
 	})
 
-	// snapshottingCluster mirrors snapshot_test.go's low thresholds so a
-	// local RAFT snapshot reliably exists by the time restart runs -- the
-	// case that specifically exercises FSM.Snapshot/Restore being wired
+	// snapshottingCluster uses low enough snapshot thresholds that a local
+	// RAFT snapshot reliably exists by the time restart runs -- the case
+	// that specifically exercises FSM.Snapshot/Restore being wired
 	// correctly across a real process restart (hraft.NewRaft synchronously
 	// restores this node's latest local snapshot on startup).
 	snapshottingCluster := func() *testutils.TCPCluster {
@@ -137,23 +137,22 @@ var _ = Describe("node restart", func() {
 		assertRestarted(restarted, 40)
 	})
 
-	// Same root cause as internal/raft/gate/figure8_test.go's known,
-	// tracked regression -- another way to trigger it, and a far more
-	// mundane one: fsm.FSM.Apply's self-skip (entry.NodeID == f.NodeID())
-	// assumes a self-authored entry is already on local disk because it
-	// was published via this node's own live SQL write path when it
-	// happened. FSM.Restore (run synchronously by hraft.NewRaft on startup
-	// whenever a local snapshot exists) invalidates that assumption: it
-	// resets local state back to an *older* point, the snapshot, and every
+	// Same root cause as the Figure-8 self-apply regression, triggered here
+	// a far more mundane way: FSM.Apply's self-skip (entry.NodeID ==
+	// f.NodeID()) assumes a self-authored entry is already on local disk
+	// because it was published via this node's own live SQL write path
+	// when it happened. FSM.Restore (run synchronously on startup whenever
+	// a local snapshot exists) invalidates that assumption: it resets
+	// local state back to an *older* point, the snapshot, and every
 	// self-authored log entry after that snapshot -- entries this node's
-	// own local disk no longer actually has, having just been wound back --
-	// still gets skipped on replay, exactly as if it were still safely on
-	// disk. A node that was leader long enough to take its own snapshot and
-	// then restarts permanently loses every row it wrote after that
-	// snapshot. Verified below (skip removed and confirmed failing, then
-	// restored) before being marked PIt for the same reason
-	// figure8_test.go's is: flip back to It once the self-skip is fixed to
-	// be transient/scoped rather than a permanent per-entry property.
+	// own local disk no longer actually has, having just been wound back
+	// -- still gets skipped on replay, exactly as if it were still safely
+	// on disk. A node that was leader long enough to take its own
+	// snapshot and then restarts permanently loses every row it wrote
+	// after that snapshot. Verified below (skip removed and confirmed
+	// failing, then restored) before being marked PIt: flip back to It
+	// once the self-skip is fixed to be transient/scoped rather than a
+	// permanent per-entry property.
 	PIt("recovers a leader restarted after it has taken a local snapshot", func() {
 		c := snapshottingCluster()
 		defer c.Shutdown()

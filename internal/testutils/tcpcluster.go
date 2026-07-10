@@ -51,12 +51,12 @@ func FreeTCPAddr(t TB) string {
 	return addr
 }
 
-// NewTCPCluster builds n literaft nodes wired exactly like
-// cmd/literaft/main.go's run(): real TCP transport, a real BoltDB log store
-// and file snapshot store on disk under dir, and a real driver.Driver +
-// *sql.DB registered under a unique sql.Register alias. Supports
-// RestartNode for crash/restart-recovery tests, which NewInmemCluster's
-// in-memory stores can't (there'd be nothing durable to restart from).
+// NewTCPCluster builds n literaft nodes wired exactly like a real node
+// process: real TCP transport, a real BoltDB log store and file snapshot
+// store on disk under dir, and a real driver.Driver + *sql.DB registered
+// under a unique sql.Register alias. Supports RestartNode for
+// crash/restart-recovery tests, which NewInmemCluster's in-memory stores
+// can't (there'd be nothing durable to restart from).
 func NewTCPCluster(t TB, dir string, n int, opts ...Option) *TCPCluster {
 	t.Helper()
 	o := defaultOptions()
@@ -149,13 +149,12 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 	return -1
 }
 
-// startTCPNode brings up one node exactly as cmd/literaft/main.go's run()
-// does: a real TCP transport, BoltDB log store, and file snapshot store
-// under s.dataDir, a real fsm.FSM over s.dbPath, a real hraft.Raft (which
+// startTCPNode brings up one node exactly as a real node process does: a
+// real TCP transport, BoltDB log store, and file snapshot store under
+// s.dataDir, a real fsm.FSM over s.dbPath, a real hraft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
-// restarting an already-bootstrapped node is a harmless no-op, mirroring
-// main.go exactly), and a driver.Driver registered under a fresh
-// database/sql alias.
+// restarting an already-bootstrapped node is a harmless no-op), and a
+// driver.Driver registered under a fresh database/sql alias.
 func startTCPNode(t TB, s nodeSpec, o options) *Node {
 	t.Helper()
 

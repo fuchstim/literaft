@@ -38,8 +38,7 @@ func queryText(c *sqlite3.Conn, sql string) string {
 }
 
 // pageSizeProbe returns SQLite's actual default page size by asking a
-// throwaway in-memory connection, rather than assuming a value (CLAUDE.md:
-// verify, don't assume).
+// throwaway in-memory connection, rather than assuming a value.
 func pageSizeProbe() uint32 {
 	GinkgoHelper()
 	c, err := sqlite3.Open(":memory:")
@@ -49,9 +48,8 @@ func pageSizeProbe() uint32 {
 }
 
 // primeWALMode establishes path's WAL-mode identity via a plain connection,
-// mirroring what fsm.New always does before FSM.Restore could plausibly be
-// invoked against a real node's db path (see internal/fsm/walappender's
-// identical requirement -- Restore drives the same walappender.Open).
+// mirroring what a real node always does before Restore could plausibly be
+// invoked against its db path.
 func primeWALMode(path string) {
 	GinkgoHelper()
 	c, err := sqlite3.Open("file:" + path)

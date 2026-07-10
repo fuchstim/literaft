@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// Wal-index layout constants as per SQLite's wal.c. All wal-index
+// Wal-index layout constants, as defined by SQLite itself. All wal-index
 // fields are native byte order, not the WAL file's big-endian -- and for
 // this engine "native" is always little-endian, since SQLite runs
 // compiled to wasm and wasm's linear memory is little-endian by spec
@@ -54,8 +54,8 @@ func decodeWALIndexHeader(b []byte) walIndexHeader {
 }
 
 // encode serializes h and appends its own self-checksum (aCksum, over
-// bytes 0-39, always native order regardless of bigEndCksum -- wal.c
-// hardcodes nativeCksum=1 for this specific checksum).
+// bytes 0-39, always native order regardless of bigEndCksum -- SQLite
+// hardcodes this specific checksum to native order).
 func (h walIndexHeader) encode() [hdrCopySize]byte {
 	var b [hdrCopySize]byte
 	binary.LittleEndian.PutUint32(b[0:4], h.version)
@@ -81,7 +81,7 @@ func (h walIndexHeader) encode() [hdrCopySize]byte {
 
 // readWALIndexHeader reads the wal-index header using the same tear-safe protocol
 // real readers use: try copy 0, and if its self-checksum doesn't verify,
-// fall back to copy 1 (wal.c:walIndexTryHdr). The second return value is
+// fall back to copy 1. The second return value is
 // false if neither copy is valid or initialized. A freshly zeroed region
 // (a brand new -shm file) trivially satisfies the checksum -- checksum(0,
 // 0, 40 zero bytes) is (0, 0), matching the stored zero "checksum" -- so
@@ -102,10 +102,9 @@ func readWALIndexHeader(region0 []byte) (walIndexHeader, bool) {
 }
 
 // writeWALIndexHeader publishes h into region0 using SQLite's tear-safe two-copy
-// protocol: write the second copy, barrier, then the first copy
-// (wal.c:walIndexWriteHdr writes copy 1 before copy 0 -- readers trust
-// copy 0 first and fall back to copy 1, so copy 1 must be durable before
-// copy 0 is replaced).
+// protocol: write the second copy, barrier, then the first copy. Readers
+// trust copy 0 first and fall back to copy 1, so copy 1 must be durable
+// before copy 0 is replaced.
 func writeWALIndexHeader(region0 []byte, h walIndexHeader) {
 	b := h.encode()
 	copy(region0[hdrCopySize:2*hdrCopySize], b[:])
@@ -123,13 +122,13 @@ func barrier() {
 
 // framePage returns which 32KB wal-index page holds the hash-table entry
 // for WAL frame number frame (1-based). Wal-index pages are numbered from
-// 0 (wal.c:walFramePage).
+// 0.
 func framePage(frame uint32) int {
 	return int((int64(frame) + hashtableNPage - hashtableNPageOne - 1) / hashtableNPage)
 }
 
 // frameZero returns one less than the frame number of the first frame
-// indexed by wal-index page `page` (wal.c:walHashGet's iZero).
+// indexed by wal-index page `page`.
 func frameZero(page int) uint32 {
 	if page == 0 {
 		return 0
@@ -141,9 +140,9 @@ func walHash(pgno uint32) int { return int((pgno * hashtableHash1) & (hashtableN
 func walNextHash(k int) int   { return (k + 1) & (hashtableNSlot - 1) }
 
 // hashTableOffsets returns the byte offsets of the aPgno and aHash arrays
-// within wal-index page `page` (wal.c:walHashGet). Page 0's aPgno array is
-// shifted past the 136-byte header that shares its region; every later
-// page uses the full region for aPgno.
+// within wal-index page `page`. Page 0's aPgno array is shifted past the
+// 136-byte header that shares its region; every later page uses the full
+// region for aPgno.
 func hashTableOffsets(page int) (pgnoOff, hashOff int) {
 	hashOff = hashtableNPage * 4 // 16384: aHash always starts here within its region
 	if page == 0 {
@@ -153,8 +152,8 @@ func hashTableOffsets(page int) (pgnoOff, hashOff int) {
 }
 
 // addFrameToWALIndex records, within the wal-index page for frame, that WAL
-// frame `frame` holds database page number `pgno` (wal.c:walIndexAppend).
-// region must be the page shm.Region(framePage(frame)) returned.
+// frame `frame` holds database page number `pgno`. region must be the
+// page shm.Region(framePage(frame)) returned.
 func addFrameToWALIndex(region []byte, frame, pgno uint32) {
 	page := framePage(frame)
 	pgnoOff, hashOff := hashTableOffsets(page)

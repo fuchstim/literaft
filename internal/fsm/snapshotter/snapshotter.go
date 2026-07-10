@@ -23,9 +23,8 @@ func New(dbPath string, pageSize uint32) *Snapshotter {
 	}
 }
 
-// Snapshot uses SQLite's online backup API (https://sqlite.org/backup.html) to back
-// the "main" database up into a private temp file, then hands
-// back a reader over that file.
+// Snapshot uses SQLite's online backup API to back the "main" database up
+// into a private temp file, then hands back a reader over that file.
 func (s *Snapshotter) Snapshot() (io.ReadCloser, error) {
 	db, err := sqlite3.Open("file:" + s.dbPath)
 	if err != nil {

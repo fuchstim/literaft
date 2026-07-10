@@ -27,7 +27,7 @@ this is the reference. `DECISIONS.md` records *why* alternatives were rejected.
                        └── commit-frame interception ──► internal/raft/gate ──► RAFT (hashicorp/raft)
 
   follower-apply path (separate from SQLite's own I/O):
-      RAFT committed entry ──► fsm.FSM.Apply ──► internal/fsm/walappender ──► vendored shm/ ──► -wal + wal-index
+      RAFT committed entry ──► fsm.FSM.Apply ──► internal/fsm/walappender ──► shm/ ──► -wal + wal-index
                                                                               (mxFrame, page-map, write lock)
 
   one running node (cmd/literaft/main.go's run(), or driver.New for an embedder):
@@ -48,7 +48,7 @@ standard. That is what lets external unmodified SQLite processes mmap the same
 RAFT-committed) frame.
 
 The **follower-apply** path does *not* go through SQLite. `internal/fsm/walappender`
-opens its own handle to the `-shm`/`-wal` using the **vendored** shm code
+opens its own handle to the `-shm`/`-wal` using its own shm implementation
 (`internal/fsm/walappender/shm/`) and drives `mxFrame`, the page-map hash
 slots, and `WAL_WRITE_LOCK` directly — coordinating with SQLite's own handle
 via OFD locks and the shared mmap. See `§follower-apply`.
@@ -234,7 +234,7 @@ format-sensitive code in the repo; it must reproduce what `walFrames` +
    `internal/testutils/restart_test.go`) rather than fixed.
 
 2. `walappender.WALAppender.AppendEntry` takes `WAL_WRITE_LOCK` on the shm (via
-   vendored `internal/fsm/walappender/shm/`). On a follower there are no local
+   `internal/fsm/walappender/shm/`). On a follower there are no local
    writers, so contention is only with the local checkpointer.
 3. Append each `(pgno, data)` frame to the local `-wal`, computing **this
    node's** salt-based cumulative checksums (each node has its own WAL
@@ -336,7 +336,7 @@ At no instant are two conflicting txns both committed. This is just RAFT safety
   itself resolves every in-flight local `Apply`/`Barrier` future with
   `ErrLeadershipLost` *before* it flips `LeaderCh` to `false`
   (`runLeader`'s step-down path), and the local SQLite writer's own
-  `WAL_WRITE_LOCK` (an OFD lock shared with vendored
+  `WAL_WRITE_LOCK` (an OFD lock shared with
   `internal/fsm/walappender/shm/`) already serializes any follower-apply
   against a still-in-flight local write. No additional draining needed beyond
   this (`internal/raft/gate/gate_test.go`'s "surfaces a lost-leadership

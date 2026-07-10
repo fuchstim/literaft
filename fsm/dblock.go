@@ -5,30 +5,24 @@ import (
 	"os"
 )
 
-// SQLite's own unix VFS locking byte offsets (os_unix.c's PENDING_BYTE /
-// SHARED_FIRST / SHARED_SIZE, https://sqlite.org/src/doc/trunk/src/os_unix.c
-// "File Locking Notes"). Every connection that has a database file open, in
-// any journal mode including WAL, holds a plain OS-level SHARED (read) lock
-// on this byte range for as long as it's open -- not just during a
-// transaction, the way rollback-journal mode's locking otherwise reads.
-// This is a completely different lock from -shm's own WAL_WRITE_LOCK/
-// read-mark locks (which only ever coordinate WAL readers and writers
-// during normal operation, see internal/fsm/walappender/shm); this one's
-// entire purpose is SQLite's own close-time bookkeeping. On sqlite3_close,
-// a connection tries to upgrade this same shared lock to EXCLUSIVE
-// (sqlite3WalClose's own "am I the last one?" check) and, if that
-// succeeds -- meaning no other shared holder exists anywhere -- checkpoints
-// and deletes -wal/-shm. Because it's a plain OS file lock, that check is
-// visible across processes, not just within one.
+// SQLite's own unix VFS file-locking byte offsets. Every connection that has
+// a database file open, in any journal mode including WAL, holds a plain
+// OS-level SHARED (read) lock on this byte range for as long as it's open --
+// not just during a transaction. This is a separate lock from the
+// wal-index's write-lock/read-mark locks, which only coordinate WAL readers
+// and writers during normal operation; this one exists purely for
+// close-time bookkeeping. On close, a connection tries to upgrade this same
+// shared lock to EXCLUSIVE and, if that succeeds -- meaning no other shared
+// holder exists anywhere -- checkpoints and deletes -wal/-shm. Because it's
+// a plain OS file lock, that check is visible across processes, not just
+// within one.
 //
-// fsm.FSM holds this lock explicitly and directly for as long as it's open
-// (see FSM.New/Close), so a transient external reader -- exactly
-// requirement #3's "read-only connections from other processes" -- can
-// never observe zero other holders and conclude it's safe to
-// checkpoint-and-delete, which would silently orphan every
-// not-yet-checkpointed frame walAppender has written. Confirmed empirically:
-// without this, a single external reader briefly opening and closing
-// against a follower reliably deletes its -wal out from under it.
+// fsm.FSM holds this lock explicitly for as long as it's open, so a
+// transient external reader can never observe zero other holders and
+// conclude it's safe to checkpoint-and-delete, which would silently orphan
+// every not-yet-checkpointed frame. Confirmed empirically: without this, a
+// single external reader briefly opening and closing against a follower
+// reliably deletes its -wal out from under it.
 const (
 	sqlitePendingByte = 0x40000000
 	sqliteSharedFirst = sqlitePendingByte + 2

@@ -38,9 +38,9 @@ type WALAppender struct {
 //
 // WALAppender opens and maintains a single DB connection to prevent the WAL/SHM from being deleted.
 // This connection is also used to perform passive checkpoints, preventing unbounded WAL growth on
-// followers that are not performing any writes (outside of WALAppender). See fsm.FSM's own doc
-// comment on why the WAL/-shm files themselves don't get deleted out from under this connection:
-// that's a main-db-file lock fsm holds, not anything this package does.
+// followers that are not performing any writes (outside of WALAppender). The WAL/-shm files
+// themselves are protected from deletion by a separate main-db-file lock held elsewhere, not
+// anything this package does.
 //
 // A wal-index header with pageSize == 0 is treated as uninitialized (see
 // bootstrap) even though it otherwise looks structurally valid: real

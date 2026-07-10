@@ -12,22 +12,19 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// Follow-up to the page-cache-spill fix (spill_test.go): wal.c's
-// sqlite3WalUndo() only reverts pWal->hdr.mxFrame back to where the current
-// write transaction began -- it does not touch the offset space beyond
-// that. So a transaction that spills at least one frame and then rolls
-// back (never reaching a commit frame) leaves the *next* transaction's
-// first frame landing on the exact same WAL offset as the aborted
-// transaction's first spilled frame, but very possibly for a different
-// page (the aborted transaction never got far enough to dirty the page
-// that a fresh, unrelated transaction touches first).
+// SQLite's rollback only reverts mxFrame back to where the current write
+// transaction began -- it does not touch the offset space beyond that. So
+// a transaction that spills at least one frame and then rolls back (never
+// reaching a commit frame) leaves the *next* transaction's first frame
+// landing on the exact same WAL offset as the aborted transaction's first
+// spilled frame, quite possibly for a different page.
 //
-// The offset-revisit tracking added for the spill fix must tell that case
-// apart from a genuine walRewriteChecksums rewrite of the *same* frame --
-// otherwise a brand new commit frame that happens to reuse an old, rolled-
-// back frame's offset gets misread as a stale checksum fixup: written to
-// disk untouched, but never captured or proposed to the gate at all. That
-// would mean the write commits locally while completely bypassing RAFT.
+// Offset-revisit tracking must tell that case apart from a genuine
+// checksum-only rewrite of the *same* frame -- otherwise a brand new
+// commit frame that reuses an old, rolled-back frame's offset gets
+// misread as a stale checksum fixup: written to disk, but never captured
+// or proposed to the gate, so the write commits locally while completely
+// bypassing RAFT.
 var _ = Describe("commit-frame interception across a rolled-back transaction", func() {
 	It("still proposes a transaction whose first frame reuses a rolled-back transaction's offset", func() {
 		dir := GinkgoT().TempDir()

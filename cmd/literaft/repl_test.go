@@ -12,9 +12,9 @@ import (
 )
 
 // startSoloNode brings up a one-node, self-bootstrapped cluster -- real
-// enough (same production wiring testutils.NewTCPCluster mirrors from
-// cmd/literaft/main.go's run()) to run the REPL against a live
-// commit-frame gate, without a multi-node cluster's complexity.
+// enough (the same production wiring testutils.NewTCPCluster mirrors) to
+// run the REPL against a live commit-frame gate, without a multi-node
+// cluster's complexity.
 func startSoloNode() (*testutils.TCPCluster, *testutils.Node) {
 	GinkgoHelper()
 	c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), 1)

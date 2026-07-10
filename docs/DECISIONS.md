@@ -101,7 +101,7 @@ let SQLite run its own `walIndexWriteHdr`. We manipulate the wal-index directly
 
 **Why.** SQLite's own publish is the exact tear-safe two-copy + barrier protocol.
 Reimplementing it on the leader would add risk for zero benefit. The follower has
-no SQLite writer to do the publish, so it must — and that's where the vendored
+no SQLite writer to do the publish, so it must — and that's where our own
 shm code and the format-sensitive tear-safe reimplementation live.
 
 **How "is this my own entry" is decided has changed since this ADR was
@@ -266,7 +266,7 @@ churn is about gate/FSM ordering against the existing WAL/apply machinery,
 while InstallSnapshot needed a real `FSM.Snapshot`/`Restore` (at the time
 stubbed to error), a new on-disk snapshot format, integration with hraft's
 `SnapshotStore`, and WAL-reset-and-resume-apply logic — comparable in size to
-the vendored-shm work. The M5 "done when" bar — leadership churn never
+the shm work. The M5 "done when" bar — leadership churn never
 produces a torn WAL, a lost update, or a stale-state leader serving writes —
 didn't need InstallSnapshot to be met; a node that's merely apply-behind (not
 log-behind) catches up via normal replication, which small/moderate-log

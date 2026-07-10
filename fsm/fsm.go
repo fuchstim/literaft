@@ -108,18 +108,14 @@ func (f *FSM) PageSize() uint32 {
 
 // Apply implements hraft.FSM.
 //
-// A decode or materialization failure panics rather than returning the error
-// as hraft's generic response value. hraft has no "apply failed, stop
-// advancing" concept: processLogs advances lastApplied unconditionally after
-// dispatching a batch, and every follower-received entry (plus any
-// retroactively-committed Figure-8 entry from an earlier leadership stint) is
-// applied with no local future to receive a response at all -- so a returned
-// error here is silently discarded forever, while lastApplied has already
-// moved past the entry that failed. Every later entry then applies on top of
-// a base state this node never actually reached, permanently and silently
-// diverging it from the cluster. An FSM that can't apply a committed entry deterministically
-// has no safe way to keep participating, so it must stop the process instead
-// of limping on with corrupted state.
+// A decode or materialization failure panics rather than returning the
+// error as hraft's generic response value. hraft advances past a failed
+// entry unconditionally with no way to signal the failure back, so a
+// returned error here would be silently discarded while every later entry
+// applies on top of a base state this node never actually reached --
+// permanently and silently diverging it from the cluster. An FSM that
+// can't apply a committed entry deterministically must stop the process
+// rather than limp on with corrupted state.
 func (f *FSM) Apply(log *raft.Log) any {
 	if log.Type != raft.LogCommand {
 		return nil

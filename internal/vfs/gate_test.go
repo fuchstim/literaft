@@ -176,15 +176,11 @@ var _ = Describe("commit-frame interception", func() {
 		Expect(queryText(reopened, "PRAGMA integrity_check")).To(Equal("ok"))
 	})
 
-	// Regression test: writeFrameData used to set txnDone=true
-	// unconditionally, before gate.Propose's outcome was known, and never
-	// reset it on rejection. Since a rejected commit leaves mxFrame unmoved,
-	// a same-shape retry lands on the exact same WAL offset(s) and pgno(s)
-	// as the failed attempt -- which WriteAt's header branch would then
-	// mistake for SQLite's own synchronous walRewriteChecksums revisit of an
-	// already-approved transaction, writing the retry straight to disk
-	// without ever calling writeFrameHeader, capturing frames, or calling
-	// gate.Propose again.
+	// Regression test: a rejected commit leaves mxFrame unmoved, so a
+	// same-shape retry lands on the exact same WAL offset(s) and pgno(s) as
+	// the failed attempt. That retry must still be captured and proposed to
+	// the gate, not mistaken for a checksum-only rewrite of an
+	// already-approved transaction and written straight to disk.
 	It("still proposes a retry that repeats the exact same statement after a rejection", func() {
 		dir := GinkgoT().TempDir()
 		path := filepath.Join(dir, "retry.db")
@@ -238,8 +234,7 @@ var _ = Describe("commit-frame interception", func() {
 		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(0)))
 	})
 
-	// Page size enforcement (CLAUDE.md: "fixed cluster-wide page size...
-	// enforce it at open") lives on the leader write path so a mismatch is
+	// Page size enforcement lives on the leader write path so a mismatch is
 	// rejected before ever reaching the gate/RAFT.
 	It("rejects a captured frame whose page size doesn't match the configured cluster page size", func() {
 		dir := GinkgoT().TempDir()
@@ -247,9 +242,8 @@ var _ = Describe("commit-frame interception", func() {
 
 		gate := &spyGate{}
 		name := "literaft-pagesize-test"
-		// SQLite's actual page size will be its own default (verify, don't
-		// assume) -- registering with any different value guarantees a
-		// mismatch on the very first captured frame.
+		// Registering with any value other than SQLite's actual page size
+		// guarantees a mismatch on the very first captured frame.
 		actual := probePageSize()
 		vfs.Register(name, sqlite3vfs.Find(""), gate, actual+1)
 

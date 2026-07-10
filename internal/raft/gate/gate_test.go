@@ -51,10 +51,9 @@ var _ = Describe("Gate", func() {
 		Expect(hint).NotTo(BeEmpty())
 	})
 
-	// vfs/file.go's own attempt to preserve gate.Propose's concrete error
-	// through sqlite3vfs.SystemError doesn't reliably survive the round
-	// trip back through *sqlite3.Conn.Exec/Stmt.Step, so LastRejection is
-	// the mechanism a caller holding the Gate directly should actually use.
+	// Propose's concrete error doesn't reliably survive the round trip back
+	// through *sqlite3.Conn.Exec/Stmt.Step, so LastRejection is the
+	// mechanism a caller holding the Gate directly should actually use.
 	It("exposes the most recent rejection via LastRejection, clearing it on the next success", func() {
 		c := newGatedCluster(GinkgoT(), 2, time.Second)
 		defer c.Shutdown()

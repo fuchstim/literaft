@@ -76,14 +76,11 @@ func (f funcGate) Propose(frames []*vfs.Frame, nTruncate uint32) error { return 
 // against a fresh, local, single-node connection through internal/vfs --
 // never touching any real cluster -- via a gate that only records what it
 // captures. It returns realistic, valid SQLite page content in commit
-// order: something this package's tests can feed straight to a real
-// Gate.Propose call and get back genuinely queryable state on whatever
-// node materializes it (fsm.FSM has no injectable fake materializer to
-// spy on instead), while still calling Propose directly, the way these
-// tests want to in order to exercise Gate's own leader/ready/timeout logic
-// in isolation. Callers proposing more than one of the returned captures
-// onto the same node must do so in this same order, since later statements
-// build on earlier ones' schema/rows.
+// order, ready to feed straight into a real Gate.Propose call so these
+// tests can exercise Gate's own leader/ready/timeout logic in isolation.
+// Callers proposing more than one of the returned captures onto the same
+// node must do so in this same order, since later statements build on
+// earlier ones' schema/rows.
 func captureEntries(pageSize uint32, stmts ...string) []capture {
 	GinkgoHelper()
 	var got []capture
@@ -110,8 +107,7 @@ func captureEntries(pageSize uint32, stmts ...string) []capture {
 
 // nodeQueryInt/nodeQueryText open a plain, unwrapped connection directly to
 // a testutils.Node's db file (bypassing any VFS/gate) and run a query --
-// the only way to observe whether fsm.FSM materialized something, now that
-// fsm.FSM has no injectable spy to check instead.
+// the only way to observe whether the FSM materialized something.
 func nodeQueryInt(n *testutils.Node, sql string) int64 {
 	GinkgoHelper()
 	c, err := sqlite3.Open("file:" + n.DBPath)

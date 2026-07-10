@@ -14,13 +14,10 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// A multi-node cluster replicates writes, followers serve (possibly
-// stale) reads, and killing/adding nodes converges. leader/follower
-// restart recovers whether or not a local RAFT snapshot has been taken.
-// A far-behind joiner catches up via InstallSnapshot instead of normal log
-// replay. This suite runs the same real, disk-backed, TCP-transport stack
-// cmd/literaft/main.go's run() wires up in production (testutils.NewTCPCluster),
-// not a test-only stand-in.
+// This suite runs the same real, disk-backed, TCP-transport stack a real
+// node process wires up in production (testutils.NewTCPCluster), not a
+// test-only stand-in: a multi-node cluster replicates writes, followers
+// serve (possibly stale) reads, and killing/adding nodes converges.
 
 func TestCluster(t *testing.T) {
 	RegisterFailHandler(Fail)

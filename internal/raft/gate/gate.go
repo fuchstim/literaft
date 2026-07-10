@@ -32,9 +32,9 @@ type Gate struct {
 
 // New returns a Gate proposing through r, whose FSM must be fsm (the
 // same FSM instance passed to hraft.NewRaft) -- Propose embeds nodeID in
-// every entry it proposes, which is how fsm.FSM.Apply recognizes and skips
-// materializing this node's own entries (ADR-005). timeout bounds each
-// hraft.Apply call.
+// every entry it proposes, which is how the FSM recognizes and skips
+// materializing this node's own entries. timeout bounds each hraft.Apply
+// call.
 //
 // New immediately starts a background watcher tracking r's leadership
 // transitions; callers must Close the Gate to stop it.
@@ -94,30 +94,25 @@ func (g *Gate) watchLeadership() {
 }
 
 // drain implements the "gaining leadership" step: commit a current-term
-// barrier (a no-op that only resolves once every
-// already-committed entry up to and including it has been sent through
-// FSM.Apply on this node) and only then open the gate. This is also what
-// makes the boolean self-apply marker in fsm.go safe: hraft's Figure-8 rule
-// can retroactively commit an entry this node proposed in an earlier,
-// unfinished leadership stint -- but that entry
-// necessarily has a lower log index than this term's barrier, so it is
-// applied *during this drain*, while the gate is still closed and no new
-// self-proposal can be racing to (mis)claim the self-apply marker.
+// barrier (a no-op that only resolves once every already-committed entry up
+// to and including it has been applied on this node) and only then open
+// the gate. This is also what makes the self-apply marker safe: hraft's
+// Figure-8 rule can retroactively commit an entry this node proposed in an
+// earlier, unfinished leadership stint -- but that entry necessarily has a
+// lower log index than this term's barrier, so it is applied *during this
+// drain*, while the gate is still closed and no new self-proposal can be
+// racing to (mis)claim the marker.
 //
 // term pins this call to the leadership stint that spawned it: if the node
 // has since lost leadership or moved to a later term, drain bails without
 // touching ready, so a slow, superseded drain can never re-open a gate a
-// newer transition already closed (or claim credit for a later one).
+// newer transition already closed.
 //
 // The post-Barrier check-and-set holds readyMu across both halves: a plain
 // "check state+term, then Store(true)" would leave a window where
 // watchLeadership's step-down write for this exact loss could land between
-// the check and the set, and drain's Store(true) would silently clobber it
-// back to true. No concrete way to trigger it was found (Ready/Propose both
-// independently re-check State() == Leader before consulting ready, and any
-// later leadership regain unconditionally resets ready first), but the race
-// itself is real, so it's closed properly rather than left as a documented
-// coincidence.
+// the check and the set, silently clobbering it back to true. Closed
+// properly rather than left as a documented coincidence.
 func (g *Gate) drain(term uint64) {
 	const retryDelay = 50 * time.Millisecond
 	for {
@@ -147,12 +142,11 @@ func (g *Gate) drain(term uint64) {
 // Propose implements vfs.Gate. A rejected or ambiguous proposal (including
 // ErrLeadershipLost -- "proposed, outcome unknown") surfaces as an error.
 //
-// The concrete error is also recorded for LastRejection: vfs/file.go's own
-// attempt to preserve it through sqlite3vfs.SystemError doesn't reliably
-// survive the round trip back through *sqlite3.Conn.Exec/Stmt.Step (SQLite's
-// own automatic rollback after a failed commit makes further, successful VFS
-// calls that clear it first), so a caller that holds this Gate directly has
-// a reliable way to recover which error this was.
+// The concrete error is also recorded for LastRejection: it doesn't
+// reliably survive the round trip back through *sqlite3.Conn.Exec/Stmt.Step
+// (SQLite's own automatic rollback after a failed commit can clear it
+// first), so a caller that holds this Gate directly has a reliable way to
+// recover which error this was.
 func (g *Gate) Propose(frames []*vfs.Frame, nTruncate uint32) error {
 	err := g.propose(frames, nTruncate)
 	g.lastErrMu.Lock()

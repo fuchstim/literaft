@@ -77,7 +77,7 @@ a time) exactly.
 
 ## `-shm` file (wal-index)
 
-Shared-memory wal-index. SQLite-format; both SQLite's own handle and our vendored
+Shared-memory wal-index. SQLite-format; both SQLite's own handle and our
 `internal/fsm/walappender/shm/` handle map it. Layout (per
 https://sqlite.org/walformat.html#the_wal_index, confirm offsets against the
 version in use):
@@ -109,7 +109,7 @@ SQLite reserves a set of locking slots in the wal-index
 
 - `WAL_WRITE_LOCK` (index 0) — the single-writer lock. SQLite takes it for a
   local write txn (the signal that starts our capture buffer). Follower apply
-  takes it directly via vendored `internal/fsm/walappender/shm/`.
+  takes it directly via `internal/fsm/walappender/shm/`.
 - `WAL_CKPT_LOCK` (index 1) — held by the checkpointer.
 - `WAL_RECOVER_LOCK` (index 2) — held during wal-index recovery/rebuild.
 - `WAL_READ_LOCK(0..WAL_NREADER-1)` (indices 3–7) — reader slots, one per

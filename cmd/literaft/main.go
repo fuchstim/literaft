@@ -1,8 +1,6 @@
 // Command literaft runs one node process: a real hraft cluster member
-// serving a RAFT-replicated SQLite database. Wiring
-// lives in internal/node; this is the flag parsing and process lifecycle
-// around it, plus an interactive SQL REPL (repl.go) on stdin/stdout for
-// exercising a running node by hand.
+// serving a RAFT-replicated SQLite database, plus an interactive SQL REPL
+// on stdin/stdout for exercising a running node by hand.
 package main
 
 import (
@@ -120,10 +118,10 @@ func run() error {
 	}()
 
 	// Only an explicit .exit/.quit means "shut this node down now". A bare
-	// EOF (runREPL's doc comment: stdin from /dev/null under a headless
-	// launch, or a piped script finishing) must not stop a node that's
-	// still supposed to serve raft traffic and reads -- fall back to
-	// waiting on a real signal instead.
+	// EOF -- stdin from /dev/null under a headless launch, or a piped
+	// script finishing -- must not stop a node that's still supposed to
+	// serve raft traffic and reads, so fall back to waiting on a real
+	// signal instead.
 	select {
 	case <-sigCh:
 	case explicitExit := <-replDone:

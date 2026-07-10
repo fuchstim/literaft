@@ -67,12 +67,13 @@ always commits immediately.
   leave a clean, recoverable db. Verified by `internal/vfs/gate_test.go`,
   `rollback_test.go`, `spill_test.go`.
 
-## M3 — Vendored shm + follower apply  *(done)*
+## M3 — shm + follower apply  *(done)*
 
-Copy the shm implementation and materialize an entry into a local db.
+Implement the shm layer and materialize an entry into a local db.
 
-- Vendor the concrete shm impl into `internal/fsm/walappender/shm/`; upstream
-  commit hash tracked per `NCRUCES_NOTES.md §vendoring`.
+- Implement the concrete shm layer directly in `internal/fsm/walappender/shm/`,
+  since ncruces' `SharedMemory` interface is opaque and can't be driven from
+  outside the package.
 - `internal/fsm/walappender.WALAppender`: take `WAL_WRITE_LOCK`, write frames with
   this node's salts + running checksums, update page-map slots, advance
   `mxFrame` with the tear-safe two-copy header write, release.
@@ -107,8 +108,8 @@ churn itself; snapshot-based catch-up is split out into M6 below.
 - **Losing leadership:** hraft already resolves every in-flight local
   `Apply`/`Barrier` future with `ErrLeadershipLost` *before* it flips
   `LeaderCh` to `false` (`runLeader`'s step-down path), and the local SQLite
-  writer's own `WAL_WRITE_LOCK` (an OFD lock shared with the vendored
-  `internal/fsm/walappender/shm/` apply path) already serializes any
+  writer's own `WAL_WRITE_LOCK` (an OFD lock shared with
+  `internal/fsm/walappender/shm/`'s apply path) already serializes any
   follower-apply against a still-in-flight local write. No additional code
   needed beyond verifying this via tests
   (`internal/raft/gate/gate_test.go`'s "surfaces a lost-leadership proposal"
@@ -138,7 +139,7 @@ churn itself; snapshot-based catch-up is split out into M6 below.
 ## M6 — Snapshots & very-behind followers  *(done)*
 
 Split out of the original M5 scope (see `DECISIONS.md` ADR-010): comparable in
-size to M3's vendored-shm work.
+size to M3's shm work.
 
 - `fsm.FSM.Snapshot`/`Restore` are real: `Snapshot` delegates to
   `internal/fsm/snapshotter.Snapshotter`, which uses SQLite's online backup API
@@ -224,6 +225,19 @@ size to M3's vendored-shm work.
   schema evolution and to shrink the hand-written bounds-checking surface
   the fuzzing ticket above (#25) has to cover. Call sites: `gate.go`'s
   `Gate.Propose`, `fsm.go`'s `FSM.Apply`. Not started.
+- [**Consolidate duplicated WAL frame-format constants/layout between vfs and
+  walappender**](https://github.com/fuchstim/literaft/issues/44) —
+  `walHeaderSize`/`frameHeaderSize`, the pgno/nTruncate byte-offset layout,
+  the frame-offset stride formula, and the commit-frame predicate
+  (`nTruncate != 0`) are each independently declared in both
+  `internal/vfs/walframe.go` (decode side) and
+  `internal/fsm/walappender`'s `walappender.go`/`frame.go` (encode side) —
+  same domain fact expressed two different ways, riskiest at the
+  frame-offset math (modulus test vs. direct multiplication), which could
+  silently drift. Pull the shared layout knowledge into one package (e.g.
+  `internal/walformat`); checksum computation and wal-index/shm handling
+  stay walappender-only (real architectural split, not duplication). Not
+  started.
 
 ## M8 — Library polish & packaging
 

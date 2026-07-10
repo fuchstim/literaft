@@ -11,9 +11,13 @@ unexported and can shift on any bump.
 > "Refactor" commit along with the rest of `docs/`. Reconstructed
 > afterward with package paths updated (`shm/` →
 > `internal/fsm/walappender/shm/`) and a new section on the main-`.db`-file
-> shared lock added (`§why the SHM must be VENDORED` neighbor, below) — a
-> locking fact this project didn't need to know about until `fsm/dblock.go`
-> (`DECISIONS.md` ADR-012).
+> shared lock added (`§why we implement our own shm layer` neighbor,
+> below) — a locking fact this project didn't need to know about until
+> `fsm/dblock.go` (`DECISIONS.md` ADR-012). That same "Refactor" commit also
+> rewrote `internal/fsm/walappender/shm/` from a vendored copy of ncruces'
+> concrete shm implementation into an original implementation of the same
+> wal-index mmap/locking protocol; this file has been updated to stop
+> describing it as vendored.
 
 ---
 
@@ -96,7 +100,7 @@ default) at registration.
 
 ---
 
-## Why the SHM must be VENDORED (the crux)
+## Why we implement our own shm layer (the crux)
 
 `SharedMemory` is an **exported interface with unexported methods** (the
 shm map / lock / unmap operations are package-private). `NewSharedMemory` returns
@@ -109,35 +113,20 @@ wal-index directly: take `WAL_WRITE_LOCK`, append frames, update the
 pgno→frame page-map slots, and advance `mxFrame` with a tear-safe header
 write. None of that is reachable through the opaque interface. Hence:
 
-**The plan (executed):** the concrete shm implementation (the mmap-backed
-struct and its platform lock files — OFD-lock paths on both Linux and macOS)
-is copied into `internal/fsm/walappender/shm/`, exporting the operations
-needed (`Open`, `Region`, `Lock`/`RLock`/`TryLock`/`Unlock`, `Close`). Record
-the **exact upstream commit hash** it was copied from wherever this
-package's own vendoring notes live, and re-diff on dependency bumps (the
-wal-index layout and lock offsets must stay in lockstep with the version
-SQLite-in-wasm actually uses, or readers corrupt).
+**The plan (executed):** `internal/fsm/walappender/shm/` is an original
+implementation of the same wal-index mmap/locking protocol (`Open`, `Region`,
+`Lock`/`RLock`/`TryLock`/`Unlock`, `Close`) — not a copy of ncruces' concrete
+shm code. It has to stay in lockstep with the on-disk wal-index layout and
+lock offsets SQLite-in-wasm actually uses, or readers corrupt; re-verify
+against those when bumping the pinned `go-sqlite3` version.
 
-**How this was vendored (don't commit `go mod vendor` output for it):** the
-top-level `vendor/` directory (`go mod vendor`'s own output, gitignored) is
-a full mirror of *every* dependency and is unrelated to this — it's refreshed
-with a plain `go mod vendor` when needed and never hand-edited. The
-`internal/fsm/walappender/shm/` files are a separate, much smaller, deliberately
-hand-copied subset (a Makefile target `git clone`s/`git archive`s
-`github.com/ncruces/go-sqlite3` at a pinned commit and copies just the shm
-source files in), not something `go mod vendor` produces or should ever
-overwrite.
+This is unrelated to the top-level `vendor/` directory (`go mod vendor`'s own
+output, gitignored, a full mirror of every dependency) — that's refreshed
+with a plain `go mod vendor` when needed and never hand-edited, and has
+nothing to do with `internal/fsm/walappender/shm/`.
 
-Files copied from upstream (names circa v0.35.x): `vfs/shm.go` (interface +
-`NewSharedMemory`), and the platform impls (`vfs/shm_ofd.go`,
-`vfs/shm_bsd.go` — the OFD/BSD-lock variants; see
-`internal/fsm/walappender/shm/lock_linux.go`/`lock_darwin.go` for what this
-project's own copy looks like, including the Darwin `F_OFD_SETLK`/
-`F_OFD_SETLKW` raw-constant workaround `golang.org/x/sys/unix` doesn't expose
-on that platform).
-
-**Coordination within one process.** Our vendored shm handle and SQLite's own
-shm handle both map the same `-shm` file (`MAP_SHARED`) and use OFD locks. Two
+**Coordination within one process.** Our shm handle and SQLite's own shm
+handle both map the same `-shm` file (`MAP_SHARED`) and use OFD locks. Two
 FDs in the same process *do* contend on OFD locks (that's per open-file-
 description, not per-process), and two mmaps of the same file are coherent. So
 the follower-apply handle coordinates with SQLite's handle exactly as two
@@ -173,12 +162,12 @@ see that ADR and `WAL_FORMAT.md` for the mechanics.
 
 ## wal-index page-map ≠ our future OCC pagemap
 
-Stated in CLAUDE.md but worth repeating here because the vendored code touches
-the first one:
+Stated in CLAUDE.md but worth repeating here because `internal/fsm/walappender/shm/`
+touches the first one:
 
 - **wal-index page-map** — the pgno→WAL-frame hash slots that live *inside* the
   `-shm` in SQLite's own format. Updated during follower apply so readers can
-  locate frames. Vendored `internal/fsm/walappender/shm/` manipulates this.
+  locate frames. `internal/fsm/walappender/shm/` manipulates this.
 - **OCC pagemap** — a *separate*, deferred (`DECISIONS.md` ADR-008) structure of
   pgno→version for validating forwarded writes. Not built yet. Not in `shm/`.
 

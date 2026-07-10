@@ -15,9 +15,8 @@ func NewFrame(pgNo, nTruncate uint32, page []byte) *Frame {
 	}
 }
 
-// encodeFrame builds a 24-byte WAL frame header (wal.c's
-// walEncodeFrame) and returns the running checksum after it, chaining from
-// seed.
+// encodeFrame builds a 24-byte WAL frame header and returns the running
+// checksum after it, chaining from seed.
 func (f *Frame) encodeHeader(salt [saltSize]byte, seed [2]uint32) ([frameHeaderSize]byte, [2]uint32) {
 	var fh [frameHeaderSize]byte
 	binary.BigEndian.PutUint32(fh[0:4], f.pgNo)

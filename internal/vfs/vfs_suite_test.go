@@ -19,18 +19,16 @@ func TestVFS(t *testing.T) {
 
 // alwaysCommitGate is a stub vfs.Gate that never rejects a proposal --
 // single-node-equivalent replication, standing in for a real Gate in every
-// test here that isn't specifically exercising the abort branch (gate_test.go,
-// rollback_test.go, and spill_test.go use spyGate for that instead).
+// test here that isn't specifically exercising the abort branch.
 type alwaysCommitGate struct{}
 
 func (alwaysCommitGate) Propose(frames []*vfs.Frame, nTruncate uint32) error { return nil }
 
 // probePageSize returns SQLite's actual default page size by asking a
-// throwaway in-memory connection, rather than assuming a value (CLAUDE.md:
-// verify, don't assume). internal/vfs.File uses the pageSize passed to
-// Register directly to compute frame-header offsets, not just to enforce a
-// mismatch, so every registration in this package's tests needs the real
-// value, never 0.
+// throwaway in-memory connection, rather than assuming a value. The
+// registered VFS uses this value directly to compute frame-header offsets,
+// so every registration in this package's tests needs the real value,
+// never 0.
 func probePageSize() uint32 {
 	c, err := sqlite3.Open(":memory:")
 	if err != nil {

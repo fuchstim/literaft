@@ -41,12 +41,10 @@ func init() {
 }
 
 // requireExternalSQLite fails loudly, rather than skipping, if this
-// environment can't run the external-reader compatibility checks: CLAUDE.md
-// calls this the single most load-bearing verification in the project. A
-// Skip here would let a CI environment missing the sqlite3 CLI (or lacking
-// the file-locking/shared-memory support requirement #3 depends on) pass
-// quietly instead of surfacing that the one claim the whole architecture is
-// staked on was never actually checked.
+// environment can't run the external-reader compatibility checks. A Skip
+// here would let a CI environment missing the sqlite3 CLI (or the
+// file-locking/shared-memory support requirement #3 depends on) pass
+// quietly instead of surfacing that this claim was never actually checked.
 func requireExternalSQLite() {
 	GinkgoHelper()
 	if sqlite3Path == "" {

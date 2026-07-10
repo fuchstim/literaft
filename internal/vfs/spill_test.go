@@ -12,16 +12,14 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// wal.c's walFrames() has a path this repo's commit-frame interception
-// doesn't handle by default. Once a write transaction has spilled its dirty
-// pages to the WAL at least once (isCommit==0 call), re-dirtying an
-// already-spilled page overwrites that page's existing frame *in place*: a
-// bare page-sized write with no preceding 24-byte frame header, since the
-// header (pgno, commit marker) is unchanged. Committing such a transaction
-// also triggers walRewriteChecksums(), which separately rewrites every
-// affected frame's header (including the just-written commit frame's own)
-// a second time, purely to fix the cumulative checksum chain -- another
-// bare write with no paired partner, this time header-shaped.
+// Once a write transaction has spilled its dirty pages to the WAL at least
+// once, re-dirtying an already-spilled page overwrites that page's
+// existing frame *in place*: a bare page-sized write with no preceding
+// frame header, since the header (pgno, commit marker) is unchanged.
+// Committing such a transaction can also rewrite every affected frame's
+// header a second time -- including the just-written commit frame's own
+// -- purely to fix the cumulative checksum chain: another bare write with
+// no paired partner, this time header-shaped.
 //
 // A tiny cache_size forces spills every few dirty pages; running the same
 // full-table UPDATE more than once inside one explicit transaction

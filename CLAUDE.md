@@ -80,7 +80,7 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 ## Current status & milestone
 
 **M0–M6 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
-compatibility, commit-frame gate, vendored shm + follower apply, real
+compatibility, commit-frame gate, shm + follower apply, real
 `hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), the
 leadership-churn ordering work, and real snapshot take/install — a multi-node
 cluster replicates writes, followers serve reads, killing/adding nodes
@@ -164,9 +164,9 @@ this file's context — update it *from* GitHub, not the other way around.
     fsm/
         walappender/              – follower-apply: RAFT entry -> local -wal + wal-index
             walappender.go, walindex.go, checksum.go, frame.go
-            shm/                  – VENDORED copy of ncruces' shm implementation
-                                     (copied so follower-apply can drive mxFrame /
-                                     page-map / write lock)
+            shm/                  – custom mmap+lock implementation of the SQLite
+                                     wal-index shared memory (so follower-apply
+                                     can drive mxFrame / page-map / write lock)
         snapshotter/              – RAFT snapshot capture/restore via SQLite's
                                      online backup API
     raft/
@@ -182,9 +182,6 @@ this file's context — update it *from* GitHub, not the other way around.
 /cmd/literaft/                    – node process entrypoint (flag parsing,
                                      lifecycle) + an interactive SQL REPL
 ```
-
-Keep `internal/fsm/walappender/shm/` clearly marked as vendored + its upstream
-commit hash recorded (see `docs/NCRUCES_NOTES.md`).
 
 ---
 
@@ -254,11 +251,20 @@ haven't been migrated.
 
 ---
 
+## Code comments
+
+Keep comments brief and factual — state what's non-obvious, not a
+mini-essay. Don't reference other functions, files, issues, or PRs by name;
+a pointer like that goes stale the moment the referenced thing is renamed or
+moved, and the comment silently becomes wrong. Say what's true right here.
+
+---
+
 ## Top gotchas (bite-marks from the design discussion)
 
 - **`SharedMemory` is opaque.** The exported interface has unexported methods;
-  you cannot drive it. Follower-apply needs a **vendored copy** of the concrete
-  shm impl. See `docs/NCRUCES_NOTES.md`.
+  you cannot drive it. Follower-apply needs its own implementation of the
+  concrete shm impl. See `docs/NCRUCES_NOTES.md`.
 - **wal-index page-map ≠ our future OCC pagemap.** "Update the shm page map"
   during apply means the *wal-index's* pgno→frame hash slots (SQLite format,
   required so readers find frames). The OCC pgno→hash/version map from the

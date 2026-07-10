@@ -17,19 +17,18 @@ import (
 // via normal replication (or a snapshot install, if it's too far behind).
 const addVoterTimeout = 10 * time.Second
 
-// runREPL runs an interactive SQL loop against n's kept-alive connection,
-// reading from in and writing prompts/results/errors to out, until in
-// reaches EOF or the user enters .exit/.quit. Every statement runs through
-// node.Node.WithDB, so it goes through the exact same commit-frame gate
-// (docs/DESIGN.md) as any other client write: on a follower, or a leader
-// still draining its apply backlog, that write fails and the error is
-// printed rather than crashing the loop.
+// runREPL runs an interactive SQL loop against db, reading from in and
+// writing prompts/results/errors to out, until in reaches EOF or the user
+// enters .exit/.quit. Every statement goes through the same commit-frame
+// gate as any other client write: on a follower, or a leader still
+// draining its apply backlog, that write fails and the error is printed
+// rather than crashing the loop.
 //
 // It returns true if the user explicitly typed .exit/.quit, false if it
 // stopped because in reached EOF. Callers must treat those two differently:
 // a headless/daemonized launch (stdin redirected from /dev/null, as under
 // systemd or a detached background process) hits EOF on the very first
-// read, and a piped script (docs' `literaft ... < seed.sql`) hits it the
+// read, and a piped script (e.g. `literaft ... < seed.sql`) hits it the
 // moment the script ends -- neither means "the operator wants this node
 // process to exit", only .exit/.quit does.
 //
