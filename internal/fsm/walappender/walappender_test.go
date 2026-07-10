@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -125,6 +126,55 @@ func primeFollowerWALMode(path string) {
 	Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
 }
 
+// singleRowUpdates opens a leader connection, creates a one-row table, then
+// issues n updates to that same row -- each producing its own small,
+// autocommitted transaction -- returning the table-setup transactions and
+// the update transactions separately, plus the page size.
+func singleRowUpdates(dir string, n int) (setup, updates []*raftproto.Transaction, pageSize uint32) {
+	GinkgoHelper()
+
+	gate := &recordingGate{}
+	leaderPath := filepath.Join(dir, "leader.db")
+	leader := leaderConn(leaderPath, gate)
+	defer leader.Close()
+
+	Expect(leader.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+	Expect(leader.Exec("INSERT INTO t (id, v) VALUES (1, 'seed')")).To(Succeed())
+	setup = gate.entries
+	gate.entries = nil
+
+	for i := 0; i < n; i++ {
+		Expect(leader.Exec(fmt.Sprintf("UPDATE t SET v = 'v%d' WHERE id = 1", i))).To(Succeed())
+	}
+	updates = gate.entries
+
+	return setup, updates, uint32(queryInt(leader, "PRAGMA page_size"))
+}
+
+// walFileSize stats path's -wal file, failing the test if it can't.
+func walFileSize(path string) int64 {
+	GinkgoHelper()
+	fi, err := os.Stat(path + "-wal")
+	Expect(err).NotTo(HaveOccurred())
+	return fi.Size()
+}
+
+// walFileSalt reads path's -wal file's own on-disk header salt (bytes
+// 16:24). A rewind always picks a fresh random salt; a plain append leaves
+// it untouched -- since a rewound epoch reuses the same file bytes an
+// unrewound append might also still occupy, comparing file size alone
+// can't reliably tell the two apart, but the salt always can.
+func walFileSalt(path string) [8]byte {
+	GinkgoHelper()
+	f, err := os.Open(path + "-wal")
+	Expect(err).NotTo(HaveOccurred())
+	defer f.Close()
+	var salt [8]byte
+	_, err = f.ReadAt(salt[:], 16)
+	Expect(err).NotTo(HaveOccurred())
+	return salt
+}
+
 var _ = Describe("WALAppender.AppendTransaction", func() {
 	It("replays a leader's captured entries into a fresh follower with identical reads", func() {
 		dir := GinkgoT().TempDir()
@@ -230,5 +280,120 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		Expect(queryInt(follower, "SELECT count(*) FROM t")).To(Equal(int64(rows)))
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal("row0"))
 		Expect(queryText(follower, fmt.Sprintf("SELECT v FROM t WHERE id = %d", rows))).To(Equal(fmt.Sprintf("row%d", rows-1)))
+	})
+})
+
+var _ = Describe("WALAppender log rewind", func() {
+	// Mirrors an internal, unexported constant rather than importing it.
+	const frameHeaderSize = 24
+
+	It("keeps the follower -wal bounded across many checkpoint/rewind cycles, instead of growing forever", func() {
+		dir := GinkgoT().TempDir()
+
+		const numUpdates = 30
+		setup, updates, pageSize := singleRowUpdates(dir, numUpdates)
+
+		followerPath := filepath.Join(dir, "follower-bounded.db")
+		primeFollowerWALMode(followerPath)
+
+		// Threshold of 1: every applied transaction is immediately
+		// followed by a PASSIVE checkpoint attempt, giving the very next
+		// apply the best possible chance to rewind.
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0)
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		for i, txn := range setup {
+			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying setup entry %d", i)
+		}
+
+		var peak int64
+		for i, txn := range updates {
+			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying update %d", i)
+			if size := walFileSize(followerPath); size > peak {
+				peak = size
+			}
+		}
+
+		// Without a rewind, numUpdates single-row updates would leave the
+		// -wal at roughly numUpdates*(frameHeaderSize+pageSize) bytes. With
+		// it, no single cycle between successful rewinds should ever need
+		// more than a couple of transactions' worth of frames, regardless
+		// of how many updates ran in total.
+		unboundedEstimate := int64(numUpdates) * int64(frameHeaderSize+pageSize)
+		Expect(peak).To(BeNumerically("<", unboundedEstimate/4),
+			"peak -wal size %d bytes looks like it grew proportionally to all %d updates instead of staying bounded",
+			peak, numUpdates)
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
+	})
+
+	It("does not rewind while a reader holds an older snapshot, and resumes once it's released", func() {
+		dir := GinkgoT().TempDir()
+
+		const numUpdates = 14
+		setup, updates, pageSize := singleRowUpdates(dir, numUpdates)
+
+		followerPath := filepath.Join(dir, "follower-contended.db")
+		primeFollowerWALMode(followerPath)
+
+		// Threshold of 3, not 1: large enough that a single update doesn't
+		// immediately trigger its own checkpoint, leaving a window where
+		// nBackfill lags maxFrame. A reader connecting in that window must
+		// claim a real, non-zero read-mark rather than the mark-0
+		// fallback, which only applies once nBackfill is fully caught up.
+		appender, err := walappender.Open(followerPath, pageSize, 3, 0)
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		for i, txn := range setup {
+			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying setup entry %d", i)
+		}
+
+		Expect(appender.AppendTransaction(updates[0])).To(Succeed())
+		saltBeforeReader := walFileSalt(followerPath)
+
+		// Attach an external reader and hold a read transaction open while
+		// nBackfill is stale relative to the current maxFrame, forcing it
+		// to claim a real snapshot mark rather than mark 0.
+		reader, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer reader.Close()
+		Expect(reader.Exec("BEGIN")).To(Succeed())
+		Expect(queryInt(reader, "SELECT count(*) FROM t")).To(Equal(int64(1)))
+
+		// Apply more updates while the reader is attached: the log must
+		// never actually rewind -- the epoch's salt, which only a rewind
+		// ever changes, must stay identical throughout.
+		const attachedUpdates = 8
+		for i := 1; i <= attachedUpdates; i++ {
+			Expect(appender.AppendTransaction(updates[i])).To(Succeed(), "applying update %d with reader attached", i)
+			Expect(walFileSalt(followerPath)).To(Equal(saltBeforeReader),
+				"expected the WAL epoch to be unchanged while a reader holds an older snapshot (update %d)", i)
+		}
+
+		// Release the reader, then keep applying until a rewind is
+		// observed -- exactly which call it lands on depends on how the
+		// dirty-page count lines up with the threshold.
+		Expect(reader.Exec("COMMIT")).To(Succeed())
+
+		rewound := false
+		for i := attachedUpdates + 1; i < numUpdates; i++ {
+			Expect(appender.AppendTransaction(updates[i])).To(Succeed(), "applying update %d after reader release", i)
+			if walFileSalt(followerPath) != saltBeforeReader {
+				rewound = true
+			}
+		}
+		Expect(rewound).To(BeTrue(), "expected the log to eventually rewind to a fresh epoch once nothing blocks it")
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
 	})
 })

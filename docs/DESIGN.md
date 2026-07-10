@@ -235,6 +235,44 @@ intercept `wal_checkpoint` itself.
    content, reset the WAL (`mxFrame → 0`, new salt, header change-counter
    bumped). External readers detect the change and re-read. Standard.
 
+Only step 4 ever actually bounds `-wal` size, and PASSIVE never reaches it —
+true in stock SQLite too. Sqlite.org's own "Checkpointing" docs explain how
+a stock db still stays bounded under nothing but PASSIVE auto-checkpoints:
+"whenever a write operation occurs, the writer checks how much progress the
+checkpointer has made, and if the entire WAL has been transferred into the
+database and synced and if no readers are making use of the WAL, then the
+writer will rewind the WAL back to the beginning." That's the *writer's* own
+job, separate from whatever checkpoint mode last ran, and `walappender`
+doesn't get it for free the way a real SQLite writer does, since
+`AppendFrames` (`internal/fsm/walappender/walappender.go`) is a hand-rolled
+writer path that never had this check at all until `rewindLogIfBackfilled`
+was added:
+
+- Before appending, if `nBackfill == mxFrame` (everything already
+  backfilled), make one non-blocking attempt at `WAL_READ_LOCK(1)` through
+  the last reader slot — the same range real SQLite's own `walRestartHdr`
+  takes. Lock 0 is deliberately excluded: per SQLite's own wal.c, that's the
+  mark new readers *already* fall back to exactly when `nBackfill == mxFrame`
+  (ignoring the WAL entirely, reading straight from `.db`), so it never needs
+  protecting from this reset.
+- On success, reset the header (`mxFrame → 0`, fresh salt) and write a fresh
+  on-disk WAL file header — the same machinery `maybeBootstrap` uses to start
+  a brand-new WAL — then continue appending from the beginning.
+- If the locks are unavailable, just append after the existing `mxFrame`,
+  same as a checkpoint that can't make progress.
+
+Without this, a follower that stays caught up purely through ordinary log
+replay (never needing `InstallSnapshot`, the only other place a
+RESTART/TRUNCATE-equivalent reset happens) has no bound on its `-wal` size at
+all.
+
+One correctness note specific to `checkpoint()`'s own `*sqlite3.Conn`: opened
+fresh, it silently declines every `WALCheckpoint` call (`nLog`/`nCkpt` come
+back `-1`/`-1`, no error) until it's executed at least one prior read —
+confirmed empirically, not documented upstream. `walappender.Open` primes it
+with one throwaway `SELECT count(*) FROM sqlite_master` right after bootstrap,
+which is enough for every later call on that same connection.
+
 One integration note: checkpoints never race the RAFT gate (different locks,
 and the gate only fires on commit-frame writes). A `TRUNCATE`-checkpointed
 `.db` is also the natural precursor to a **RAFT snapshot** (see "Follower-apply

@@ -74,6 +74,14 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 	if err := w.maybeBootstrap(); err != nil {
 		return nil, fmt.Errorf("failed to bootstrap WAL: %w", err)
 	}
+
+	// A *sqlite3.Conn that's never read anything
+	// silently declines every WALCheckpoint call (nLog/nCkpt come back
+	// -1/-1, no error). One throwaway read fixes this.
+	if err := db.Exec("SELECT 1=1"); err != nil {
+		return nil, errors.Join(w.Close(), fmt.Errorf("failed to prime checkpoint connection: %w", err))
+	}
+
 	go w.runCheckpointer(checkpointInterval)
 
 	return w, nil
@@ -132,6 +140,11 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 		return fmt.Errorf("failed to read wal-index header page")
 	}
 
+	hdr, err = a.rewindLogIfBackfilled(region0, hdr)
+	if err != nil {
+		return fmt.Errorf("failed to rewind WAL log: %w", err)
+	}
+
 	frame := hdr.maxFrame
 	offset := walHeaderSize + int64(frame)*(frameHeaderSize+int64(a.pageSize))
 	cksum := hdr.frameCksum
@@ -174,6 +187,41 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 	return nil
 }
 
+// rewindLogIfBackfilled mirrors what a stock SQLite writer does at the start
+// of every commit: once every frame is already copied into the database
+// file and no reader still needs them, rewind the log to the beginning
+// instead of appending after it forever -- otherwise nothing ever resets
+// mxFrame and the -wal file grows without bound.
+//
+// The reader-mark lock attempt is non-blocking and best-effort: if a reader
+// is attached, this leaves hdr unchanged and the caller appends after the
+// existing maxFrame instead.
+func (a *WALAppender) rewindLogIfBackfilled(region0 []byte, hdr walIndexHeader) (walIndexHeader, error) {
+	if hdr.maxFrame == 0 || readNBackfill(region0) < hdr.maxFrame {
+		return hdr, nil
+	}
+
+	if err := a.shm.TryLockRange(shm.ReadLock(1), shm.NReaders-1); err != nil {
+		return hdr, nil
+	}
+	defer a.shm.UnlockRange(shm.ReadLock(1), shm.NReaders-1)
+
+	cksum, salt, err := a.writeWALFileHeader()
+	if err != nil {
+		return hdr, fmt.Errorf("failed to write -wal file header for log rewind: %w", err)
+	}
+
+	hdr.maxFrame = 0
+	hdr.nPage = 0
+	hdr.frameCksum = cksum
+	hdr.salt = salt
+	hdr.change++
+	resetCkptInfoForRewind(region0)
+	writeWALIndexHeader(region0, hdr)
+
+	return hdr, nil
+}
+
 // maybeBootstrap initializes the -wal file and wal-index header if they aren't already initialized.
 // It returns an error if the -wal file already has content but the wal-index is uninitialized,
 // since recovery from an existing WAL isn't implemented yet.
@@ -210,23 +258,9 @@ func (a *WALAppender) maybeBootstrap() error {
 			"recovery from an existing WAL isn't implemented yet", fi.Size())
 	}
 
-	var salt [saltSize]byte
-	if _, err := rand.Read(salt[:]); err != nil {
-		return fmt.Errorf("failed to generate random salt for WAL header: %w", err)
-	}
-
-	var walHdr [walHeaderSize]byte
-	binary.BigEndian.PutUint32(walHdr[0:4], walMagicLE)
-	binary.BigEndian.PutUint32(walHdr[4:8], walMaxVersion)
-	binary.BigEndian.PutUint32(walHdr[8:12], a.pageSize)
-	// bytes 12:16 (checkpoint sequence number) start at 0.
-	copy(walHdr[16:24], salt[:])
-
-	s0, s1 := checksum(0, 0, walHdr[:24])
-	binary.BigEndian.PutUint32(walHdr[24:28], s0)
-	binary.BigEndian.PutUint32(walHdr[28:32], s1)
-	if _, err := a.f.WriteAt(walHdr[:], 0); err != nil {
-		return fmt.Errorf("failed to write -wal file header: %w", err)
+	cksum, salt, err := a.writeWALFileHeader()
+	if err != nil {
+		return fmt.Errorf("failed to bootstrap -wal file: %w", err)
 	}
 
 	pageSize16 := uint16(a.pageSize)
@@ -241,12 +275,39 @@ func (a *WALAppender) maybeBootstrap() error {
 		pageSize:    pageSize16,
 		maxFrame:    0,
 		nPage:       0,
-		frameCksum:  [2]uint32{s0, s1}, // frame 1's checksum chains from the WAL header's own checksum
+		frameCksum:  cksum, // frame 1's checksum chains from the WAL header's own checksum
 		salt:        salt,
 	}
 	writeWALIndexHeader(region0, h)
 
 	return nil
+}
+
+// writeWALFileHeader (re)writes the on-disk -wal file's own 32-byte header
+// at offset 0 with a fresh random salt, returning the checksum seed frame 1
+// of the new epoch chains from. Starting a brand-new WAL and restarting an
+// existing one both need these same bytes written.
+func (a *WALAppender) writeWALFileHeader() ([2]uint32, [saltSize]byte, error) {
+	var salt [saltSize]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return [2]uint32{}, salt, fmt.Errorf("failed to generate random salt for WAL header: %w", err)
+	}
+
+	var walHdr [walHeaderSize]byte
+	binary.BigEndian.PutUint32(walHdr[0:4], walMagicLE)
+	binary.BigEndian.PutUint32(walHdr[4:8], walMaxVersion)
+	binary.BigEndian.PutUint32(walHdr[8:12], a.pageSize)
+	// bytes 12:16 (checkpoint sequence number) start at 0.
+	copy(walHdr[16:24], salt[:])
+
+	s0, s1 := checksum(0, 0, walHdr[:24])
+	binary.BigEndian.PutUint32(walHdr[24:28], s0)
+	binary.BigEndian.PutUint32(walHdr[28:32], s1)
+	if _, err := a.f.WriteAt(walHdr[:], 0); err != nil {
+		return [2]uint32{}, salt, fmt.Errorf("failed to write -wal file header: %w", err)
+	}
+
+	return [2]uint32{s0, s1}, salt, nil
 }
 
 func (a *WALAppender) runCheckpointer(interval time.Duration) {

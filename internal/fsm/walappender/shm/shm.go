@@ -154,6 +154,18 @@ func (s *SharedMemory) TryLock(index int) error {
 	return writeLock(s.file, baseOffset+int64(index), 1, false)
 }
 
+// TryLockRange is like TryLock but atomically acquires n consecutive lock
+// indices starting at index as a single range, returning immediately if any
+// part of the range is unavailable.
+func (s *SharedMemory) TryLockRange(index, n int) error {
+	return writeLock(s.file, baseOffset+int64(index), int64(n), false)
+}
+
+// UnlockRange releases n consecutive lock indices starting at index.
+func (s *SharedMemory) UnlockRange(index, n int) error {
+	return unlock(s.file, baseOffset+int64(index), int64(n))
+}
+
 // RLock acquires a shared lock on the given lock index, blocking until
 // available.
 func (s *SharedMemory) RLock(index int) error {
