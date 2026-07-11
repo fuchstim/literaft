@@ -190,6 +190,11 @@ this file's context — update it *from* GitHub, not the other way around.
                                      on every write)
 /cmd/literaft/                    – node process entrypoint (flag parsing,
                                      lifecycle) + an interactive SQL REPL
+/integration/                     – whole-system tests too slow for the unit
+                                     suites they exercise: a throughput
+                                     benchmark and a replication-fidelity
+                                     correctness test, both driven against a
+                                     real testutils.TCPCluster
 ```
 
 ---
