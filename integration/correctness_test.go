@@ -268,7 +268,7 @@ var _ = Describe("correctness", func() {
 		plainDB := openPlainDB(t, dir)
 		defer plainDB.Close()
 
-		c := testutils.NewTCPCluster(t, dir, 3, testutils.WithOnDiskRaftStore())
+		c := testutils.NewTCPCluster(t, dir, 3, testutils.WithOnDiskRaftStore(), testutils.WithSnapshotInterval(time.Second))
 		defer c.Shutdown()
 		leader := c.ReadyLeader()
 
