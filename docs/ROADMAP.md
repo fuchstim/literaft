@@ -232,7 +232,9 @@ size to M3's shm work.
   `internal/fsm/walappender`'s frame encoding). Not started.
 - [**Benchmark leader write throughput and read concurrency**](https://github.com/fuchstim/literaft/issues/26)
   — confirm ≈1 txn/RAFT-round-trip, that batching multiple SQLite txns per
-  entry raises it, and that read concurrency is unaffected. Not started.
+  entry raises it, and that read concurrency is unaffected. *(done,
+  `internal/testutils/throughput_test.go`)* Surfaced the `raft-boltdb`
+  fsync-per-write bottleneck below.
 - [**Switch RAFT entry wire format to protobuf**](https://github.com/fuchstim/literaft/issues/42)
   *(done)* `internal/raft/proto/entry.proto` defines `Entry{ Header header;
   oneof payload { Transaction transaction; } }`, `Header{ id }`,
@@ -265,8 +267,8 @@ size to M3's shm work.
   stay walappender-only (real architectural split, not duplication). Not
   started.
 - [**Replace raft-boltdb with a SQLite-backed LogStore/StableStore**](https://github.com/fuchstim/literaft/issues/51)
-  `raft-boltdb` fsyncs on every write transaction by default,
-  capping write throughput well below what WAL-mode SQLite can sustain --
+  *(done)* `raft-boltdb` fsyncs on every write transaction by default,
+  capping write throughput well below what WAL-mode SQLite can sustain —
   follows directly from the throughput benchmark above. New top-level
   `raftsqlite` package implements `raft.LogStore`/`raft.StableStore` over
   `github.com/ncruces/go-sqlite3` via `database/sql`, journal_mode=WAL +
@@ -281,11 +283,25 @@ size to M3's shm work.
   `internal/testutils`'s `NewTCPCluster` (in-memory by default; discovered
   along the way that a long enough sustained write burst against an
   in-memory store exhausts the wazero/WASM SQLite engine's own memory,
-  since there's nothing to spill to disk -- ncruces' driver panics on
+  since there's nothing to spill to disk — ncruces' driver panics on
   `SQLITE_NOMEM` mid-statement, and unwinding through a deferred
   `Tx.Rollback()` hangs the node rather than surfacing a clean error;
   `testutils.WithOnDiskRaftStore()` opts a given cluster, such as the
   throughput benchmark, into a real file instead).
+- **Rewind the follower WAL once fully backfilled, mirroring stock SQLite.**
+  *(done, no separate GitHub issue — found and fixed investigating unbounded
+  `-wal` growth during the throughput benchmark above)* A follower that stays
+  caught up purely through ordinary log replay (never needing
+  `InstallSnapshot`) had no bound on its `-wal` size: `walappender`'s periodic
+  checkpoint only ever runs `PASSIVE`, which never resets `mxFrame`. Real
+  SQLite avoids this because the *writer* itself checks on every commit
+  whether everything's backfilled and no reader still needs it, then rewinds
+  the log — a check `walappender.AppendFrames`, a hand-rolled writer path,
+  never had. `rewindLogIfBackfilled` (`internal/fsm/walappender/walappender.go`)
+  adds it: see `DESIGN.md §checkpoint path`. Also fixed a latent bug found
+  along the way — `walappender`'s checkpoint connection silently declined
+  every `WALCheckpoint` call until primed with one prior read, so PASSIVE
+  checkpointing had likely never actually run on any follower before this.
 
 ## M8 — Library polish & packaging
 
@@ -319,7 +335,7 @@ anything outside this repo.
   API (`raft.NewFSM(materializer)` then a separate
   `fsm.SetSnapshotter(backend)` call, because the snapshotter didn't exist
   yet at FSM-construction time in that wiring order) is exactly what this
-  issue asked to collapse. The current `fsm.New(nodeID, dbPath, opts...)`
+  issue asked to collapse. The current `fsm.New(dbPath, opts...)`
   constructs the walappender and snapshotter itself, in one call, with no
   two-step wiring at all — this looks like it satisfies the issue, but
   wasn't done *as* this issue (it fell out of the broader "Refactor"
@@ -397,3 +413,7 @@ anything outside this repo.
   serves the single database it was built with. Revisit if a use case
   needs one `hraft.Raft` (one RAFT log) fronting more than one logical
   SQLite database, dispatched by that name.
+- **Support adopting existing databases** — [issue #45](https://github.com/fuchstim/literaft/issues/45).
+  Bootstrapping a new RAFT cluster currently assumes an empty starting
+  database; there's no path for pointing it at an existing `.db` file and
+  replicating from its current contents.

@@ -10,14 +10,6 @@ https://sqlite.org/fileformat2.html before relying on any offset.
 
 All multi-byte integers in the WAL and wal-index headers are **big-endian**.
 
-> **Restored/reconciled note (2026-07):** this file was deleted by the
-> "Refactor" commit along with the rest of `docs/`. The on-disk format facts
-> here don't change with a Go-level refactor, so most of this file is
-> unchanged from the original beyond updated package/file references
-> (`apply/` → `internal/fsm/walappender/`, `vfs/` → `internal/vfs/`). The new
-> `§main .db file locking` section is genuinely new — this project didn't
-> need those offsets until `fsm/dblock.go` (`DECISIONS.md` ADR-012).
-
 ---
 
 ## `-wal` file

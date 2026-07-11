@@ -4,15 +4,14 @@ ADR-style log of the choices behind this design and, importantly, the
 alternatives that were rejected and why. When something here feels like
 unnecessary constraint, the rejected-alternatives section is usually the answer.
 
-> **Restored/reconciled note (2026-07):** ADR-001 through ADR-010 are the
-> pre-refactor record, updated only for file/package renames (the "Refactor"
-> commit, `97c63a7`, moved `vfs/`→`internal/vfs/`, `apply/`+`shm/`→
-> `internal/fsm/walappender/(+shm/)`, `raft/`→`fsm/`+`internal/raft/gate/`+
-> `internal/raft/proto/`, and later dissolved `internal/node/` — see ADR-013).
-> ADR-011 through ADR-013 are new, documenting what that refactor changed and
-> a regression + a fix discovered while reinstating the test coverage it also
-> deleted. ADR-014 documents a later, separate split of `raftgate.Gate` away
-> from hraft itself.
+> ADR-001 through ADR-010 predate a package restructuring (`vfs/`→
+> `internal/vfs/`, `apply/`+`shm/`→`internal/fsm/walappender/(+shm/)`,
+> `raft/`→`fsm/`+`internal/raft/gate/`+`internal/raft/proto/`, and later the
+> dissolution of `internal/node/` — ADR-013); package names below have been
+> updated to match, but the decisions themselves are unchanged. ADR-011
+> through ADR-013 document what that restructuring changed, including a
+> regression it introduced and its fix. ADR-014 documents a later, separate
+> split of `raftgate.Gate` away from hraft itself.
 
 ---
 
@@ -453,12 +452,9 @@ section on the current, connection-preserving `Restore`). `driver.Driver`
 also dropped several of `internal/node`/the original `driver` package's
 options (`WithPageSize`, `WithName`, `WithCheckpointInterval` are gone;
 `fsm.FSM.PageSize()` and its own internal checkpointer replace what those
-configured) — reinstated where a caller genuinely needs them
-(`Ready()`/`LastRejection()`/`VFSName()` were restored as thin forwarders
-while reinstating this repo's test coverage after the same refactor deleted
-it; see the git history around that work if the option surface needs
-revisiting again — though `Ready()` didn't last: ADR-014 removed it a
-second time, for an unrelated reason).
+configured) — `Ready()`/`LastRejection()`/`VFSName()` were reinstated as
+thin forwarders, though `Ready()` didn't last: ADR-014 removed it a second
+time, for an unrelated reason.
 
 ---
 
