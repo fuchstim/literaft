@@ -233,8 +233,31 @@ size to M3's shm work.
 - [**Benchmark leader write throughput and read concurrency**](https://github.com/fuchstim/literaft/issues/26)
   — confirm ≈1 txn/RAFT-round-trip, that batching multiple SQLite txns per
   entry raises it, and that read concurrency is unaffected. *(done,
-  `internal/testutils/throughput_test.go`)* Surfaced the `raft-boltdb`
+  `integration/throughput_test.go` — moved out of `internal/testutils` into
+  a new top-level `integration/` package alongside the correctness test
+  below, since a multi-minute benchmark sharing a suite with sub-second
+  correctness specs was an awkward fit)* Surfaced the `raft-boltdb`
   fsync-per-write bottleneck below.
+- [**Replication-fidelity correctness test against a complex trigger-driven
+  schema**](https://github.com/fuchstim/literaft/issues/55) *(done,
+  `integration/correctness_test.go`)* A plain SQLite db and a 3-node cluster
+  must stay byte-identical under mixed trigger-driven writes. A schema with
+  cascading triggers (an append-only, version-stamped table
+  plus a fan-out outbox pattern — the same general shape that has
+  previously caused real corruption in a similar Litestream-based system)
+  is written to identically, in Go, for both a bare `ncruces/go-sqlite3`
+  connection and a `testutils.TCPCluster` leader; every random choice and
+  logical timestamp is decided once in Go and applied to both as bound
+  parameters, never left to SQL-side `RANDOM()`/`datetime('now')`, which run
+  independently per connection. After each burst, every node's data
+  (dumped and compared, not just row-counted) and
+  `PRAGMA integrity_check` are asserted identical to the plain db, both via
+  each node's own gated connection and via a completely external,
+  unmodified-VFS reader. The burst-then-check cycle loops
+  (`LITERAFT_CORRECTNESS_ITERATIONS`) against the same still-running
+  cluster and plain db, and the on-disk directory can be pinned
+  (`LITERAFT_CORRECTNESS_DIR`) so separate manual runs extend the same
+  soak test.
 - [**Switch RAFT entry wire format to protobuf**](https://github.com/fuchstim/literaft/issues/42)
   *(done)* `internal/raft/proto/entry.proto` defines `Entry{ Header header;
   oneof payload { Transaction transaction; } }`, `Header{ id }`,
