@@ -81,16 +81,17 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 
 **M0–M6 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
 compatibility, commit-frame gate, shm + follower apply, real
-`hashicorp/raft` integration (`raft/`, `internal/node/`, `cmd/literaft/`), the
-leadership-churn ordering work, and real snapshot take/install — a multi-node
-cluster replicates writes, followers serve reads, killing/adding nodes
-converges, a node that regains leadership with an apply backlog drains it
-(`log.SingleWriterLog`'s `Ready`/`Barrier` drain) before serving local writes again, and
-a follower too far behind for normal log replication catches up via
-`raft.FSM.Snapshot`/`Restore` (a `TRUNCATE`-checkpointed `.db` swapped in as a
-unit by `internal/node`'s `dbBackend`) instead. Current work is **Milestone 7**
-(hardening: crash/restart recovery, fault injection, fuzzing, throughput
-benchmarks — see `docs/ROADMAP.md`).
+`hashicorp/raft` integration (`internal/raft/gate/`, `internal/raft/proto/`,
+`fsm/`, `cmd/literaft/`), the leadership-churn ordering work, and real
+snapshot take/install — a multi-node cluster replicates writes, followers
+serve reads, killing/adding nodes converges, a node that regains leadership
+with an apply backlog drains it (`log.SingleWriterLog`'s `Ready`/`Barrier`
+drain) before serving local writes again, and a follower too far behind for
+normal log replication catches up via `fsm.FSM.Snapshot`/`Restore` (delegating
+to `internal/fsm/snapshotter.Snapshotter`, which appends the incoming snapshot
+as ordinary WAL frames rather than swapping the whole file) instead. Current
+work is **Milestone 7** (hardening: fault injection, fuzzing, and the
+remaining flakes — see `docs/ROADMAP.md`).
 
 **Scope decision for now:** *reject all follower-originated writes.* A client
 write that lands on a follower returns an error with a leader hint; the client
@@ -101,7 +102,7 @@ capture or the OCC pagemap yet.
 
 Note this still leaves **follower apply** in scope: followers must materialize
 committed RAFT entries into their local `-wal` + wal-index to stay current and
-electable. That is the path that needs the copied SHM code (below).
+electable. That is the path that needs the custom shm implementation (below).
 
 ---
 
@@ -175,7 +176,7 @@ this file's context — update it *from* GitHub, not the other way around.
                                      raftgate.LogAdapter
         proto/                    – RAFT log entry wire format (encode/decode)
     testutils/                    – test-only cluster harnesses (in-memory and
-                                     real TCP+BoltDB), used by _test.go files
+                                     real TCP+raftsqlite), used by _test.go files
                                      across the module
 /log/                             – log.SingleWriterLog: the real hraft-backed
                                      raftgate.LogAdapter, owning *hraft.Raft,
@@ -184,6 +185,9 @@ this file's context — update it *from* GitHub, not the other way around.
 /driver/                          – database/sql-compatible driver: wires a
                                      caller-supplied fsm.FSM + raftgate.LogAdapter
                                      into a gate + registered VFS + database/sql.Driver
+/raftsqlite/                      – raft.LogStore/raft.StableStore backed by
+                                     SQLite (replaces raft-boltdb, which fsyncs
+                                     on every write)
 /cmd/literaft/                    – node process entrypoint (flag parsing,
                                      lifecycle) + an interactive SQL REPL
 ```
