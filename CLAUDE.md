@@ -203,13 +203,17 @@ go build ./...
 ```
 
 Run tests via the `ginkgo` CLI, not `go test ./...` directly — this repo's
-suites are Ginkgo/Gomega. Use `-p 20` to run with real parallelism (much
-faster); drop to `-p 1` when actively debugging a specific failure, since
-parallel output interleaves and timing-sensitive tests behave differently
-under concurrent load.
+suites are Ginkgo/Gomega. `-p` is a boolean ("run in parallel with an
+auto-detected number of nodes"), not a process-count flag — a number after
+it (e.g. `-p 20`) is silently ignored as a harmless nonexistent extra
+package pattern, not consumed as a count. Use `--procs=N` (alias `--nodes`)
+for an explicit count, or bare `-p` for auto-detected parallelism (much
+faster); omit both (or pass `--procs=1`) when actively debugging a specific
+failure, since parallel output interleaves and timing-sensitive tests
+behave differently under concurrent load.
 
 ```
-ginkgo -r -p 20 ./...
+ginkgo -r --procs=20 ./...
 ```
 
 To check whether a test is flaky, use `--repeat N` (runs the suite N+1
