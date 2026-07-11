@@ -394,8 +394,9 @@ anything outside this repo.
   original ask (tighten hraft election/heartbeat timeouts, trim `Eventually`/
   `time.Sleep` waits, run independent specs in parallel) targeted
   `internal/node`'s own integration suite, which no longer exists —
-  superseded by `internal/testutils`. `ginkgo -r -p 20 ./...` (now CLAUDE.md's
-  documented default) cut the full repo's test time from ~39s to ~16s via
+  superseded by `internal/testutils`. `ginkgo -r --procs=20 ./...` (now
+  CLAUDE.md's documented default) cut the full repo's test time from ~39s to
+  ~16s via
   real process parallelism, which addresses the "grows with every spec
   added" complaint directly. Some of the original, narrower asks are still
   open: `internal/testutils/restart_test.go`'s `writeRowsAndForceSnapshot`
