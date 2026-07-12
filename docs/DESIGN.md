@@ -67,6 +67,13 @@ transitions` below), and translates hraft's own failure modes into
 that — it would work unchanged against a `LogAdapter` backed by some other
 consensus mechanism entirely.
 
+A second `LogAdapter` is designed but not yet built (`FOLLOWER_WRITES.md`,
+milestone M9/issue #32): `log.ForwardingLog` wraps a `*log.SingleWriterLog`
+plus a caller-supplied `log.LeaderTransport` and, on a follower, forwards
+the proposal to the leader under a base-index check instead of failing it.
+`driver.New`, the gate, and this section's write path are untouched by it —
+which is exactly what the `LogAdapter` seam is for.
+
 `driver.New(fsm, log)` takes a `*fsm.FSM` and a `raftgate.LogAdapter` the
 caller already constructed, builds the `internal/raft/gate.Gate` around the
 LogAdapter, registers a process-unique gated VFS (`internal/vfs.Register`),
@@ -372,9 +379,14 @@ checkpoint can reclaim.
 ## Conflict handling
 
 There is **no page-level conflict resolution**, and there cannot be a state
-where two nodes commit conflicting page modifications. Writes are leader-only and
-RAFT totally-orders every write before any of it becomes visible. Conflicts are
-**prevented by serialization**.
+where two nodes commit conflicting page modifications. Proposing into the
+RAFT log is leader-only and RAFT totally-orders every write before any of it
+becomes visible. Conflicts are **prevented by serialization**, never merged.
+Follower-*originated* writes are currently rejected outright (ADR-007); the
+accepted-but-unbuilt M9 design (`FOLLOWER_WRITES.md`, ADR-015) lets a
+follower *submit* a write to the leader instead, admitted only if it was
+computed on exactly the leader's current applied state — still
+prevention-by-rejection, zero merge logic.
 
 **Intra-node (two RW conns on the leader):** pure stock SQLite. They serialize
 on `WAL_WRITE_LOCK`. Lost-update case: the second writer's read→write upgrade
@@ -393,6 +405,16 @@ down), so L1's gate fails → discard commit frame, I/O error, `mxFrame` unmoved
 At no instant are two conflicting txns both committed. This is just RAFT safety
 (one-leader-per-term + Leader Completeness); the gate translates "no quorum" into
 "clean SQLite txn failure."
+
+**Cross-node (forwarded follower write — designed, not built):** a
+follower's captured page images travel to the leader with the base index
+they were computed on; the leader accepts iff that equals its own last
+applied index, checked under its `WAL_WRITE_LOCK` on a `Ready` leader —
+which is what makes the check equivalent to the log-head comparison ADR-008
+demanded, closing its lost-update trap. Any concurrent write anywhere stales
+an in-flight forward → rejection → the app re-runs the transaction on
+fresher state. Full protocol, locking rules, and failure matrix:
+`FOLLOWER_WRITES.md`.
 
 **Role transitions (the subtle part):** this whole area of state (leader/ready/
 drain) lives in `log.SingleWriterLog`, not `internal/raft/gate.Gate` — see
@@ -430,10 +452,15 @@ forwards whatever its `LogAdapter.Apply` returns.
 
 **Ambiguous commit:** RAFT "proposed, outcome unknown" is treated as failure by
 the gate — but the entry may have committed cluster-wide. The local app sees a
-failed txn that in fact took effect; on retry it would double-apply. The
-standard fix (client-request-ID dedup in the apply path) is still fully
-deferred (`ROADMAP.md`'s "Deferred" section) — there's no reqID field or hook
-for it yet.
+failed txn that in fact took effect; a blind retry would double-apply.
+Client-request-ID dedup stays deferred (`ROADMAP.md`'s "Deferred" section,
+issue #34) and, per the M9 forwarding design, is only ever needed if blind
+re-propose is added: a forwarded write never re-sends the same page images
+after a possibly-proposed outcome (every retry is a fresh SQL execution on
+fresher state), and `FOLLOWER_WRITES.md`'s failure matrix enumerates how
+each ambiguous path resolves — including the one case that upgrades this
+from anomaly to bug, a local publish failure *after* commit (issue #60,
+fatal by design).
 
 ---
 
