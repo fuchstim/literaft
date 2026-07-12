@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
@@ -29,6 +30,14 @@ type WALAppender struct {
 	checkpointTicker         *time.Ticker
 	checkpointThresholdPages int
 	dirtyPageCount           int
+
+	// checkpointMu serializes checkpoint(): a *sqlite3.Conn is not safe for
+	// concurrent use, and checkpoint() is called from both the background
+	// checkpointer goroutine and AppendFrames' deferred threshold checkpoint
+	// (which runs on the caller's goroutine). Overlapping WALCheckpoint calls
+	// on the shared db connection corrupt the checkpoint, silently leaving
+	// frames uncopied that a later log rewind then discards for good.
+	checkpointMu sync.Mutex
 }
 
 // Open opens (creating if necessary) the -wal and -shm files alongside the
@@ -322,5 +331,7 @@ func (a *WALAppender) runCheckpointer(interval time.Duration) {
 }
 
 func (a *WALAppender) checkpoint() {
+	a.checkpointMu.Lock()
+	defer a.checkpointMu.Unlock()
 	a.db.WALCheckpoint("main", sqlite3.CHECKPOINT_PASSIVE)
 }

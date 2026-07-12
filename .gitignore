@@ -3,3 +3,5 @@ go-sqlite3
 data
 bin
 cpuprofile
+vendor
+*.test
