@@ -325,6 +325,20 @@ size to M3's shm work.
   along the way — `walappender`'s checkpoint connection silently declined
   every `WALCheckpoint` call until primed with one prior read, so PASSIVE
   checkpointing had likely never actually run on any follower before this.
+- [**Fix: follower checkpoint data race silently corrupts the
+  db**](https://github.com/fuchstim/literaft/issues/58) — `WALAppender.checkpoint()`
+  ran `WALCheckpoint` on the shared `*sqlite3.Conn` from two goroutines with no
+  serialization: the background checkpointer ticker and the
+  `dirtyPageCount >= checkpointThresholdPages` deferred checkpoint in
+  `AppendFrames` (on hraft's Apply goroutine). A ncruces `*sqlite3.Conn` is a
+  single wazero/WASM instance and is not safe for concurrent use; overlapping
+  calls corrupt SQLite's internal `Wal` state, leaving frames uncopied that
+  `rewindLogIfBackfilled` then discards for good — the affected pages end up
+  zero in the main `.db` and `PRAGMA integrity_check` fails. Timing-dependent,
+  so it hit only one of two otherwise-identical followers under the M7
+  correctness workload. Fixed by guarding `checkpoint()` with a mutex. Found
+  with the new `cmd/dbdiff` page-level db comparison tool, added in the same
+  pass.
 
 ## M8 — Library polish & packaging
 
