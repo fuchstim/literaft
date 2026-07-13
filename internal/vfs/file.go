@@ -235,10 +235,33 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	// pgno-mismatched) header offset belongs to a new transaction.
 	f.txnDone = true
 
+	// Past this point the gate has committed the transaction cluster-wide,
+	// and this node's own FSM.Apply has already consumed its skip marker
+	// (hraft delivers each committed index exactly once). If flushing the
+	// withheld commit frame now fails, SQLite rolls the transaction back
+	// locally and mxFrame never advances -- but the entry is committed for
+	// the cluster and will never be redelivered to this node's Apply, so it
+	// would silently and permanently lack its own committed write while
+	// continuing to serve reads and propose new writes on the deficient
+	// state. There is no local recovery: fail fatally, matching FSM.Apply's
+	// contract, so the process restarts and reconverges via hraft's
+	// snapshot-restore + log replay (both carry full page images).
+	//
+	// SQLite's own subsequent publish (growing the wal-index in
+	// walIndexAppend, then advancing mxFrame in walIndexWriteHdr) can fail
+	// the same way, but runs inside the engine through the opaque
+	// SharedMemory interface with no VFS callback at that point, so it can't
+	// be escalated here; those paths are memory writes into an
+	// already-mapped shm and a boundary-only mmap extend, far less likely
+	// than a disk write.
 	if _, err := f.File.WriteAt(pending.headerRaw[:], pending.offset); err != nil {
-		return 0, err
+		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame header at WAL offset %d after RAFT commit: %v", pending.offset, err))
 	}
-	return f.File.WriteAt(p, off)
+	n, err := f.File.WriteAt(p, off)
+	if err != nil {
+		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame page image at WAL offset %d after RAFT commit: %v", off, err))
+	}
+	return n, nil
 }
 
 var (
