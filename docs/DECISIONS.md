@@ -11,7 +11,9 @@ unnecessary constraint, the rejected-alternatives section is usually the answer.
 > updated to match, but the decisions themselves are unchanged. ADR-011
 > through ADR-013 document what that restructuring changed, including a
 > regression it introduced and its fix. ADR-014 documents a later, separate
-> split of `raftgate.Gate` away from hraft itself.
+> split of `raftgate.Gate` away from hraft itself. ADR-015 (2026-07)
+> accepts a follower-write forwarding design, partially updating the
+> status of ADR-007/ADR-008 — see the status notes on those entries.
 
 ---
 
@@ -126,6 +128,13 @@ snapshot-restore + replay. See `DESIGN.md §durability`.
 
 ## ADR-007 — For now, reject all follower-originated writes  *(current scope)*
 
+> **Status update (2026-07):** rejection remains the shipped behavior and
+> the default, but "no forwarding, ever" is no longer the whole story — a
+> design for forwarding follower-computed writes *without* OCC was accepted
+> as ADR-015 (`FOLLOWER_WRITES.md`, milestone M9, issue #32). It is opt-in
+> via an alternative `LogAdapter` and not yet built; until M9 ships, this
+> ADR describes reality.
+
 **Decision.** A client write on a follower returns an error + leader hint; the
 client redirects. No forwarding, no OCC. This is the current milestone's scope.
 
@@ -142,7 +151,12 @@ construction), or run the whole transaction on the leader. Neither needs OCC.
 
 ## ADR-008 — Deferred: forwarding follower-computed writes + OCC design
 
-**Status: DEFERRED.** Captured so we don't re-derive it. Revisit only if leader
+**Status: DEFERRED for steps 2–4 (the OCC apparatus) — step 1 adopted.**
+The base-index compare-and-swap sketched as step 1 below was accepted, with
+a serialization discipline that answers this ADR's own objection to it, as
+ADR-015 / `FOLLOWER_WRITES.md` (milestone M9). Everything from step 2 on —
+per-page versions, read-set validation, `xFetch` capture, the in-flight
+overlay — stays deferred with the original trigger: revisit only if leader
 SQL-execution CPU is measurably the bottleneck *and* local reads inside
 interactive transactions are needed — a narrow intersection. In most
 RAFT-SQLite systems fsync + replication dominate and this never pays off.
@@ -525,3 +539,74 @@ verify without any raft cluster at all: proto-encoding of a captured
 transaction, the self-skip marker's transience (proven against a real
 `fsm.FSM`, no raft involved), `LastRejection` bookkeeping, and that
 `Gate`'s own error-wrapping preserves `errors.As`/`errors.Is` discoverability.
+
+---
+
+## ADR-015 — Follower-computed writes via a base-index check; OCC still rejected
+
+**Status: ACCEPTED (design only — milestone M9, issue #32; not yet built).**
+The full protocol reference is `FOLLOWER_WRITES.md`; this entry records the
+decision and what was rejected.
+
+**Decision.** Adopt ADR-008's **step 1** — forward a follower's captured
+page images to the leader together with the base index they were computed
+on; the leader proposes them to RAFT iff that base equals its own last
+applied index — and *nothing past step 1*. The acceptance check is made
+sound (equivalent to the log-head comparison ADR-008 required) by three
+existing structures rather than new machinery: the `Ready` drain (a `Ready`
+leader has no uncommitted or committed-unapplied data entries), the leader's
+own `WAL_WRITE_LOCK` serializing *all* proposals — local writers hold it
+natively, the forward handler holds it explicitly **across the raft
+round-trip until the leader's own FSM applied the entry** (releasing earlier
+re-opens ADR-008's lost-update window, because a local writer's
+`BUSY_SNAPSHOT` check only sees locally *published* state) — and an
+FSM-owned `lastApplied` counter that never trails published state except
+under the publisher's held lock. Opt-in surface: an alternative
+`raftgate.LogAdapter` (`log.ForwardingLog` wrapping `log.SingleWriterLog` +
+a caller-supplied `log.LeaderTransport`); gate, vfs write path, entry wire
+format, and `driver.New` unchanged.
+
+**Why accept the ~100% abort rate under concurrency that ADR-008 used as
+the argument against this shape.** ADR-008 was weighing step 1 as a
+*throughput* feature and correctly found it useless for that — under
+contention every forward stales. This ADR accepts it as a *capability*
+feature: occasional or low-contention writes no longer need client-side
+redirect plumbing, while the performance model stays "write on the leader."
+The price is confined to the proposals that lose.
+
+**Rejected (again): steps 2–4 of ADR-008** — per-page version pagemap,
+read-set validation, `xFetch` capture, in-flight overlay. Unchanged
+reasoning, unchanged revisit trigger; see ADR-008's status note.
+
+**Rejected: SQL/statement forwarding as the mechanism here.** It remains
+the *right* answer for interactive transactions (ADR-009, Models A/C) and
+needs none of this — but it re-executes on the leader, which is exactly the
+cost this design exists to avoid for already-computed single-shot writes.
+The two are complementary, not competing.
+
+**Rejected: comparing against hraft's `AppliedIndex()`.** It advances when
+a batch is dispatched to the FSM goroutine, before `FSM.Apply` runs
+(vendored `api.go` says so outright), so it can lead the local database.
+The FSM must own its own counter, advanced under the write lock.
+
+**Consequences.**
+- The snapshot stream gains a small versioned header carrying the
+  snapshot's raft index — hraft never passes `meta.Index` to `FSM.Restore`,
+  and without it a restored-then-quiet follower would stamp stale bases
+  forever. Old headerless snapshots are rejected (clean-slate precedent,
+  same stance as issue #42's wire-format change).
+- A local publish failure *after* RAFT commit becomes **fatal by design**
+  (issue #60) — the review of this design found that path silently diverges
+  a node *today*, and forwarding would amplify it into a cluster-wide lost
+  update via the base stamp.
+- The skip marker (ADR-011) grows into a three-state CAS
+  (pending/consumed/abandoned) with a consumed-obligates-publish rule; the
+  gate's transient set/clear call sites are untouched.
+- No client-request-ID dedup is needed (narrowing issue #34's premise):
+  the same page images are never re-proposed after a possibly-proposed
+  outcome — every application retry re-executes SQL on fresher state.
+- The shm write lock's OFD semantics (same-OFD acquisitions convert instead
+  of excluding; same-OFD unlock releases the whole OFD's claim) become
+  load-bearing: the leader-side handler is the first second-in-process
+  acquirer, so the new lock-loan API fronts the OS lock with an in-process
+  mutex and suppresses the appender's own lock/unlock under a loan.

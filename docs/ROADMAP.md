@@ -2,11 +2,15 @@
 
 Milestones for building the RAFT-backed SQLite VFS. Current scope: **leader
 writes + follower apply, reject all follower-originated writes** (ADR-007).
-Forwarding/OCC (ADR-008) and client transaction models (ADR-009) are deferred.
+Forwarding follower-computed writes is now *designed* (ADR-015,
+`FOLLOWER_WRITES.md`) and scheduled as M9 below — not built; rejection stays
+the shipped behavior until M9 lands. Page-level OCC (ADR-008 steps 2–4) and
+client transaction models (ADR-009) remain deferred.
 
 Each milestone should be independently testable. Don't move to conflict/RAFT
-integration before the plumbing milestones pass, and don't build any ADR-008
-machinery yet.
+integration before the plumbing milestones pass, don't start M9 machinery
+while M7 hardening is the current milestone, and never build ADR-008's OCC
+apparatus without a new decision.
 
 > **Restored/reconciled note (2026-07):** this file was deleted by the
 > "Refactor" commit (`97c63a7`) along with the rest of `docs/`, and
@@ -339,6 +343,24 @@ size to M3's shm work.
   correctness workload. Fixed by guarding `checkpoint()` with a mutex. Found
   with the new `cmd/dbdiff` page-level db comparison tool, added in the same
   pass.
+- [**Local publish failure after RAFT commit silently diverges the proposing
+  node**](https://github.com/fuchstim/literaft/issues/60) — found by the M9
+  design review (`FOLLOWER_WRITES.md`, "Prerequisites"). When
+  `Gate.ProposeTransaction` returns nil (quorum reached; this node's own
+  `FSM.Apply` already skip-applied the entry), the withheld commit-frame
+  write or SQLite's subsequent wal-index publish can still fail — SQLite
+  rolls back locally, `mxFrame` never advances, but the entry is committed
+  cluster-wide and the skip marker was consumed, so this node never
+  materializes it: permanent silent divergence, made durable and exportable
+  by a later local `FSM.Snapshot` (hraft labels it with an applied index
+  that *includes* the missing entry). Live today with no forwarding
+  involved; forwarding would amplify it into a cluster-wide lost update
+  (the diverged node stamps base indexes that include the missing entry).
+  Fix direction: any local-publish failure after commitment is fatal
+  (panic, matching `FSM.Apply`'s contract), and restart-after-that-panic
+  must converge — which requires WAL recovery at open (`walappender.Open`
+  currently refuses a non-empty `-wal` whose wal-index isn't initialized).
+  Not started.
 
 ## M8 — Library polish & packaging
 
@@ -417,24 +439,71 @@ anything outside this repo.
   still has an explicit `time.Sleep(1 * time.Second)` waiting out the
   snapshot goroutine's own timer rather than polling for it.
 
+## M9 — Follower-computed writes (write forwarding)
+
+Designed and accepted (ADR-015; the protocol reference is
+`FOLLOWER_WRITES.md`) — **not the current milestone**. M7 hardening comes
+first, and M7's `#60` is an explicit prerequisite. Rejection with a leader
+hint (ADR-007) stays the shipped behavior until this lands.
+
+- [**Follower-computed writes: forward page-image txns under a base-index
+  check**](https://github.com/fuchstim/literaft/issues/32) — allow a client
+  write transaction that lands on a follower to succeed instead of being
+  rejected: the follower's captured physical page images are forwarded to
+  the leader, which proposes them to RAFT iff they were computed on exactly
+  the leader's current applied state. Full design: `FOLLOWER_WRITES.md`
+  (ADR-015 — adopts ADR-008's "step 1" base-index compare-and-swap with the
+  serialization discipline that answers ADR-008's lost-update objection; no
+  page-level OCC, which stays deferred). Shape: `log.ForwardingLog`, an
+  alternative `raftgate.LogAdapter` wrapping `*log.SingleWriterLog` plus a
+  caller-supplied `log.LeaderTransport` (byte-blob request/response;
+  proto-encoded `ForwardRequest`/`ForwardResponse` in a new
+  `internal/raft/proto/forward.proto`), which on `NotLeaderError` forwards
+  `{entry bytes, base index}` and dual-waits — leader accept **and** local
+  skip-marker consumption — before returning (read-your-writes on the
+  originating node); an `fsm.FSM`-owned `lastApplied` counter (hraft's
+  `AppliedIndex()` advances at dispatch, before `FSM.Apply` runs, so it
+  can't be used), advanced under the WAL write lock and initialized on
+  `Restore` from a new versioned snapshot-stream header; a leader-side
+  handler that holds the leader's `WAL_WRITE_LOCK` across the raft
+  round-trip via a new loaned-lock walappender API (in-process mutex
+  fronting the OFD lock, which doesn't self-exclude within a process);
+  and the skip marker grown into a three-state CAS (pending → consumed |
+  abandoned) with a consumed-obligates-publish rule — gate, vfs, entry
+  wire format, and `driver.New` all unchanged. Rejections that never
+  proposed surface as retryable `sqlite3.BUSY`-tagged errors; the same
+  page blob is never re-proposed after a possibly-proposed outcome, so no
+  request-ID dedup is needed (see `#34`). Done when: a 3-node
+  `testutils.TCPCluster` wired with the forwarding adapter accepts writes
+  through follower connections, stays byte-identical to a plain SQLite db
+  under `integration/correctness_test.go`'s workload extended with
+  follower-originated writers (external unmodified-VFS reader bar
+  included), and survives the design's failure matrix (leadership churn
+  mid-forward, ambiguous outcomes, `InstallSnapshot` during an in-flight
+  forward) without divergence. Not started.
+
 ---
 
 ## Deferred (do NOT build under current scope)
 
-- **Forwarding follower-computed writes + OCC** — [issue #32](https://github.com/fuchstim/literaft/issues/32),
-  `DECISIONS.md` ADR-008. The read-set-at-`xFetch` capture, per-page version
-  pagemap, in-flight overlay, and validation engine. Revisit only if leader
-  SQL-exec CPU is proven to be the bottleneck *and* local reads inside
-  interactive txns are required.
+- **Page-level OCC** — `DECISIONS.md` ADR-008 steps 2–4; *no dedicated
+  issue* — issue #32 was repurposed (2026-07) for the accepted M9 forwarding
+  design, which deliberately excludes all of this. The read-set-at-`xFetch`
+  capture, per-page version pagemap, in-flight overlay, and validation
+  engine. Revisit only if leader SQL-exec CPU is proven to be the bottleneck
+  *and* local reads inside interactive txns are required.
 - **Client transaction models** — [issue #33](https://github.com/fuchstim/literaft/issues/33),
   `DECISIONS.md` ADR-009. Single-shot SQL forwarding first (no OCC); Model A
   (whole-txn-on-leader) for interactive; Model C (packaged txns) as the
   robust option; Model B == the OCC design.
 - **Client-request-ID dedup** for ambiguous-commit — [issue #34](https://github.com/fuchstim/literaft/issues/34).
-  Needed once forwarding exists. Unlike an earlier draft of `DESIGN.md`/
-  `DECISIONS.md`, there is currently no reqID field anywhere in the entry
-  format to build on — this needs to be added from scratch when forwarding
-  is built, not merely wired up.
+  Premise narrowed by the M9 forwarding design (`FOLLOWER_WRITES.md`,
+  ADR-015): forwarding as designed never re-proposes the same page images
+  after a possibly-proposed outcome, so it needs no dedup — this becomes
+  necessary only if blind re-propose of ambiguous outcomes is ever added.
+  There is currently no reqID field anywhere in the entry format to build
+  on (an earlier draft of `DESIGN.md`/`DECISIONS.md` claimed otherwise); it
+  would need to be added from scratch, not merely wired up.
 - **Linearizable reads** (leader lease / RAFT read-index) — [issue #35](https://github.com/fuchstim/literaft/issues/35).
   RAFT-side, add when a use case needs it.
 - ~~**Refactor `internal/node` to consume `driver/`**~~ — [issue #37](https://github.com/fuchstim/literaft/issues/37)

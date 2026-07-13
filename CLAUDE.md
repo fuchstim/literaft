@@ -95,10 +95,12 @@ remaining flakes — see `docs/ROADMAP.md`).
 
 **Scope decision for now:** *reject all follower-originated writes.* A client
 write that lands on a follower returns an error with a leader hint; the client
-redirects. Forwarding follower-computed writes to the leader (and the OCC
-machinery that would make it safe) is **explicitly deferred** — see
-`docs/DECISIONS.md` ADR-007/008 and `docs/ROADMAP.md`. Do not build read-set
-capture or the OCC pagemap yet.
+redirects. Forwarding follower-computed writes now has an **accepted design**
+— a whole-db base-index check, no OCC — in `docs/FOLLOWER_WRITES.md`
+(ADR-015, milestone M9, issue #32), but it is **not built**: rejection stays
+the shipped behavior, and M9 machinery isn't started while M7 is current.
+The OCC apparatus (read-set capture, per-page version pagemap) remains fully
+deferred — see `docs/DECISIONS.md` ADR-007/008. Do not build it.
 
 Note this still leaves **follower apply** in scope: followers must materialize
 committed RAFT entries into their local `-wal` + wal-index to stay current and
