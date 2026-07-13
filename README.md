@@ -176,14 +176,22 @@ go build -o literaft ./cmd/literaft
 # request is forwarded to the current leader, which adds the node as a voter.
 ./literaft -id node2 -bind 127.0.0.1:9002 -data-dir ./data/node2 -db ./data/node2/db.sqlite \
   -join 127.0.0.1:9001
+
+# Decommission a node for good (removes it from the configuration via any
+# member, forwarded to the leader). This is separate from stopping a node.
+./literaft -leave -id node2 -join 127.0.0.1:9001
 ```
 
 The raft transport and the membership control plane share one gRPC server per
-node, so `-bind` is the only address a node exposes. On shutdown a node asks
-the leader to drop it from the configuration (a `RemoveVoter` gRPC call, itself
-forwarded to the leader if sent elsewhere) so the cluster removes it promptly
-instead of waiting to time it out. The leader's REPL also has
-`.addvoter <id> <address>` for adding a member by hand.
+node, so `-bind` is the only address a node exposes. Membership is **durable**:
+an ordinary shutdown leaves the configuration untouched, so restarting a node
+(a new binary, a crash) brings it back automatically — it's still a voter, and
+the leader resumes replicating to it. If a node comes back at a *different*
+address, it re-announces itself on startup — through any reachable member, or
+the `-join` hint if given — so the leader learns the new address and
+reconnects. Removing a node is therefore an explicit act (`-leave`, or
+`RemoveVoter` over gRPC), not a side effect of stopping the process. The
+leader's REPL also has `.addvoter <id> <address>` for adding a member by hand.
 
 ## Further reading
 

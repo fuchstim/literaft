@@ -49,8 +49,7 @@ func Join(ctx context.Context, joinAddr, id, selfAddr string, dialOptions []grpc
 }
 
 // Leave asks the member at addr to remove id from the cluster, forwarded to
-// the leader as needed. A node calls this for its own id on shutdown; it's
-// best-effort, so callers bound it with a short ctx and tolerate failure.
+// the leader as needed.
 func Leave(ctx context.Context, addr, id string, dialOptions []grpc.DialOption) error {
 	conn, err := grpc.NewClient(addr, dialOptions...)
 	if err != nil {

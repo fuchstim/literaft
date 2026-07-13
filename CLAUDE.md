@@ -182,7 +182,11 @@ this file's context — update it *from* GitHub, not the other way around.
                                      node's gRPC server with the raft transport;
                                      AddVoter/RemoveVoter forward to the leader,
                                      so a joining node needs only any member's
-                                     address. Used by cmd/literaft's -join.
+                                     address. Used by cmd/literaft's -join and
+                                     -leave. Membership is durable: shutdown
+                                     never removes a node (restart rejoins on its
+                                     own, re-announcing via a peer if its address
+                                     changed); -leave is the explicit decommission.
     testutils/                    – test-only cluster harnesses (in-memory and
                                      real TCP+raftsqlite), used by _test.go files
                                      across the module
