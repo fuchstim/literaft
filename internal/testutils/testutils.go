@@ -161,6 +161,7 @@ type options struct {
 	trailingLogs      uint64
 	logOutput         io.Writer
 	onDiskRaftStore   bool
+	forwarding        bool
 }
 
 func defaultOptions() options {
@@ -207,6 +208,15 @@ func WithLogOutput(w io.Writer) Option {
 // the node hanging forever afterward, not a clean error.
 func WithOnDiskRaftStore() Option {
 	return func(o *options) { o.onDiskRaftStore = true }
+}
+
+// WithForwarding (NewTCPCluster only) makes every node's driver adapter a
+// log.ForwardingLog wrapping its SingleWriterLog, routing follower-originated
+// writes to the leader over an in-process InmemForwardHub. Follower
+// connections then accept writes (under the base-index check) instead of
+// rejecting them.
+func WithForwarding() Option {
+	return func(o *options) { o.forwarding = true }
 }
 
 // fastRaftConfig shrinks hraft's election/heartbeat timing so
