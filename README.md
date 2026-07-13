@@ -70,10 +70,10 @@ func main() {
 	}
 	defer f.Close()
 
-	// Standard hraft wiring. A real deployment uses raft.NewTCPTransport
-	// and a persistent LogStore/StableStore (this repo's own raftsqlite
-	// package, or raft-boltdb) instead of the in-memory ones below --
-	// see cmd/literaft/main.go for that version.
+	// Standard hraft wiring. A real deployment uses a network transport and
+	// a persistent LogStore/StableStore (this repo's own raftsqlite package,
+	// or raft-boltdb) instead of the in-memory ones below -- see
+	// cmd/literaft/main.go, which runs raft over a gRPC transport.
 	addr, transport := hraft.NewInmemTransport("")
 	config := hraft.DefaultConfig()
 	config.LocalID = hraft.ServerID("node-1")
@@ -161,23 +161,37 @@ block on the RAFT round-trip; only commits do.
 ## Running a real cluster
 
 [`cmd/literaft`](cmd/literaft) is a complete node process built on the same
-four pieces above, with a real TCP transport, an on-disk
-[`raftsqlite`](raftsqlite) log/stable store, file-based snapshots, and an
-interactive SQL REPL for exercising a running node by hand:
+four pieces above, with a gRPC transport
+([`raft-grpc-transport`](https://github.com/Jille/raft-grpc-transport)), an
+on-disk [`raftsqlite`](raftsqlite) log/stable store, file-based snapshots, and
+an interactive SQL REPL for exercising a running node by hand:
 
 ```sh
 go build -o literaft ./cmd/literaft
 
-# First node bootstraps the cluster.
-./literaft -id node1 -bind 127.0.0.1:9001 -data-dir ./data/node1 -db ./data/node1/db.sqlite \
-  -bootstrap -peers node1=127.0.0.1:9001
+# The first node bootstraps a new single-node cluster (no -join).
+./literaft -id node1 -bind 127.0.0.1:9001 -data-dir ./data/node1 -db ./data/node1/db.sqlite
 
-# Additional nodes start without -bootstrap, then join via the leader's REPL.
-./literaft -id node2 -bind 127.0.0.1:9002 -data-dir ./data/node2 -db ./data/node2/db.sqlite
+# Each additional node joins through any existing member's address. The join
+# request is forwarded to the current leader, which adds the node as a voter.
+./literaft -id node2 -bind 127.0.0.1:9002 -data-dir ./data/node2 -db ./data/node2/db.sqlite \
+  -join 127.0.0.1:9001
+
+# Decommission a node for good (removes it from the configuration via any
+# member, forwarded to the leader). This is separate from stopping a node.
+./literaft -leave -id node2 -join 127.0.0.1:9001
 ```
 
-On node1's REPL, add node2 to the cluster with `.addvoter node2 127.0.0.1:9002`
-(a thin wrapper over `raft.AddVoter`).
+The raft transport and the membership control plane share one gRPC server per
+node, so `-bind` is the only address a node exposes. Membership is **durable**:
+an ordinary shutdown leaves the configuration untouched, so restarting a node
+(a new binary, a crash) brings it back automatically — it's still a voter, and
+the leader resumes replicating to it. If a node comes back at a *different*
+address, it re-announces itself on startup — through any reachable member, or
+the `-join` hint if given — so the leader learns the new address and
+reconnects. Removing a node is therefore an explicit act (`-leave`, or
+`RemoveVoter` over gRPC), not a side effect of stopping the process. The
+leader's REPL also has `.addvoter <id> <address>` for adding a member by hand.
 
 ## Further reading
 

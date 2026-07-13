@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package membershippb;
+
+option go_package = "github.com/fuchstim/literaft/internal/membership/proto;membershippb";
+
+// Membership is the cluster join/leave control plane. It runs on every node's
+// gRPC server, alongside the raft transport. Any node accepts an AddVoter or
+// RemoveVoter call; a node that isn't the leader forwards it, unchanged, to
+// the current leader over the same RPC. A joining node therefore only needs
+// the address of one existing member, not the leader's.
+service Membership {
+  rpc AddVoter(AddVoterRequest) returns (AddVoterResponse);
+  rpc RemoveVoter(RemoveVoterRequest) returns (RemoveVoterResponse);
+}
+
+message AddVoterRequest {
+  string id = 1;      // raft server ID of the node to add
+  string address = 2; // its gRPC transport address
+}
+
+message AddVoterResponse {}
+
+message RemoveVoterRequest {
+  string id = 1; // raft server ID of the node to remove
+}
+
+message RemoveVoterResponse {}

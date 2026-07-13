@@ -14,42 +14,41 @@ func TestCmdLiteraft(t *testing.T) {
 	RunSpecs(t, "cmd/literaft Suite")
 }
 
-var _ = Describe("parsePeers", func() {
-	It("parses a comma-separated id=addr list", func() {
-		servers, err := parsePeers("a=127.0.0.1:9001,b=127.0.0.1:9002")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(servers).To(Equal([]raft.Server{
-			{Suffrage: raft.Voter, ID: "a", Address: "127.0.0.1:9001"},
-			{Suffrage: raft.Voter, ID: "b", Address: "127.0.0.1:9002"},
-		}))
+var _ = Describe("reannounceTargets", func() {
+	servers := []raft.Server{
+		{Suffrage: raft.Voter, ID: "n1", Address: "10.0.0.1:9000"},
+		{Suffrage: raft.Voter, ID: "n2", Address: "10.0.0.2:9000"},
+		{Suffrage: raft.Voter, ID: "n3", Address: "10.0.0.3:9000"},
+	}
+
+	It("does nothing when our address is unchanged", func() {
+		changed, targets := reannounceTargets(servers, "n2", "10.0.0.2:9000", "")
+		Expect(changed).To(BeFalse())
+		Expect(targets).To(BeNil())
 	})
 
-	It("trims surrounding whitespace around each peer", func() {
-		servers, err := parsePeers(" a=127.0.0.1:9001 , b=127.0.0.1:9002 ")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(servers).To(Equal([]raft.Server{
-			{Suffrage: raft.Voter, ID: "a", Address: "127.0.0.1:9001"},
-			{Suffrage: raft.Voter, ID: "b", Address: "127.0.0.1:9002"},
-		}))
+	It("does nothing when we aren't in the configuration", func() {
+		changed, targets := reannounceTargets(servers, "n9", "10.0.0.9:9000", "")
+		Expect(changed).To(BeFalse())
+		Expect(targets).To(BeNil())
 	})
 
-	It("rejects an empty peer list", func() {
-		_, err := parsePeers("")
-		Expect(err).To(HaveOccurred())
+	It("targets the other members when our address changed", func() {
+		changed, targets := reannounceTargets(servers, "n2", "10.9.9.9:9000", "")
+		Expect(changed).To(BeTrue())
+		Expect(targets).To(Equal([]string{"10.0.0.1:9000", "10.0.0.3:9000"}))
 	})
 
-	It("rejects a peer missing '='", func() {
-		_, err := parsePeers("a127.0.0.1:9001")
-		Expect(err).To(HaveOccurred())
+	It("puts the -join hint first when given", func() {
+		changed, targets := reannounceTargets(servers, "n2", "10.9.9.9:9000", "seed:9000")
+		Expect(changed).To(BeTrue())
+		Expect(targets).To(Equal([]string{"seed:9000", "10.0.0.1:9000", "10.0.0.3:9000"}))
 	})
 
-	It("rejects a peer with an empty id", func() {
-		_, err := parsePeers("=127.0.0.1:9001")
-		Expect(err).To(HaveOccurred())
-	})
-
-	It("rejects a peer with an empty address", func() {
-		_, err := parsePeers("a=")
-		Expect(err).To(HaveOccurred())
+	It("reports the change but has no targets for a lone moved node", func() {
+		lone := []raft.Server{{Suffrage: raft.Voter, ID: "n1", Address: "10.0.0.1:9000"}}
+		changed, targets := reannounceTargets(lone, "n1", "10.9.9.9:9000", "")
+		Expect(changed).To(BeTrue())
+		Expect(targets).To(BeEmpty())
 	})
 })
