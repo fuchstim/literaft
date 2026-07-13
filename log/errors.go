@@ -32,3 +32,58 @@ type CatchingUpError struct{}
 func (CatchingUpError) Error() string {
 	return "elected leader but still draining the apply backlog"
 }
+
+// EnqueueTimeoutError means a proposal timed out before it entered the raft
+// log: it definitively did NOT enter the log, so a caller may report a clean
+// rejection.
+type EnqueueTimeoutError struct{ Err error }
+
+func (e *EnqueueTimeoutError) Error() string {
+	return "proposal not enqueued before timeout: " + e.Err.Error()
+}
+func (e *EnqueueTimeoutError) Unwrap() error { return e.Err }
+
+// AmbiguousError means a proposal's outcome is unknown -- it may or may not
+// have committed (e.g. leadership lost mid-flight). Must be treated as
+// possibly-committed; a blind retry could double-apply.
+type AmbiguousError struct{ Err error }
+
+func (e *AmbiguousError) Error() string {
+	return "proposal outcome ambiguous: " + e.Err.Error()
+}
+func (e *AmbiguousError) Unwrap() error { return e.Err }
+
+// StaleBaseError means a forwarded write lost to a concurrent write: its base
+// index no longer equals the leader's applied index. Retryable -- re-run the
+// transaction to recompute on fresher state. LeaderLastApplied is a
+// diagnostic (the leader's applied index at rejection time).
+type StaleBaseError struct{ LeaderLastApplied uint64 }
+
+func (e *StaleBaseError) Error() string {
+	return "forwarded write rejected: base index is stale (a concurrent write won)"
+}
+
+// ForwardBusyError means the leader could not admit a forwarded write in time
+// (write lock or enqueue). Retryable.
+type ForwardBusyError struct{ Reason string }
+
+func (e *ForwardBusyError) Error() string {
+	if e.Reason == "" {
+		return "forwarded write rejected: leader busy"
+	}
+	return "forwarded write rejected: leader busy (" + e.Reason + ")"
+}
+
+// AmbiguousForwardError means a forwarded write was (or may have been)
+// proposed but its outcome wasn't confirmed before the timeout. NOT retryable
+// as-is: the write may still commit and materialize later, so treat it as
+// at-least-once (re-run only logic safe under that, or check state first).
+type AmbiguousForwardError struct{ Err error }
+
+func (e *AmbiguousForwardError) Error() string {
+	if e.Err == nil {
+		return "forwarded write outcome ambiguous"
+	}
+	return "forwarded write outcome ambiguous: " + e.Err.Error()
+}
+func (e *AmbiguousForwardError) Unwrap() error { return e.Err }

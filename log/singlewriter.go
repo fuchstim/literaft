@@ -1,6 +1,7 @@
 package log
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -63,6 +64,19 @@ func (g *SingleWriterLog) Ready() bool {
 	defer g.readyMu.RUnlock()
 
 	return g.raft.State() == raft.Leader && g.ready
+}
+
+// IsLeader reports whether this node is currently the raft leader, regardless
+// of whether it has finished draining.
+func (g *SingleWriterLog) IsLeader() bool {
+	return g.raft.State() == raft.Leader
+}
+
+// LeaderAddr returns the address this node currently believes is the leader
+// (empty if unknown).
+func (g *SingleWriterLog) LeaderAddr() raft.ServerAddress {
+	addr, _ := g.raft.LeaderWithID()
+	return addr
 }
 
 // watchLeadership keeps ready in sync with this node's leadership state.
@@ -155,7 +169,13 @@ func (g *SingleWriterLog) Apply(e []byte) error {
 
 	future := g.raft.Apply(e, g.timeout)
 	if err := future.Error(); err != nil {
-		return fmt.Errorf("failed to apply change: %w", err)
+		// Classify so callers can tell a definitively-not-proposed failure
+		// from an ambiguous one. An enqueue timeout never entered the log;
+		// any other failure leaves the outcome unknown.
+		if errors.Is(err, raft.ErrEnqueueTimeout) {
+			return &EnqueueTimeoutError{Err: err}
+		}
+		return &AmbiguousError{Err: err}
 	}
 
 	if resp := future.Response(); resp != nil {
