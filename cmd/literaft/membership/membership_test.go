@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/fuchstim/literaft/internal/membership"
+	"github.com/fuchstim/literaft/cmd/literaft/membership"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,7 +19,7 @@ import (
 
 func TestMembership(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "internal/membership Suite")
+	RunSpecs(t, "cmd/literaft/membership Suite")
 }
 
 var dialOptions = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
