@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package forwardpb;
+
+option go_package = "github.com/fuchstim/literaft/cmd/literaft/forward/proto;forwardpb";
+
+// Forwarding is the reference transport for write forwarding: it ships opaque
+// byte blobs from a follower to the leader. It runs on every node; only the
+// current leader accepts work through it. The payload bytes are owned by the
+// caller, not by this transport.
+service Forwarding {
+  rpc Propose(Envelope) returns (Envelope);
+}
+
+message Envelope {
+  bytes payload = 1;
+}
