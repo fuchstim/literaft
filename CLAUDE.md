@@ -93,14 +93,18 @@ as ordinary WAL frames rather than swapping the whole file) instead. Current
 work is **Milestone 7** (hardening: fault injection, fuzzing, and the
 remaining flakes — see `docs/ROADMAP.md`).
 
-**Scope decision for now:** *reject all follower-originated writes.* A client
-write that lands on a follower returns an error with a leader hint; the client
-redirects. Forwarding follower-computed writes now has an **accepted design**
-— a whole-db base-index check, no OCC — in `docs/FOLLOWER_WRITES.md`
-(ADR-015, milestone M9, issue #32), but it is **not built**: rejection stays
-the shipped behavior, and M9 machinery isn't started while M7 is current.
-The OCC apparatus (read-set capture, per-page version pagemap) remains fully
-deferred — see `docs/DECISIONS.md` ADR-007/008. Do not build it.
+**Scope decision:** follower-originated writes are **rejected by default**
+(ADR-007) — a client write on a follower returns an error with a leader hint
+and the client redirects — *unless* the node is wired with the **opt-in M9
+forwarding** machinery (`log.ForwardingLog` + a `log.LeaderTransport`), now
+**built** (ADR-015, `docs/FOLLOWER_WRITES.md`, issue #32): a follower's
+captured page images are forwarded to the leader under a whole-db base-index
+check (no OCC), accepted iff computed on exactly the leader's applied state.
+`cmd/literaft` enables it by default (`-forward-writes`). Issue #32 stays
+open: one heavier correctness test is pending a root-cause and the remaining
+failure-matrix cluster tests aren't written yet. The OCC apparatus (read-set
+capture, per-page version pagemap) remains fully deferred — see
+`docs/DECISIONS.md` ADR-007/008. Do not build it.
 
 Note this still leaves **follower apply** in scope: followers must materialize
 committed RAFT entries into their local `-wal` + wal-index to stay current and

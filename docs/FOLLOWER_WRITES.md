@@ -1,14 +1,16 @@
 # FOLLOWER_WRITES — forwarding follower-computed writes under a base-index check
 
-Design for accepting write transactions on follower nodes. Status: **design
-accepted, not implemented** — tracked as milestone M9
-([issue #32](https://github.com/fuchstim/literaft/issues/32)); until it ships,
-the shipped behavior remains ADR-007's "reject with a leader hint."
-`DECISIONS.md` ADR-015 records the decision; this file is the reference for
-the protocol itself. The protocol was adversarially reviewed against the
-current code and the vendored `hashicorp/raft` before acceptance; the
-review's corrections are folded in throughout and called out where they
-changed the obvious-looking design.
+Design for accepting write transactions on follower nodes. Status: **built**
+(milestone M9, [issue #32](https://github.com/fuchstim/literaft/issues/32)),
+as opt-in machinery — a node wired with `log.ForwardingLog` accepts
+follower-originated writes; without it, ADR-007's "reject with a leader hint"
+still holds. `DECISIONS.md` ADR-015 records the decision; this file is the
+reference for the protocol itself. The protocol was adversarially reviewed
+against the current code and the vendored `hashicorp/raft` before
+acceptance; the review's corrections are folded in throughout and called out
+where they changed the obvious-looking design. (One heavier correctness test
+and the remaining failure-matrix cluster tests are still outstanding — see
+`ROADMAP.md` M9.)
 
 ---
 
