@@ -1,11 +1,13 @@
 package fsm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
@@ -15,6 +17,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Must not implement hraft's BatchingFSM: forwarded-write acceptance relies on
+// each entry's future resolving only after that same entry's Apply, which a
+// batching apply would not preserve.
 var _ raft.FSM = (*FSM)(nil)
 
 type FSM struct {
@@ -25,13 +30,48 @@ type FSM struct {
 	walAppender *walappender.WALAppender
 	snapshotter *snapshotter.Snapshotter
 
-	// skipEntriesMu guards skipEntries: SkipEntry/UnskipEntry run on the
-	// proposing goroutine (raftgate.Gate.proposeTransaction), while Apply
-	// runs on hraft's own apply goroutine -- an unsynchronized map access
-	// from both would be a data race.
+	// lastApplied is the raft index of the last command entry materialized
+	// into this node's local database. It is advanced under the WAL write
+	// lock, or at skip-marker consumption, and set (including downward) from
+	// the snapshot header on Restore. Not raft's own applied index, which
+	// advances at dispatch, before Apply runs. Atomic only for a clean
+	// cross-goroutine read; the file-lock serialization is what keeps the
+	// value exact.
+	lastApplied atomic.Uint64
+
+	// skipEntriesMu guards skipEntries: the proposing goroutine mutates it,
+	// the apply goroutine reads and consumes it.
 	skipEntriesMu sync.Mutex
-	skipEntries   map[string]struct{}
+	skipEntries   map[string]*skipEntry
+
+	// loansMu guards loans (id -> held WAL write lock). A separate, short-held
+	// lock, never the write lock a forward handler holds across its round
+	// trip: Apply must look a loan up while that handler is still blocked, so
+	// sharing the held lock here would deadlock.
+	loansMu sync.Mutex
+	loans   map[string]*walappender.HeldLock
 }
+
+// skipEntry tracks one in-flight self-proposal so its outcome can be decided
+// by whichever proves commitment first: the transport response or local
+// marker consumption.
+type skipEntry struct {
+	state skipState
+	// done is closed exactly once, when state becomes consumed.
+	done chan struct{}
+}
+
+type skipState int
+
+const (
+	// pending: marker created, entry not yet applied. consumed: applied while
+	// pending, materialization skipped, and this node must publish it via its
+	// own write path. abandoned: the proposer gave up before consumption, so
+	// the entry -- if it ever arrives -- is materialized normally.
+	skipPending skipState = iota
+	skipConsumed
+	skipAbandoned
+)
 
 func New(dbPath string, opts ...Option) (*FSM, error) {
 	if dbPath == "" {
@@ -101,7 +141,8 @@ func New(dbPath string, opts ...Option) (*FSM, error) {
 		walAppender: walAppender,
 		snapshotter: snapshotter,
 
-		skipEntries: make(map[string]struct{}),
+		skipEntries: make(map[string]*skipEntry),
+		loans:       make(map[string]*walappender.HeldLock),
 	}, nil
 }
 
@@ -117,16 +158,106 @@ func (f *FSM) PageSize() uint32 {
 	return f.pageSize
 }
 
+// LastApplied returns the raft index of the last entry materialized into this
+// node's local database.
+func (f *FSM) LastApplied() uint64 {
+	return f.lastApplied.Load()
+}
+
+// SkipEntry registers an in-flight self-proposal's marker (pending),
+// immediately before the proposing call.
 func (f *FSM) SkipEntry(id string) {
 	f.skipEntriesMu.Lock()
 	defer f.skipEntriesMu.Unlock()
-	f.skipEntries[id] = struct{}{}
+	f.skipEntries[id] = &skipEntry{state: skipPending, done: make(chan struct{})}
 }
 
+// UnskipEntry deletes the marker whatever its terminal state -- bookkeeping,
+// run once the proposing call has fully resolved.
 func (f *FSM) UnskipEntry(id string) {
 	f.skipEntriesMu.Lock()
 	defer f.skipEntriesMu.Unlock()
 	delete(f.skipEntries, id)
+}
+
+// AwaitEntryApplied blocks until id's marker is consumed (returns nil), or
+// until ctx expires. On expiry it resolves the marker: an already-consumed
+// one still returns nil (commitment proven locally, so the txn must publish);
+// a still-pending one becomes abandoned and returns ctx.Err(), so the entry,
+// if it ever arrives, is materialized normally rather than double-published.
+func (f *FSM) AwaitEntryApplied(ctx context.Context, id string) error {
+	f.skipEntriesMu.Lock()
+	e := f.skipEntries[id]
+	f.skipEntriesMu.Unlock()
+	if e == nil {
+		return fmt.Errorf("no in-flight proposal with id %s", id)
+	}
+
+	select {
+	case <-e.done:
+		return nil
+	case <-ctx.Done():
+		f.skipEntriesMu.Lock()
+		defer f.skipEntriesMu.Unlock()
+		if e.state == skipConsumed {
+			// Consumed between ctx firing and this lock: consumed wins.
+			return nil
+		}
+		e.state = skipAbandoned
+		return ctx.Err()
+	}
+}
+
+// BeginHeldApply acquires this node's WAL write lock and registers a loan
+// under id, so Apply materializes the accepted forwarded entry under that
+// same lock rather than re-acquiring it (which would deadlock against a
+// caller holding it across a round trip). release is mandatory on every path:
+// it deregisters the loan and releases the lock.
+func (f *FSM) BeginHeldApply(ctx context.Context, id string) (func(), error) {
+	h, err := f.walAppender.AcquireWriteLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	f.loansMu.Lock()
+	f.loans[id] = h
+	f.loansMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.loansMu.Lock()
+			delete(f.loans, id)
+			f.loansMu.Unlock()
+			h.Release()
+		})
+	}, nil
+}
+
+// tryConsumeSkip consumes a pending marker for id: it skips materialization,
+// advances lastApplied to index (the proposer still holds the write lock at
+// this point), signals waiters, and returns true. A missing or abandoned
+// marker returns false, so Apply materializes the entry normally.
+func (f *FSM) tryConsumeSkip(id string, index uint64) bool {
+	f.skipEntriesMu.Lock()
+	defer f.skipEntriesMu.Unlock()
+	e, ok := f.skipEntries[id]
+	if !ok || e.state != skipPending {
+		return false
+	}
+	e.state = skipConsumed
+	f.lastApplied.Store(index)
+	close(e.done)
+	return true
+}
+
+// takeLoan returns the held write lock loaned for id, if any. It does not
+// remove the loan; the loan's owner releases it, and only after the apply it
+// covers has run.
+func (f *FSM) takeLoan(id string) *walappender.HeldLock {
+	f.loansMu.Lock()
+	defer f.loansMu.Unlock()
+	return f.loans[id]
 }
 
 // Apply implements hraft.FSM.
@@ -149,10 +280,12 @@ func (f *FSM) Apply(log *raft.Log) any {
 		panic(fmt.Sprintf("failed to unmarshal committed entry at index %d: %v", log.Index, err))
 	}
 
-	f.skipEntriesMu.Lock()
-	_, skip := f.skipEntries[entry.GetHeader().GetId()]
-	f.skipEntriesMu.Unlock()
-	if skip {
+	index := log.Index
+	id := entry.GetHeader().GetId()
+
+	// This node's own in-flight proposal, already published via its own write
+	// path: consume the marker, don't re-materialize.
+	if f.tryConsumeSkip(id, index) {
 		return nil
 	}
 
@@ -161,18 +294,29 @@ func (f *FSM) Apply(log *raft.Log) any {
 		return nil
 	}
 
-	if err := f.walAppender.AppendTransaction(txn); err != nil {
-		panic(fmt.Sprintf("failed to append entry at index %d: %v", log.Index, err))
+	// An accepted forwarded entry whose write lock a handler is still holding
+	// across its round trip: materialize under that loaned lock.
+	if loan := f.takeLoan(id); loan != nil {
+		if err := f.walAppender.AppendTransactionUnderLock(loan, txn, func() { f.lastApplied.Store(index) }); err != nil {
+			panic(fmt.Sprintf("failed to append forwarded entry at index %d: %v", index, err))
+		}
+		return nil
+	}
+
+	// Otherwise materialize under our own write lock.
+	if err := f.walAppender.AppendTransaction(txn, func() { f.lastApplied.Store(index) }); err != nil {
+		panic(fmt.Sprintf("failed to append entry at index %d: %v", index, err))
 	}
 
 	return nil
 }
 
-// Snapshot implements hraft.FSM. It delegates the
-// actual state capture to the Snapshotter and wraps the result
-// for hraft's snapshot machinery.
+// Snapshot implements hraft.FSM. It runs serialized with Apply, so
+// lastApplied is exactly the index this snapshot's bytes reflect, and that
+// index travels in the snapshot's own header for the restoring node to
+// recover.
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
-	rc, err := f.snapshotter.Snapshot()
+	rc, err := f.snapshotter.Snapshot(f.lastApplied.Load())
 	if err != nil {
 		return nil, fmt.Errorf("failed to capture snapshot: %w", err)
 	}
@@ -180,11 +324,15 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &fsmSnapshot{rc}, nil
 }
 
-// Restore implements hraft.FSM. See Snapshot.
+// Restore implements hraft.FSM. It sets lastApplied to the snapshot's index
+// unconditionally, including downward (a restore to an older snapshot), after
+// which replay advances it forward again.
 func (f *FSM) Restore(rc io.ReadCloser) error {
-	if err := f.snapshotter.Restore(rc); err != nil {
+	index, err := f.snapshotter.Restore(rc)
+	if err != nil {
 		return fmt.Errorf("failed to restore snapshot: %w", err)
 	}
+	f.lastApplied.Store(index)
 
 	return nil
 }

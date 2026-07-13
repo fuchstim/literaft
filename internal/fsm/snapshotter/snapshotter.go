@@ -1,6 +1,7 @@
 package snapshotter
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,12 +25,15 @@ func New(dbPath string, pageSize uint32) *Snapshotter {
 }
 
 // Snapshot uses SQLite's online backup API to back the "main" database up
-// into a private temp file, then hands back a reader over that file.
-func (s *Snapshotter) Snapshot() (io.ReadCloser, error) {
+// into a private temp file, then hands back a reader over the fixed header
+// (carrying index -- the raft index this snapshot was taken at) followed by
+// that file's bytes.
+func (s *Snapshotter) Snapshot(index uint64) (io.ReadCloser, error) {
 	db, err := sqlite3.Open("file:" + s.dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database at path `%s`: %w", s.dbPath, err)
 	}
+	defer db.Close()
 
 	tmp, err := os.CreateTemp("", "literaft-snapshot-*")
 	if err != nil {
@@ -39,38 +43,60 @@ func (s *Snapshotter) Snapshot() (io.ReadCloser, error) {
 	if err := db.Backup("main", tmp.Name()); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("failed to backup up database at path `%s`: %w", s.dbPath, err),
+			tmp.Close(),
 			os.Remove(tmp.Name()),
 		)
 	}
 
-	return &tempFileReader{tmp}, nil
+	// Rewind the temp file to the start so the reader yields the header
+	// followed by the whole backup.
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("failed to rewind snapshot temp file: %w", err),
+			tmp.Close(),
+			os.Remove(tmp.Name()),
+		)
+	}
+
+	header := encodeHeader(index)
+	tf := &tempFileReader{tmp}
+	return &headeredReader{
+		Reader: io.MultiReader(bytes.NewReader(header[:]), tmp),
+		closer: tf,
+	}, nil
 }
 
-// Restore copies all of r's bytes to a temp file, then appends all of
-// its frames to the local WAL. Finally it performs a TRUNCATE checkpoint
-// to commit all WAL frames to the local .db file.
-func (b *Snapshotter) Restore(r io.Reader) error {
+// Restore reads the fixed header (returning its raft index), copies the
+// remaining bytes to a temp file, then appends all of its frames to the local
+// WAL. Finally it performs a TRUNCATE checkpoint to commit all WAL frames to
+// the local .db file.
+func (b *Snapshotter) Restore(r io.Reader) (uint64, error) {
+	index, err := decodeHeader(r)
+	if err != nil {
+		return 0, err
+	}
+
 	tmp, err := os.CreateTemp("", "literaft-restore-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
 	size, err := io.Copy(tmp, r)
 	if err != nil {
-		return fmt.Errorf("failed to copy snapshot to temp file: %w", err)
+		return 0, fmt.Errorf("failed to copy snapshot to temp file: %w", err)
 	}
 	if size == 0 {
-		return errors.New("snapshot is empty")
+		return 0, errors.New("snapshot is empty")
 	}
 	if size%int64(b.pageSize) != 0 {
-		return fmt.Errorf("snapshot is %d bytes, not a whole multiple of the page size %d", size, b.pageSize)
+		return 0, fmt.Errorf("snapshot is %d bytes, not a whole multiple of the page size %d", size, b.pageSize)
 	}
 
 	w, err := walappender.Open(b.dbPath, b.pageSize, -1, 0)
 	if err != nil {
-		return fmt.Errorf("failed to open WAL at path `%s`: %w", b.dbPath, err)
+		return 0, fmt.Errorf("failed to open WAL at path `%s`: %w", b.dbPath, err)
 	}
 	defer w.Close()
 
@@ -79,7 +105,7 @@ func (b *Snapshotter) Restore(r io.Reader) error {
 	for i := range nPages {
 		page := make([]byte, b.pageSize)
 		if _, err := tmp.ReadAt(page, int64(i)*int64(b.pageSize)); err != nil {
-			return fmt.Errorf("failed to read page %d from snapshot: %w", i+1, err)
+			return 0, fmt.Errorf("failed to read page %d from snapshot: %w", i+1, err)
 		}
 
 		if i == 0 {
@@ -88,7 +114,7 @@ func (b *Snapshotter) Restore(r io.Reader) error {
 				pageSize = 65536 // SQLite's szPage field encodes 64K pages as 1.
 			}
 			if pageSize != b.pageSize {
-				return fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
+				return 0, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
 			}
 		}
 
@@ -101,18 +127,18 @@ func (b *Snapshotter) Restore(r io.Reader) error {
 
 	// TODO: This loads the entire DB into memory which is not ideal. We should stream the frames to the WAL instead of loading them all into memory.
 	if err := w.AppendFrames(frames); err != nil {
-		return fmt.Errorf("failed to append snapshot frames to WAL: %w", err)
+		return 0, fmt.Errorf("failed to append snapshot frames to WAL: %w", err)
 	}
 
 	db, err := sqlite3.Open("file:" + b.dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to open database at path `%s`: %w", b.dbPath, err)
+		return 0, fmt.Errorf("failed to open database at path `%s`: %w", b.dbPath, err)
 	}
 	defer db.Close()
 
 	if _, _, err := db.WALCheckpoint("main", sqlite3.CHECKPOINT_TRUNCATE); err != nil {
-		return fmt.Errorf("failed to checkpoint database at path `%s`: %w", b.dbPath, err)
+		return 0, fmt.Errorf("failed to checkpoint database at path `%s`: %w", b.dbPath, err)
 	}
 
-	return nil
+	return index, nil
 }

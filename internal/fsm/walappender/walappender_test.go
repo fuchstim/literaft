@@ -202,7 +202,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -269,7 +269,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -365,7 +365,7 @@ var _ = Describe("WALAppender WAL recovery at open", func() {
 			followUp = g.entries
 		}()
 		for _, txn := range followUp {
-			Expect(appender.AppendTransaction(txn)).To(Succeed())
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed())
 		}
 		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(3)))
 		Expect(queryText(recoverConn, "PRAGMA integrity_check")).To(Equal("ok"))
@@ -393,12 +393,12 @@ var _ = Describe("WALAppender log rewind", func() {
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
 		var peak int64
 		for i, txn := range updates {
-			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying update %d", i)
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying update %d", i)
 			if size := walFileSize(followerPath); size > peak {
 				peak = size
 			}
@@ -440,10 +440,10 @@ var _ = Describe("WALAppender log rewind", func() {
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendTransaction(txn)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
-		Expect(appender.AppendTransaction(updates[0])).To(Succeed())
+		Expect(appender.AppendTransaction(updates[0], nil)).To(Succeed())
 		saltBeforeReader := walFileSalt(followerPath)
 
 		// Attach an external reader and hold a read transaction open while
@@ -460,7 +460,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// ever changes, must stay identical throughout.
 		const attachedUpdates = 8
 		for i := 1; i <= attachedUpdates; i++ {
-			Expect(appender.AppendTransaction(updates[i])).To(Succeed(), "applying update %d with reader attached", i)
+			Expect(appender.AppendTransaction(updates[i], nil)).To(Succeed(), "applying update %d with reader attached", i)
 			Expect(walFileSalt(followerPath)).To(Equal(saltBeforeReader),
 				"expected the WAL epoch to be unchanged while a reader holds an older snapshot (update %d)", i)
 		}
@@ -472,7 +472,7 @@ var _ = Describe("WALAppender log rewind", func() {
 
 		rewound := false
 		for i := attachedUpdates + 1; i < numUpdates; i++ {
-			Expect(appender.AppendTransaction(updates[i])).To(Succeed(), "applying update %d after reader release", i)
+			Expect(appender.AppendTransaction(updates[i], nil)).To(Succeed(), "applying update %d after reader release", i)
 			if walFileSalt(followerPath) != saltBeforeReader {
 				rewound = true
 			}

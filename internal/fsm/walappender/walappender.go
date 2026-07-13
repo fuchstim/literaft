@@ -1,6 +1,7 @@
 package walappender
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -19,6 +20,10 @@ const (
 	frameHeaderSize = 24
 	walMagicLE      = 0x377f0682 // low bit 0: checksums are little-endian on this (wasm) engine
 	walMaxVersion   = 3007000
+
+	// lockPollInterval bounds how often a cancellable write-lock acquisition
+	// retries the non-blocking OFD lock while waiting for a holder to release.
+	lockPollInterval = time.Millisecond
 )
 
 type WALAppender struct {
@@ -30,6 +35,14 @@ type WALAppender struct {
 	checkpointTicker         *time.Ticker
 	checkpointThresholdPages int
 	dirtyPageCount           int
+
+	// lockCh is a one-token semaphore fronting the OFD WAL_WRITE_LOCK. The OFD
+	// lock excludes SQLite's connections and other processes, but two
+	// acquisitions through this appender's single shm handle don't exclude
+	// each other (same-OFD requests convert, and any unlock releases the
+	// whole OFD's claim). This token restores intra-process exclusion once a
+	// second in-process holder exists. Lock order: token, then OS lock.
+	lockCh chan struct{}
 
 	// checkpointMu serializes checkpoint(): a *sqlite3.Conn is not safe for
 	// concurrent use, and checkpoint() is called from both the background
@@ -79,7 +92,9 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 		f:                        f,
 		shm:                      sm,
 		checkpointThresholdPages: checkpointThresholdPages,
+		lockCh:                   make(chan struct{}, 1),
 	}
+	w.lockCh <- struct{}{} // the single write-lock token starts available
 	if err := w.maybeBootstrap(); err != nil {
 		return nil, fmt.Errorf("failed to bootstrap WAL: %w", err)
 	}
@@ -104,8 +119,82 @@ func (a *WALAppender) Close() error {
 	return errors.Join(a.db.Close(), a.f.Close(), a.shm.Close())
 }
 
-// AppendTransaction appends the frames in txn to the local -wal
-func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction) error {
+// HeldLock is an acquired WAL_WRITE_LOCK (semaphore token + OFD lock). It can
+// be held across a round trip and lent to an append that runs under it
+// without re-acquiring. Release is mandatory on every path and idempotent.
+type HeldLock struct {
+	a        *WALAppender
+	released bool
+}
+
+// AcquireWriteLock takes the write lock (token, then OFD lock), honoring ctx
+// for cancellation/deadline while waiting for a current holder. A cancellable
+// ctx polls the non-blocking lock so a caller can time out; a non-cancellable
+// ctx blocks. The returned HeldLock must be Released.
+func (a *WALAppender) AcquireWriteLock(ctx context.Context) (*HeldLock, error) {
+	select {
+	case <-a.lockCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if err := a.lockOFD(ctx); err != nil {
+		a.lockCh <- struct{}{}
+		return nil, err
+	}
+	return &HeldLock{a: a}, nil
+}
+
+func (a *WALAppender) lockOFD(ctx context.Context) error {
+	if ctx.Done() == nil {
+		if err := a.shm.Lock(shm.WriteLock); err != nil {
+			return fmt.Errorf("failed to acquire WAL_WRITE_LOCK: %w", err)
+		}
+		return nil
+	}
+	for {
+		err := a.shm.TryLock(shm.WriteLock)
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("failed to acquire WAL_WRITE_LOCK before deadline: %w", ctx.Err())
+		case <-time.After(lockPollInterval):
+		}
+	}
+}
+
+// Release releases the OFD lock and returns the in-process token.
+func (h *HeldLock) Release() {
+	if h.released {
+		return
+	}
+	h.released = true
+	h.a.shm.Unlock(shm.WriteLock)
+	h.a.lockCh <- struct{}{}
+}
+
+// AppendTransaction appends txn's frames to the local -wal, acquiring and
+// releasing the write lock itself. afterCommit, if non-nil, runs under that
+// lock right after the mxFrame publish -- used to advance an applied-index
+// counter so it never leads the published state, nor (once set) trails it
+// except under this held lock.
+func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction, afterCommit func()) error {
+	return a.appendFramesSelfLocked(framesFromTransaction(txn), afterCommit)
+}
+
+// AppendTransactionUnderLock appends txn under an already-held lock: it
+// neither acquires nor releases the write lock, and skips the threshold
+// checkpoint (which would extend the hold by a full passive checkpoint -- the
+// ticker covers the debt). afterCommit runs under the held lock, as above.
+func (a *WALAppender) AppendTransactionUnderLock(h *HeldLock, txn *raftproto.Transaction, afterCommit func()) error {
+	if h == nil || h.a != a || h.released {
+		return fmt.Errorf("AppendTransactionUnderLock called without a valid held lock for this appender")
+	}
+	return a.appendFramesLocked(framesFromTransaction(txn), afterCommit)
+}
+
+func framesFromTransaction(txn *raftproto.Transaction) []*Frame {
 	frames := make([]*Frame, len(txn.Pages))
 	for i, p := range txn.Pages {
 		var nTruncate uint32
@@ -114,19 +203,21 @@ func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction) error {
 		}
 		frames[i] = NewFrame(p.Pgno, nTruncate, p.Data)
 	}
-
-	return a.AppendFrames(frames)
+	return frames
 }
 
-// AppendFrames appends fs to the local -wal
-// (computing this node's own running checksums, chained
-// from whatever's already there), updates the wal-index page-map hash
-// slots, and finally advances mxFrame with the tear-safe
-// two-copy header write. AppendFrames
-// takes WAL_WRITE_LOCK for its own duration and releases it before
-// returning, whether it succeeds or fails.
+// AppendFrames appends fs to the local -wal, acquiring and releasing the
+// write lock itself. It is the entry point for callers (e.g. snapshot
+// restore) that materialize raw frames rather than a raftproto.Transaction.
 func (a *WALAppender) AppendFrames(fs []*Frame) error {
-	// Run after SHM lock was released
+	return a.appendFramesSelfLocked(fs, nil)
+}
+
+// appendFramesSelfLocked acquires the write lock, appends, releases, and then
+// (after release) runs the threshold checkpoint if enough dirty pages have
+// accumulated.
+func (a *WALAppender) appendFramesSelfLocked(fs []*Frame, afterCommit func()) error {
+	// Run after the write lock is released.
 	defer func() {
 		if a.dirtyPageCount >= a.checkpointThresholdPages {
 			a.checkpoint()
@@ -134,11 +225,21 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 		}
 	}()
 
-	if err := a.shm.Lock(shm.WriteLock); err != nil {
-		return fmt.Errorf("failed to acquire WAL_WRITE_LOCK: %w", err)
+	h, err := a.AcquireWriteLock(context.Background())
+	if err != nil {
+		return err
 	}
-	defer a.shm.Unlock(shm.WriteLock)
+	defer h.Release()
 
+	return a.appendFramesLocked(fs, afterCommit)
+}
+
+// appendFramesLocked appends fs to the local -wal (computing this node's own
+// running checksums, chained from whatever's already there), updates the
+// wal-index page-map hash slots, advances mxFrame with the tear-safe
+// two-copy header write, and finally runs afterCommit (if non-nil). The
+// caller must already hold the write lock.
+func (a *WALAppender) appendFramesLocked(fs []*Frame, afterCommit func()) error {
 	region0, err := a.shm.Region(0)
 	if err != nil {
 		return fmt.Errorf("failed to map wal-index header page: %w", err)
@@ -191,6 +292,10 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 			hdr.change++
 			writeWALIndexHeader(region0, hdr)
 		}
+	}
+
+	if afterCommit != nil {
+		afterCommit()
 	}
 
 	return nil
