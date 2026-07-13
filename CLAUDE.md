@@ -177,6 +177,12 @@ this file's context — update it *from* GitHub, not the other way around.
                                      RAFT entry and proposes it through a
                                      raftgate.LogAdapter
         proto/                    – RAFT log entry wire format (encode/decode)
+    membership/                   – cluster join/leave control plane: a gRPC
+                                     service (membership.go + proto/) sharing the
+                                     node's gRPC server with the raft transport;
+                                     AddVoter/RemoveVoter forward to the leader,
+                                     so a joining node needs only any member's
+                                     address. Used by cmd/literaft's -join.
     testutils/                    – test-only cluster harnesses (in-memory and
                                      real TCP+raftsqlite), used by _test.go files
                                      across the module
@@ -208,6 +214,17 @@ Standard Go. The engine is pure Go (wazero), no cgo.
 ```
 go build ./...
 ```
+
+**Protobuf / gRPC codegen lives in the `Makefile`.** The `.pb.go` and
+`_grpc.pb.go` files under `internal/**/proto/` are generated from the sibling
+`.proto` with `buf` (each proto package carries a `//go:generate buf generate`
+and its own `buf.gen.yaml`) — don't hand-edit them. Regenerate everything with
+`make generate`, the single codegen entry point: it installs the pinned
+toolchain (`buf`, `protoc-gen-go`, and `protoc-gen-go-grpc` — the last is
+required for the gRPC *service* stubs, e.g. `internal/membership`) and then
+runs `go generate ./...` with that toolchain on `PATH`. Bump a tool by editing
+its version variable in the `Makefile`. A `buf.gen.yaml` that emits gRPC stubs
+must list the `protoc-gen-go-grpc` plugin in addition to `protoc-gen-go`.
 
 Run tests via the `ginkgo` CLI, not `go test ./...` directly — this repo's
 suites are Ginkgo/Gomega. `-p` is a boolean ("run in parallel with an
