@@ -111,8 +111,8 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 	// before the goroutine is scheduled.
 	if checkpointInterval > 0 {
 		w.checkpointTicker = time.NewTicker(checkpointInterval)
+		go w.runCheckpointer()
 	}
-	go w.runCheckpointer()
 
 	return w, nil
 }
@@ -439,9 +439,6 @@ func (a *WALAppender) writeWALFileHeader() ([2]uint32, [saltSize]byte, error) {
 }
 
 func (a *WALAppender) runCheckpointer() {
-	if a.checkpointTicker == nil {
-		return
-	}
 	for range a.checkpointTicker.C {
 		a.checkpoint()
 	}
