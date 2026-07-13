@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	membershippb "github.com/fuchstim/literaft/internal/membership/proto"
+	membershippb "github.com/fuchstim/literaft/cmd/literaft/membership/proto"
 )
 
 // Raft is the subset of *raft.Raft the control plane drives. *raft.Raft
