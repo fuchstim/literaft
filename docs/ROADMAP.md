@@ -1,11 +1,12 @@
 # ROADMAP
 
-Milestones for building the RAFT-backed SQLite VFS. Current scope: **leader
-writes + follower apply, reject all follower-originated writes** (ADR-007).
-Forwarding follower-computed writes is now *designed* (ADR-015,
-`FOLLOWER_WRITES.md`) and scheduled as M9 below — not built; rejection stays
-the shipped behavior until M9 lands. Page-level OCC (ADR-008 steps 2–4) and
-client transaction models (ADR-009) remain deferred.
+Milestones for building the RAFT-backed SQLite VFS. Base scope: **leader
+writes + follower apply**, with follower-originated writes rejected by
+default (ADR-007). Forwarding follower-computed writes (ADR-015,
+`FOLLOWER_WRITES.md`) is now **built** as opt-in M9 machinery
+(`log.ForwardingLog`); a node without a forwarding adapter still rejects
+follower writes. Page-level OCC (ADR-008 steps 2–4) and client transaction
+models (ADR-009) remain deferred.
 
 Each milestone should be independently testable. Don't move to conflict/RAFT
 integration before the plumbing milestones pass, don't start M9 machinery
@@ -449,10 +450,12 @@ anything outside this repo.
 
 ## M9 — Follower-computed writes (write forwarding)
 
-Designed and accepted (ADR-015; the protocol reference is
-`FOLLOWER_WRITES.md`) — **not the current milestone**. M7 hardening comes
-first, and M7's `#60` is an explicit prerequisite. Rejection with a leader
-hint (ADR-007) stays the shipped behavior until this lands.
+Designed (ADR-015; the protocol reference is `FOLLOWER_WRITES.md`) and now
+**built**. M7's `#60` prerequisite (fatal publish-after-commit) shipped
+first. Forwarding is opt-in: a node wired with `log.ForwardingLog` accepts
+follower-originated writes; without it, rejection with a leader hint
+(ADR-007) remains the behavior. `cmd/literaft` enables it by default
+(`-forward-writes`).
 
 - [**Follower-computed writes: forward page-image txns under a base-index
   check**](https://github.com/fuchstim/literaft/issues/32) — allow a client
@@ -481,14 +484,25 @@ hint (ADR-007) stays the shipped behavior until this lands.
   wire format, and `driver.New` all unchanged. Rejections that never
   proposed surface as retryable `sqlite3.BUSY`-tagged errors; the same
   page blob is never re-proposed after a possibly-proposed outcome, so no
-  request-ID dedup is needed (see `#34`). Done when: a 3-node
-  `testutils.TCPCluster` wired with the forwarding adapter accepts writes
-  through follower connections, stays byte-identical to a plain SQLite db
-  under `integration/correctness_test.go`'s workload extended with
-  follower-originated writers (external unmodified-VFS reader bar
-  included), and survives the design's failure matrix (leadership churn
-  mid-forward, ambiguous outcomes, `InstallSnapshot` during an in-flight
-  forward) without divergence. Not started.
+  request-ID dedup is needed (see `#34`). *(built)* Implemented across
+  `internal/raft/proto/forward.proto`, `fsm` (lastApplied counter,
+  three-state skip-marker CAS, loan registry, `AwaitEntryApplied` /
+  `BeginHeldApply`), `internal/fsm/walappender` (in-process-mutex-fronted OFD
+  write lock + `HeldLock`/`AppendTransactionUnderLock` loan API), the
+  snapshotter's versioned index header, `log.ForwardingLog` +
+  `LeaderTransport`/`ForwardTarget`, a reference gRPC transport
+  (`cmd/literaft/forward`), and wiring into `cmd/literaft` (`-forward-writes`,
+  default on) and `internal/testutils` (`WithForwarding`). Covered by the
+  `fsm` marker-CAS suite, the `log` follower+handler matrix, the reference
+  transport round-trip, and an `internal/testutils` end-to-end forwarding
+  test (leader accept, replicate-back, read-your-writes, external-reader
+  visibility, integrity). **Known open issue:** the heavier byte-identical
+  correctness check through follower connections
+  (`integration/correctness_test.go`) shows a rare intermittent divergence
+  under `--repeat` and is currently `PIt` (pending) until root-caused; the
+  remaining failure-matrix cluster tests (leadership churn mid-forward,
+  `InstallSnapshot` during an in-flight forward) are likewise still to be
+  added. Issue `#32` stays open until those land.
 
 ---
 

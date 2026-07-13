@@ -544,8 +544,14 @@ transaction, the self-skip marker's transience (proven against a real
 
 ## ADR-015 — Follower-computed writes via a base-index check; OCC still rejected
 
-**Status: ACCEPTED (design only — milestone M9, issue #32; not yet built).**
-The full protocol reference is `FOLLOWER_WRITES.md`; this entry records the
+**Status: ACCEPTED and BUILT (milestone M9, issue #32).** The opt-in
+forwarding machinery (`log.ForwardingLog` + `log.LeaderTransport`, the
+`fsm.FSM` lastApplied counter and three-state skip-marker CAS, the
+walappender loaned-lock API, the versioned snapshot header, and a reference
+gRPC transport) shipped; `cmd/literaft` enables it by default. One heavier
+correctness test is still pending a root-cause and the remaining
+failure-matrix cluster tests are still to be added, so `#32` stays open. The
+full protocol reference is `FOLLOWER_WRITES.md`; this entry records the
 decision and what was rejected.
 
 **Decision.** Adopt ADR-008's **step 1** — forward a follower's captured
