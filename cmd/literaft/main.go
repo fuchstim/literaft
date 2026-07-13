@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/cmd/literaft/membership"
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
@@ -53,13 +54,14 @@ func main() {
 
 func run() error {
 	var (
-		id       = flag.String("id", "", "unique ID for this node (required)")
-		bindAddr = flag.String("bind", "", "gRPC transport address to listen on, e.g. 127.0.0.1:9000 (required)")
-		dataDir  = flag.String("data-dir", "", "directory for this node's raft log/stable/snapshot store (required)")
-		dbPath   = flag.String("db", "", "path to the SQLite database file this node serves (required)")
-		joinAddr = flag.String("join", "", "address of any existing cluster member to join through; if empty, bootstrap a new single-node cluster")
-		leave    = flag.Bool("leave", false, "decommission mode: remove -id from the cluster via -join, then exit (does not start a node)")
-		logLevel = flag.String("log-level", "info", "log level (debug, info, warn, error, fatal, panic)")
+		id            = flag.String("id", "", "unique ID for this node (required)")
+		bindAddr      = flag.String("bind", "", "gRPC transport address to listen on, e.g. 127.0.0.1:9000 (required)")
+		dataDir       = flag.String("data-dir", "", "directory for this node's raft log/stable/snapshot store (required)")
+		dbPath        = flag.String("db", "", "path to the SQLite database file this node serves (required)")
+		joinAddr      = flag.String("join", "", "address of any existing cluster member to join through; if empty, bootstrap a new single-node cluster")
+		leave         = flag.Bool("leave", false, "decommission mode: remove -id from the cluster via -join, then exit (does not start a node)")
+		logLevel      = flag.String("log-level", "info", "log level (debug, info, warn, error, fatal, panic)")
+		forwardWrites = flag.Bool("forward-writes", true, "accept writes on follower connections by forwarding them to the leader under a base-index check; when false, follower writes are rejected with a leader hint")
 	)
 	flag.Parse()
 
@@ -158,9 +160,21 @@ func run() error {
 	reg.add(func() error { return r.Shutdown().Error() })
 
 	// The membership service shares the raft transport's gRPC server, so a
-	// joining node reaches it at the same -bind address. Both services must be
+	// joining node reaches it at the same -bind address. All services must be
 	// registered before Serve.
 	membership.NewServer(r, dialOptions).Register(grpcServer)
+
+	// The write-forwarding transport shares that same gRPC server too, so a
+	// leader's forward address is just its -bind address (identity resolver).
+	// Registered here even though its handler is wired later; a request
+	// arriving before then is answered Unavailable.
+	var fwdTransport *forward.Transport
+	if *forwardWrites {
+		fwdTransport = forward.New(func(a raft.ServerAddress) string { return string(a) }, dialOptions)
+		fwdTransport.Register(grpcServer)
+		reg.add(fwdTransport.Close)
+	}
+
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
 			logger.Error("gRPC server stopped", zap.Error(err))
@@ -201,7 +215,13 @@ func run() error {
 	l := log.NewSingleWriterLog(r)
 	reg.add(func() error { l.Close(); return nil })
 
+	// With forwarding enabled, the driver's adapter forwards a follower's
+	// write to the leader over fwdTransport; otherwise l is used directly and
+	// follower writes are rejected.
 	d := driver.New(f, l)
+	if *forwardWrites {
+		d = driver.New(f, log.NewForwardingLog(l, fwdTransport, f))
+	}
 	reg.add(func() error { d.Close(); return nil })
 
 	sql.Register("literaft", d)

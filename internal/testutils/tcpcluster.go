@@ -14,6 +14,7 @@ import (
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
+	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
 	"github.com/fuchstim/literaft/log"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
@@ -30,6 +31,11 @@ type TCPCluster struct {
 	dir   string
 	o     options
 	specs []nodeSpec
+
+	// hub routes forwarded writes between nodes in-process; non-nil only when
+	// WithForwarding was passed. Shared by every node (initial, joined, or
+	// restarted) so a follower can reach whichever node is leader.
+	hub *InmemForwardHub
 }
 
 type nodeSpec struct {
@@ -87,12 +93,17 @@ func NewTCPCluster(t TB, dir string, n int, opts ...Option) *TCPCluster {
 		specs[i].bootstrap = servers
 	}
 
-	nodes := make([]*Node, n)
-	for i, s := range specs {
-		nodes[i] = startTCPNode(t, s, o)
+	var hub *InmemForwardHub
+	if o.forwarding {
+		hub = NewInmemForwardHub()
 	}
 
-	return &TCPCluster{Cluster{t: t, nodes: nodes}, dir, o, specs}
+	nodes := make([]*Node, n)
+	for i, s := range specs {
+		nodes[i] = startTCPNode(t, s, o, hub)
+	}
+
+	return &TCPCluster{Cluster{t: t, nodes: nodes}, dir, o, specs, hub}
 }
 
 // ReadyLeader waits for a node that's both the raft leader and has
@@ -124,7 +135,7 @@ func (c *TCPCluster) Join(t TB, id string) *Node {
 		dataDir: filepath.Join(c.dir, id),
 		dbPath:  filepath.Join(c.dir, id+".db"),
 	}
-	n := startTCPNode(t, s, c.o)
+	n := startTCPNode(t, s, c.o, c.hub)
 	c.nodes = append(c.nodes, n)
 	c.specs = append(c.specs, s)
 	return n
@@ -138,7 +149,7 @@ func (c *TCPCluster) RestartNode(t TB, i int) *Node {
 	if err := c.nodes[i].Shutdown(); err != nil {
 		t.Fatalf("testutils: RestartNode: shutting down old node: %v", err)
 	}
-	n := startTCPNode(t, c.specs[i], c.o)
+	n := startTCPNode(t, c.specs[i], c.o, c.hub)
 	c.nodes[i] = n
 	return n
 }
@@ -163,7 +174,7 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 // restarting an already-bootstrapped node is a harmless no-op), a
 // log.SingleWriterLog adapting it, and a driver.Driver registered under a
 // fresh database/sql alias.
-func startTCPNode(t TB, s nodeSpec, o options) *Node {
+func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 	t.Helper()
 
 	transport, err := raft.NewTCPTransport(s.addr, nil, 3, 10*time.Second, o.logOutput)
@@ -220,7 +231,17 @@ func startTCPNode(t TB, s nodeSpec, o options) *Node {
 	}
 
 	l := log.NewSingleWriterLog(r, log.WithApplyTimeout(o.applyTimeout))
-	drv := driver.New(f, l)
+
+	// With forwarding enabled, the driver's adapter is a ForwardingLog
+	// wrapping l; on a follower it forwards writes to the leader through the
+	// shared in-process hub instead of rejecting them.
+	var adapter raftgate.LogAdapter = l
+	if hub != nil {
+		adapter = log.NewForwardingLog(l, hub.Transport(raft.ServerAddress(s.addr)), f,
+			log.WithForwardTimeout(o.applyTimeout), log.WithHandlerLockTimeout(o.applyTimeout))
+	}
+
+	drv := driver.New(f, adapter)
 	alias := "literaft-testutils-" + uuid.NewString()
 	sql.Register(alias, drv)
 	db, err := sql.Open(alias, "")
