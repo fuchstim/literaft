@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package raftproto;
+
+option go_package = "github.com/fuchstim/literaft/internal/raft/proto;raftproto";
+
+// ForwardRequest carries a follower-computed write transaction to the leader
+// with the base index it was computed on. entry is a marshaled Entry (not an
+// embedded message) so the leader proposes the exact bytes it validated. The
+// base index rides this envelope, never the replicated log.
+message ForwardRequest {
+  bytes  entry      = 1; // marshaled Entry, proposed verbatim on acceptance
+  uint64 base_index = 2; // originating follower's applied index at proposal time
+}
+
+// ForwardResponse is the leader's answer. NOT_LEADER/STALE_BASE/CATCHING_UP/
+// BUSY are pre-propose (the entry did not enter the log); AMBIGUOUS means it
+// was proposed but its outcome is unknown.
+message ForwardResponse {
+  enum Status {
+    OK          = 0;
+    NOT_LEADER  = 1; // + leader_addr hint if known
+    STALE_BASE  = 2; // + last_applied diagnostic
+    CATCHING_UP = 3; // leader elected but still draining (not Ready)
+    BUSY        = 4; // couldn't acquire the write lock in time
+    AMBIGUOUS   = 5; // proposed, outcome unknown
+  }
+  Status status       = 1;
+  string leader_addr  = 2; // NOT_LEADER hint, if known
+  uint64 last_applied = 3; // STALE_BASE diagnostic: the leader's own lastApplied
+  string detail       = 4; // human-readable diagnostic
+}

@@ -73,13 +73,15 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 			Expect(src.Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
-		rc, err := snapshotter.New(srcPath, pageSize).Snapshot()
+		rc, err := snapshotter.New(srcPath, pageSize).Snapshot(42)
 		Expect(err).NotTo(HaveOccurred())
 
 		dstPath := filepath.Join(dir, "dst.db")
 		primeWALMode(dstPath)
 
-		Expect(snapshotter.New(dstPath, pageSize).Restore(rc)).To(Succeed())
+		index, err := snapshotter.New(dstPath, pageSize).Restore(rc)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(index).To(Equal(uint64(42)), "Restore must recover the snapshot's raft index from the stream header")
 		Expect(rc.Close()).To(Succeed())
 
 		dst, err := sqlite3.Open("file:" + dstPath)
@@ -103,12 +105,26 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 	// branches, all new relative to the old whole-file-swap Restore this
 	// replaced (which had nothing to parse, and so nothing to validate).
 
-	It("rejects an empty snapshot", func() {
+	It("rejects a snapshot missing the literaft header (an old, headerless snapshot)", func() {
+		dir := GinkgoT().TempDir()
+		dstPath := filepath.Join(dir, "dst.db")
+		primeWALMode(dstPath)
+		pageSize := pageSizeProbe()
+
+		// A headerless stream begins with page 1's "SQLite format 3\0",
+		// which must not be mistaken for the header magic.
+		page1 := make([]byte, pageSize)
+		copy(page1, "SQLite format 3\x00")
+		_, err := snapshotter.New(dstPath, pageSize).Restore(bytes.NewReader(page1))
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("rejects an empty snapshot (header present, no pages)", func() {
 		dir := GinkgoT().TempDir()
 		dstPath := filepath.Join(dir, "dst.db")
 		primeWALMode(dstPath)
 
-		err := snapshotter.New(dstPath, pageSizeProbe()).Restore(bytes.NewReader(nil))
+		_, err := snapshotter.New(dstPath, pageSizeProbe()).Restore(bytes.NewReader(snapshotter.EncodeHeaderForTest(0)))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -118,7 +134,8 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		primeWALMode(dstPath)
 		pageSize := pageSizeProbe()
 
-		err := snapshotter.New(dstPath, pageSize).Restore(bytes.NewReader(make([]byte, int(pageSize)+1)))
+		stream := append(snapshotter.EncodeHeaderForTest(0), make([]byte, int(pageSize)+1)...)
+		_, err := snapshotter.New(dstPath, pageSize).Restore(bytes.NewReader(stream))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -133,7 +150,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		defer src.Close()
 		Expect(src.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")).To(Succeed())
 
-		rc, err := snapshotter.New(srcPath, pageSize).Snapshot()
+		rc, err := snapshotter.New(srcPath, pageSize).Snapshot(0)
 		Expect(err).NotTo(HaveOccurred())
 		defer rc.Close()
 
@@ -143,7 +160,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		// The snapshot's own page-1 bytes say pageSize; claiming a
 		// different cluster page size here must be rejected rather than
 		// silently misinterpreting the frame layout.
-		err = snapshotter.New(dstPath, pageSize+1).Restore(rc)
+		_, err = snapshotter.New(dstPath, pageSize+1).Restore(rc)
 		Expect(err).To(HaveOccurred())
 	})
 })
