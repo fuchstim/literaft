@@ -417,6 +417,21 @@ anything outside this repo.
   sees/handles a not-leader rejection (`Driver.LastRejection`), and a
   pointer to `docs/` for the design rationale. There is still no repo-root
   `README.md`. Not started.
+- [**Comprehensive library-wide logging via
+  hclog**](https://github.com/fuchstim/literaft/issues/76) — the library has
+  no structured logging today (only `cmd/literaft`'s `fmt.Fprintln`s); with no
+  logger, debugging means throwaway ad-hoc instrumentation. Thread a single
+  `hclog.Logger` (`github.com/hashicorp/go-hclog`, already a vendored
+  transitive dependency via hraft — no new dependency) through the whole
+  library via a `WithLogger` functional option on `fsm.New` /
+  `log.NewSingleWriterLog` / `log.NewForwardingLog` / `driver.New`, defaulting
+  to a **no-op** logger so an embedded literaft stays silent unless the caller
+  opts in. Per-subsystem `.Named(...)` children, the same logger handed to
+  hraft (`raft.Config.Logger`), info-level for leadership/snapshot/membership/
+  forwarding-outcome events and debug-level for the per-entry apply, gate
+  withhold/release, wal-index publish, checkpoint/rewind, and skip-marker CAS
+  paths (level-guarded on the hot per-frame path). `cmd/literaft` becomes the
+  reference wiring (a real logger + `-log-level` flag). Not started.
 - **`database/sql`-compatible driver.** *(done)* `driver.New(fsm, log)` —
   required args direct; `log` is a `raftgate.LogAdapter` the caller
   constructs itself, e.g. `log.NewSingleWriterLog(r, opts...)` for a real
