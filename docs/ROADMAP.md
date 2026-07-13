@@ -356,11 +356,19 @@ size to M3's shm work.
   that *includes* the missing entry). Live today with no forwarding
   involved; forwarding would amplify it into a cluster-wide lost update
   (the diverged node stamps base indexes that include the missing entry).
-  Fix direction: any local-publish failure after commitment is fatal
-  (panic, matching `FSM.Apply`'s contract), and restart-after-that-panic
-  must converge — which requires WAL recovery at open (`walappender.Open`
-  currently refuses a non-empty `-wal` whose wal-index isn't initialized).
-  Not started.
+  *(done)* Both post-gate-success flush branches in
+  `internal/vfs.File.writeFrameData` now panic instead of returning an I/O
+  error, matching `FSM.Apply`'s contract, so the node restarts and
+  reconverges via hraft snapshot-restore + log replay. The analogous
+  SQLite-internal publish points (`walIndexAppend` shm growth,
+  `walIndexWriteHdr`) run through the opaque `SharedMemory` interface with
+  no VFS callback and can't be escalated there. Restart-after-panic
+  converges without new WAL-recovery code: `fsm.New` opens a SQLite
+  connection and enters WAL mode — running SQLite's own recovery over the
+  crash-left `-wal` and keeping the shm alive — before `walappender.Open`,
+  so the WALAppender joins the recovered wal-index rather than tripping its
+  "recovery from an existing WAL isn't implemented" guard. That load-bearing
+  open ordering is documented and pinned by a regression test.
 
 ## M8 — Library polish & packaging
 
