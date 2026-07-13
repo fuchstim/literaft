@@ -283,6 +283,95 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 	})
 })
 
+// copyFile copies src to dst byte-for-byte, failing the test on any error.
+func copyFile(src, dst string) {
+	GinkgoHelper()
+	b, err := os.ReadFile(src)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.WriteFile(dst, b, 0o666)).To(Succeed())
+}
+
+// crashImage snapshots dbPath's .db + -wal while conn is still open --
+// a byte-exact image of what a SIGKILL would leave behind, with committed
+// frames still in an un-checkpointed -wal -- into a fresh path, and returns
+// it. The -shm is intentionally not copied: a crash can leave it stale or
+// gone, and SQLite rebuilds it from the -wal at open regardless.
+func crashImage(dir, srcPath string) string {
+	GinkgoHelper()
+	dstPath := filepath.Join(dir, "crash.db")
+	copyFile(srcPath, dstPath)
+	copyFile(srcPath+"-wal", dstPath+"-wal")
+	fi, err := os.Stat(dstPath + "-wal")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(fi.Size()).To(BeNumerically(">", walHeaderSizeConst),
+		"crash image must have a non-empty -wal, or it doesn't exercise recovery")
+	return dstPath
+}
+
+// walHeaderSizeConst mirrors the unexported walHeaderSize rather than
+// importing it.
+const walHeaderSizeConst = 32
+
+// WAL recovery at open. A publish-after-commit failure on the leader is
+// fatal (a panic), so the process restarts on a crash image: committed
+// frames sit in a non-empty -wal whose wal-index was never published.
+// walappender.Open refuses such a WAL on its own ("recovery from an existing
+// WAL isn't implemented yet"), and relies on a SQLite connection having
+// recovered the wal-index first -- exactly what fsm.New's open ordering
+// guarantees (open + WAL-mode PRAGMAs on its own connection, kept open,
+// before opening the WALAppender). These tests pin that ordering.
+var _ = Describe("WALAppender WAL recovery at open", func() {
+	It("opens a crash-left non-empty -wal once a SQLite connection has recovered it first", func() {
+		dir := GinkgoT().TempDir()
+
+		gate := &recordingGate{}
+		leaderPath := filepath.Join(dir, "leader-crash.db")
+		leader := leaderConn(leaderPath, gate)
+		Expect(leader.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(leader.Exec("INSERT INTO t (id, v) VALUES (1, 'a'), (2, 'b')")).To(Succeed())
+		pageSize := uint32(queryInt(leader, "PRAGMA page_size"))
+
+		// Snapshot the files while the connection is open, then close: the
+		// image has committed frames in an un-checkpointed -wal, like a crash.
+		crashPath := crashImage(dir, leaderPath)
+		Expect(leader.Close()).To(Succeed())
+
+		// Mirror fsm.New's open ordering: a plain SQLite connection opens and
+		// enters WAL mode first (recovering the wal-index from the -wal) and
+		// stays open, holding the shm alive, before the WALAppender opens.
+		recoverConn, err := sqlite3.Open("file:" + crashPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer recoverConn.Close()
+		Expect(recoverConn.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
+
+		appender, err := walappender.Open(crashPath, pageSize, -1, 0)
+		Expect(err).NotTo(HaveOccurred(),
+			"Open must not reject the crash-left -wal once SQLite has recovered the wal-index")
+		defer appender.Close()
+
+		// The recovered state is intact and further apply still works.
+		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(2)))
+
+		var followUp []*raftproto.Transaction
+		func() {
+			g := &recordingGate{}
+			p := filepath.Join(dir, "src.db")
+			c := leaderConn(p, g)
+			defer c.Close()
+			Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+			Expect(c.Exec("INSERT INTO t (id, v) VALUES (1, 'a'), (2, 'b')")).To(Succeed())
+			g.entries = nil
+			Expect(c.Exec("INSERT INTO t (id, v) VALUES (3, 'c')")).To(Succeed())
+			followUp = g.entries
+		}()
+		for _, txn := range followUp {
+			Expect(appender.AppendTransaction(txn)).To(Succeed())
+		}
+		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(3)))
+		Expect(queryText(recoverConn, "PRAGMA integrity_check")).To(Equal("ok"))
+	})
+})
+
 var _ = Describe("WALAppender log rewind", func() {
 	// Mirrors an internal, unexported constant rather than importing it.
 	const frameHeaderSize = 24

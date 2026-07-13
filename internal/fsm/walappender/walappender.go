@@ -233,7 +233,15 @@ func (a *WALAppender) rewindLogIfBackfilled(region0 []byte, hdr walIndexHeader) 
 
 // maybeBootstrap initializes the -wal file and wal-index header if they aren't already initialized.
 // It returns an error if the -wal file already has content but the wal-index is uninitialized,
-// since recovery from an existing WAL isn't implemented yet.
+// since recovery from an existing WAL isn't implemented here.
+//
+// That error is a guard against misuse, not an expected path: this package
+// never rebuilds a wal-index by scanning an existing -wal. On a crash image
+// (committed frames in a non-empty -wal whose wal-index was never
+// published), the caller must have opened a SQLite connection first and let
+// it run SQLite's own WAL recovery, which reinitializes the wal-index and
+// keeps the shm alive so Open joins the recovered mapping rather than
+// tripping this guard. fsm.New's open ordering guarantees exactly that.
 func (a *WALAppender) maybeBootstrap() error {
 	region0, err := a.shm.Region(0)
 	if err != nil {

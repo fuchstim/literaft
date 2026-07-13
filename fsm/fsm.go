@@ -77,6 +77,15 @@ func New(dbPath string, opts ...Option) (*FSM, error) {
 		return nil, err
 	}
 
+	// Order matters: db is opened and put in WAL mode above, and stays open,
+	// before the WALAppender opens. A publish-after-commit failure on the
+	// leader is fatal (internal/vfs panics), so a node can restart on a
+	// crash image whose -wal holds committed frames but whose wal-index was
+	// never published. walappender.Open can't rebuild the wal-index from
+	// such a -wal on its own; it relies on this db connection having already
+	// run SQLite's own WAL recovery (during the WAL-mode PRAGMA above) and
+	// holding the shm alive so the appender joins the recovered mapping
+	// rather than re-initializing it.
 	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL appender: %w", err)
