@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	membershippb "github.com/fuchstim/literaft/internal/membership/proto"
+	membershippb "github.com/fuchstim/literaft/cmd/literaft/membership/proto"
 )
 
 // joinRetryDelay paces Join's retries while the cluster is still coming up.

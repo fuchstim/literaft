@@ -24,9 +24,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/fuchstim/literaft/cmd/literaft/membership"
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
-	"github.com/fuchstim/literaft/internal/membership"
 	"github.com/fuchstim/literaft/log"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
