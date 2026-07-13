@@ -106,7 +106,13 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 		return nil, errors.Join(w.Close(), fmt.Errorf("failed to prime checkpoint connection: %w", err))
 	}
 
-	go w.runCheckpointer(checkpointInterval)
+	// Create the ticker synchronously here: it's read during shutdown, so
+	// assigning it from the goroutine below would race a shutdown that lands
+	// before the goroutine is scheduled.
+	if checkpointInterval > 0 {
+		w.checkpointTicker = time.NewTicker(checkpointInterval)
+	}
+	go w.runCheckpointer()
 
 	return w, nil
 }
@@ -432,12 +438,10 @@ func (a *WALAppender) writeWALFileHeader() ([2]uint32, [saltSize]byte, error) {
 	return [2]uint32{s0, s1}, salt, nil
 }
 
-func (a *WALAppender) runCheckpointer(interval time.Duration) {
-	if interval <= 0 {
+func (a *WALAppender) runCheckpointer() {
+	if a.checkpointTicker == nil {
 		return
 	}
-
-	a.checkpointTicker = time.NewTicker(interval)
 	for range a.checkpointTicker.C {
 		a.checkpoint()
 	}
