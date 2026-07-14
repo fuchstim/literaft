@@ -131,11 +131,10 @@ func (f *ForwardingLog) forward(ctx context.Context, id string, reqBytes []byte,
 		if err != nil {
 			// A proven non-delivery (nothing proposed) is a clean retryable
 			// rejection: re-running is safe, the base check re-validates. A
-			// transport signals it by returning a rafterrors.NotAppliedError,
-			// which is already retryable, so surface it as-is. Any other
-			// failure could have been delivered and its answer lost, so resolve
-			// via the marker CAS -- consumed if it committed, abandoned on
-			// timeout otherwise.
+			// transport signals it by returning a retryable not-applied error,
+			// so surface it as-is. Any other failure could have been delivered
+			// and its answer lost, so resolve via the marker CAS -- consumed if
+			// it committed, abandoned on timeout otherwise.
 			var notApplied *rafterrors.NotAppliedError
 			if errors.As(err, &notApplied) {
 				return err

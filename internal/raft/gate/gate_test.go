@@ -119,9 +119,9 @@ var _ = Describe("Gate", func() {
 		Expect(gate.LastRejection()).To(BeNil(), "a successful proposal must clear the previous rejection")
 	})
 
-	// vfs.File relies on errors.As to recover a taxonomy error's carried sqlite
-	// code (internal/vfs/file.go), so whatever Gate returns must preserve the
-	// LogAdapter's concrete error.
+	// The write path relies on errors.As to recover a taxonomy error's carried
+	// sqlite code, so whatever Gate returns must preserve the LogAdapter's
+	// concrete error.
 	It("surfaces a LogAdapter rejection without breaking errors.Is discovery of the concrete cause", func() {
 		f := newTestFSM()
 		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]

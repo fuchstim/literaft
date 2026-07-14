@@ -1,8 +1,8 @@
 // Package rafterrors is the single taxonomy for a rejected write proposal.
 //
-// Every rejection a raftgate.LogAdapter (or the write-forwarding path) produces
-// is one of four concrete types, each pinned to a Category that decides both
-// what a caller should do and which sqlite3 result code the VFS surfaces:
+// Every rejected write proposal is one of four concrete types, each pinned to a
+// Category that decides both what a caller should do and which sqlite3 result
+// code the VFS surfaces:
 //
 //	Redirect   NotLeaderError   sqlite3.READONLY     redirect to the leader
 //	Retryable  CatchingUpError  sqlite3.BUSY         retry; nothing was applied
@@ -58,8 +58,8 @@ func (c Category) ResultCode() sqlite3.ExtendedErrorCode {
 }
 
 // coded is the common core of every taxonomy error: it fixes the Category and
-// derives the result code from it. Embedding it makes each concrete type
-// satisfy vfs.CodedError without repeating the mapping.
+// derives the result code from it, giving each concrete type Category and
+// ResultCode methods without repeating the mapping.
 type coded struct{ cat Category }
 
 func (c coded) Category() Category                    { return c.cat }

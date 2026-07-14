@@ -153,8 +153,8 @@ func (g *SingleWriterLog) drain(term uint64) {
 }
 
 // Apply implements raftgate.LogAdapter, translating every rejection into the
-// shared rafterrors taxonomy. A rejected or ambiguous proposal (including
-// ErrLeadershipLost -- "proposed, outcome unknown") surfaces as an error.
+// shared error taxonomy. A rejected or ambiguous proposal (including a
+// lost-leadership "proposed, outcome unknown" case) surfaces as an error.
 func (g *SingleWriterLog) Apply(e []byte) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
