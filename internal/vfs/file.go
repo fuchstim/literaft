@@ -3,6 +3,7 @@ package vfs
 import (
 	"fmt"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
@@ -23,6 +24,7 @@ type File struct {
 	// write; capture accumulates (pgno, page) pairs for the write
 	// transaction currently in flight on this file.
 	gate    Gate
+	logger  hclog.Logger
 	pending *pendingFrame
 	capture []*Frame
 
@@ -76,8 +78,8 @@ type pendingFrame struct {
 	offset    int64
 }
 
-func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate, pageSize uint32) *File {
-	return &File{File: base, kind: kind, gate: gate, pageSize: pageSize}
+func wrapFile(base sqlite3vfs.File, kind FileType, gate Gate, pageSize uint32, logger hclog.Logger) *File {
+	return &File{File: base, kind: kind, gate: gate, pageSize: pageSize, logger: logger}
 }
 
 // WriteAt implements sqlite3vfs.File. On the WAL file it intercepts the
@@ -157,6 +159,11 @@ func (f *File) writeFrameHeader(h frameHeader, p []byte, off int64) (int, error)
 	}
 	f.headerPgno[off] = h.pgno
 
+	if h.isCommit() && f.logger.IsDebug() {
+		f.logger.Debug("withholding commit frame pending RAFT quorum",
+			"offset", off, "pgno", h.pgno, "nTruncate", h.nTruncate)
+	}
+
 	pending := &pendingFrame{header: h, offset: off}
 	copy(pending.headerRaw[:], p)
 	f.pending = pending
@@ -201,6 +208,10 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	f.capture = nil
 
 	if err := f.gate.ProposeTransaction(frames, nTruncate); err != nil {
+		if f.logger.IsDebug() {
+			f.logger.Debug("gate rejected transaction; discarding withheld commit frame",
+				"offset", pending.offset, "frames", len(frames), "nTruncate", nTruncate, "error", err)
+		}
 		// Rejected: this transaction never committed, so no checksum
 		// rewrite window opens for it. headerPgno/dataOffsets must not
 		// survive into the next write, or a retry landing on the same
@@ -231,6 +242,11 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	// pgno-mismatched) header offset belongs to a new transaction.
 	f.txnDone = true
 
+	if f.logger.IsDebug() {
+		f.logger.Debug("gate committed transaction; releasing withheld commit frame",
+			"offset", pending.offset, "frames", len(frames), "nTruncate", nTruncate)
+	}
+
 	// Past this point the gate has committed the transaction cluster-wide,
 	// and this node's own FSM.Apply has already consumed its skip marker
 	// (hraft delivers each committed index exactly once). If flushing the
@@ -251,10 +267,14 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 	// already-mapped shm and a boundary-only mmap extend, far less likely
 	// than a disk write.
 	if _, err := f.File.WriteAt(pending.headerRaw[:], pending.offset); err != nil {
+		f.logger.Error("failed to flush committed commit-frame header after RAFT commit",
+			"offset", pending.offset, "error", err)
 		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame header at WAL offset %d after RAFT commit: %v", pending.offset, err))
 	}
 	n, err := f.File.WriteAt(p, off)
 	if err != nil {
+		f.logger.Error("failed to flush committed commit-frame page image after RAFT commit",
+			"offset", off, "error", err)
 		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame page image at WAL offset %d after RAFT commit: %v", off, err))
 	}
 	return n, nil

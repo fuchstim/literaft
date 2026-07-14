@@ -17,10 +17,8 @@ import (
 	"time"
 
 	transport "github.com/Jille/raft-grpc-transport"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
-	hclogwrapper "github.com/zaffka/zap-to-hclog"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -61,21 +59,24 @@ func run() error {
 		dbPath        = flag.String("db", "", "path to the SQLite database file this node serves (required)")
 		joinAddr      = flag.String("join", "", "address of any existing cluster member to join through; if empty, bootstrap a new single-node cluster")
 		leave         = flag.Bool("leave", false, "decommission mode: remove -id from the cluster via -join, then exit (does not start a node)")
-		logLevel      = flag.String("log-level", "info", "log level (debug, info, warn, error, fatal, panic)")
+		logLevel      = flag.String("log-level", "info", "log level (trace, debug, info, warn, error, off)")
 		forwardWrites = flag.Bool("forward-writes", true, "accept writes on follower connections by forwarding them to the leader under a base-index check; when false, follower writes are rejected with a leader hint")
 	)
 	flag.Parse()
 
-	lvl, err := zapcore.ParseLevel(*logLevel)
-	if err != nil {
-		return fmt.Errorf("invalid log level %q: %w", *logLevel, err)
+	lvl := hclog.LevelFromString(*logLevel)
+	if lvl == hclog.NoLevel {
+		return fmt.Errorf("invalid log level %q (want trace, debug, info, warn, error, or off)", *logLevel)
 	}
 
-	logger, err := zap.NewDevelopment(zap.IncreaseLevel(lvl))
-	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
-	}
-	defer logger.Sync()
+	// One root logger for the whole process: each subsystem takes a named
+	// child of it, and hraft shares it so its logs use the same format.
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:   "literaft",
+		Level:  lvl,
+		Output: os.Stderr,
+		Color:  hclog.AutoColor,
+	})
 
 	// Insecure creds are deliberate: the same options dial peers (raft
 	// transport) and forward membership calls to the leader, so they must
@@ -95,7 +96,7 @@ func run() error {
 		if err := membership.Leave(ctx, *joinAddr, *id, dialOptions); err != nil {
 			return fmt.Errorf("failed to decommission %s via %s: %w", *id, *joinAddr, err)
 		}
-		logger.Info("decommissioned node", zap.String("id", *id), zap.String("via", *joinAddr))
+		logger.Info("decommissioned node", "id", *id, "via", *joinAddr)
 		return nil
 	}
 
@@ -122,13 +123,13 @@ func run() error {
 		return reg.shutdown(fmt.Errorf("failed to create data dir %s: %w", *dataDir, err))
 	}
 
-	raftStore, err := raftsqlite.New(filepath.Join(*dataDir, "raft.db"))
+	raftStore, err := raftsqlite.New(filepath.Join(*dataDir, "raft.db"), raftsqlite.WithLogger(logger))
 	if err != nil {
 		return reg.shutdown(fmt.Errorf("failed to open raft store: %w", err))
 	}
 	reg.add(raftStore.Close)
 
-	snapshotStore, err := raft.NewFileSnapshotStoreWithLogger(*dataDir, 2, hclogwrapper.Wrap(logger.Named("raft-snapshot")))
+	snapshotStore, err := raft.NewFileSnapshotStoreWithLogger(*dataDir, 2, logger.Named("raft-snapshot"))
 	if err != nil {
 		return reg.shutdown(fmt.Errorf("failed to open raft snapshot store: %w", err))
 	}
@@ -144,7 +145,7 @@ func run() error {
 		return reg.shutdown(fmt.Errorf("failed to check for existing raft state: %w", err))
 	}
 
-	f, err := fsm.New(*dbPath)
+	f, err := fsm.New(*dbPath, fsm.WithLogger(logger))
 	if err != nil {
 		return reg.shutdown(fmt.Errorf("failed to create FSM: %w", err))
 	}
@@ -152,7 +153,7 @@ func run() error {
 
 	raftConfig := raft.DefaultConfig()
 	raftConfig.LocalID = raft.ServerID(*id)
-	raftConfig.Logger = hclogwrapper.Wrap(logger.Named("raft"))
+	raftConfig.Logger = logger.Named("raft")
 
 	r, err := raft.NewRaft(raftConfig, f, raftStore, raftStore, snapshotStore, tm.Transport())
 	if err != nil {
@@ -163,7 +164,7 @@ func run() error {
 	// The membership service shares the raft transport's gRPC server, so a
 	// joining node reaches it at the same -bind address. All services must be
 	// registered before Serve.
-	membership.NewServer(r, dialOptions).Register(grpcServer)
+	membership.NewServer(r, dialOptions, membership.WithLogger(logger)).Register(grpcServer)
 
 	// The write-forwarding transport shares that same gRPC server too, so a
 	// leader's forward address is just its -bind address (identity resolver).
@@ -178,7 +179,7 @@ func run() error {
 
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
-			logger.Error("gRPC server stopped", zap.Error(err))
+			logger.Error("gRPC server stopped", "error", err)
 		}
 	}()
 
@@ -192,7 +193,7 @@ func run() error {
 			if err := r.BootstrapCluster(cfg).Error(); err != nil {
 				return reg.shutdown(fmt.Errorf("failed to bootstrap cluster: %w", err))
 			}
-			logger.Info("bootstrapped new single-node cluster", zap.String("id", *id), zap.String("bind", *bindAddr))
+			logger.Info("bootstrapped new single-node cluster", "id", *id, "bind", *bindAddr)
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
 			err := membership.Join(ctx, *joinAddr, *id, *bindAddr, dialOptions)
@@ -200,29 +201,29 @@ func run() error {
 			if err != nil {
 				return reg.shutdown(fmt.Errorf("failed to join cluster via %s: %w", *joinAddr, err))
 			}
-			logger.Info("joined cluster", zap.String("id", *id), zap.String("bind", *bindAddr), zap.String("via", *joinAddr))
+			logger.Info("joined cluster", "id", *id, "bind", *bindAddr, "via", *joinAddr)
 		}
 	} else {
 		// Restart: hraft has recovered our configuration and log. Re-announce
 		// our address if it changed while we were down so the leader can reach
 		// us again; an unchanged address (the common case) does nothing.
 		if err := reannounceIfMoved(r, *id, *bindAddr, *joinAddr, dialOptions, logger); err != nil {
-			logger.Warn("could not re-announce changed address on restart; the leader may not reach this node until it is re-added", zap.Error(err))
+			logger.Warn("could not re-announce changed address on restart; the leader may not reach this node until it is re-added", "error", err)
 		}
 	}
 
-	logger.Info("node listening", zap.String("id", *id), zap.String("bind", *bindAddr), zap.String("db", *dbPath))
+	logger.Info("node listening", "id", *id, "bind", *bindAddr, "db", *dbPath)
 
-	l := log.NewSingleWriterLog(r)
+	l := log.NewSingleWriterLog(r, log.WithLogger(logger))
 	reg.add(func() error { l.Close(); return nil })
 
 	// With forwarding enabled the adapter forwards a follower's write to the
 	// leader; otherwise follower writes are rejected.
 	var adapter raftgate.LogAdapter = l
 	if *forwardWrites {
-		adapter = log.NewForwardingLog(l, fwdTransport, f)
+		adapter = log.NewForwardingLog(l, fwdTransport, f, log.WithLogger(logger))
 	}
-	d := driver.New(f, adapter)
+	d := driver.New(f, adapter, driver.WithLogger(logger))
 	reg.add(func() error { d.Close(); return nil })
 
 	sql.Register("literaft", d)
@@ -293,7 +294,7 @@ func (s *shutdownRegistry) shutdown(cause error) error {
 // recovered configuration -- which works as long as at least one other node is
 // still reachable at its recorded address. A restart at an unchanged address,
 // the common case, does nothing.
-func reannounceIfMoved(r *raft.Raft, id, bindAddr, joinAddr string, dialOptions []grpc.DialOption, logger *zap.Logger) error {
+func reannounceIfMoved(r *raft.Raft, id, bindAddr, joinAddr string, dialOptions []grpc.DialOption, logger hclog.Logger) error {
 	future := r.GetConfiguration()
 	if err := future.Error(); err != nil {
 		return fmt.Errorf("read configuration: %w", err)
@@ -313,7 +314,7 @@ func reannounceIfMoved(r *raft.Raft, id, bindAddr, joinAddr string, dialOptions 
 		err := membership.Join(ctx, t, id, bindAddr, dialOptions)
 		cancel()
 		if err == nil {
-			logger.Info("re-announced changed address", zap.String("id", id), zap.String("new", bindAddr), zap.String("via", t))
+			logger.Info("re-announced changed address", "id", id, "new", bindAddr, "via", t)
 			return nil
 		}
 		errs = append(errs, fmt.Errorf("via %s: %w", t, err))

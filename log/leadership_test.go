@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
@@ -33,7 +34,7 @@ var _ = Describe("SingleWriterLog gaining-leadership drain", func() {
 		// acquiring this exact lock -- so while it's held externally,
 		// newLeader's FSM genuinely cannot apply anything, however fast
 		// hraft itself replicates.
-		lock, err := shm.Open(newLeader.DBPath + "-shm")
+		lock, err := shm.Open(newLeader.DBPath+"-shm", hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer lock.Close()
 		Expect(lock.Lock(shm.WriteLock)).To(Succeed())

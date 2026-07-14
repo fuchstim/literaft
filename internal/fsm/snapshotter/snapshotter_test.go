@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
@@ -73,13 +74,13 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 			Expect(src.Exec(fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
-		rc, err := snapshotter.New(srcPath, pageSize).Snapshot(42)
+		rc, err := snapshotter.New(srcPath, pageSize, hclog.NewNullLogger()).Snapshot(42)
 		Expect(err).NotTo(HaveOccurred())
 
 		dstPath := filepath.Join(dir, "dst.db")
 		primeWALMode(dstPath)
 
-		index, err := snapshotter.New(dstPath, pageSize).Restore(rc)
+		index, err := snapshotter.New(dstPath, pageSize, hclog.NewNullLogger()).Restore(rc)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(index).To(Equal(uint64(42)), "Restore must recover the snapshot's raft index from the stream header")
 		Expect(rc.Close()).To(Succeed())
@@ -115,7 +116,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		// which must not be mistaken for the header magic.
 		page1 := make([]byte, pageSize)
 		copy(page1, "SQLite format 3\x00")
-		_, err := snapshotter.New(dstPath, pageSize).Restore(bytes.NewReader(page1))
+		_, err := snapshotter.New(dstPath, pageSize, hclog.NewNullLogger()).Restore(bytes.NewReader(page1))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -124,7 +125,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		dstPath := filepath.Join(dir, "dst.db")
 		primeWALMode(dstPath)
 
-		_, err := snapshotter.New(dstPath, pageSizeProbe()).Restore(bytes.NewReader(snapshotter.EncodeHeaderForTest(0)))
+		_, err := snapshotter.New(dstPath, pageSizeProbe(), hclog.NewNullLogger()).Restore(bytes.NewReader(snapshotter.EncodeHeaderForTest(0)))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -135,7 +136,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		pageSize := pageSizeProbe()
 
 		stream := append(snapshotter.EncodeHeaderForTest(0), make([]byte, int(pageSize)+1)...)
-		_, err := snapshotter.New(dstPath, pageSize).Restore(bytes.NewReader(stream))
+		_, err := snapshotter.New(dstPath, pageSize, hclog.NewNullLogger()).Restore(bytes.NewReader(stream))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -150,7 +151,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		defer src.Close()
 		Expect(src.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")).To(Succeed())
 
-		rc, err := snapshotter.New(srcPath, pageSize).Snapshot(0)
+		rc, err := snapshotter.New(srcPath, pageSize, hclog.NewNullLogger()).Snapshot(0)
 		Expect(err).NotTo(HaveOccurred())
 		defer rc.Close()
 
@@ -160,7 +161,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		// The snapshot's own page-1 bytes say pageSize; claiming a
 		// different cluster page size here must be rejected rather than
 		// silently misinterpreting the frame layout.
-		_, err = snapshotter.New(dstPath, pageSize+1).Restore(rc)
+		_, err = snapshotter.New(dstPath, pageSize+1, hclog.NewNullLogger()).Restore(rc)
 		Expect(err).To(HaveOccurred())
 	})
 })

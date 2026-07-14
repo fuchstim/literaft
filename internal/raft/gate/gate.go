@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/go-hclog"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/fuchstim/literaft/fsm"
@@ -23,15 +24,16 @@ var _ vfs.Gate = (*Gate)(nil)
 // that's the LogAdapter's concern (log.SingleWriterLog, for a real
 // cluster).
 type Gate struct {
-	fsm *fsm.FSM
-	log LogAdapter
+	fsm    *fsm.FSM
+	log    LogAdapter
+	logger hclog.Logger
 
 	lastErrMu sync.Mutex
 	lastErr   error
 }
 
-func New(fsm *fsm.FSM, log LogAdapter) *Gate {
-	return &Gate{fsm: fsm, log: log}
+func New(fsm *fsm.FSM, log LogAdapter, logger hclog.Logger) *Gate {
+	return &Gate{fsm: fsm, log: log, logger: logger}
 }
 
 // ProposeTransaction implements vfs.Gate. Any error the LogAdapter's Apply
@@ -66,10 +68,16 @@ func (g *Gate) proposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
 		return fmt.Errorf("failed to marshal entry: %w", err)
 	}
 
+	if g.logger.IsDebug() {
+		g.logger.Debug("proposing transaction",
+			"id", e.Header.Id, "pages", len(frames), "nTruncate", nTruncate)
+	}
+
 	// Return the LogAdapter's rejection unwrapped: it already carries its own
 	// category and result code, and this is the value LastRejection surfaces,
 	// so callers recover it directly.
 	if err := g.log.Apply(b); err != nil {
+		g.logger.Debug("transaction proposal rejected", "id", e.Header.Id, "error", err)
 		return err
 	}
 

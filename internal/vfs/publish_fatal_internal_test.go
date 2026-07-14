@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/hashicorp/go-hclog"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -61,7 +62,7 @@ func commitFrameHeader(pgno, dbSize uint32) []byte {
 // then returns the closure that writes the paired page image -- the call
 // that runs the fatal flush branch.
 func driveToCommitFlush(base sqlite3vfs.File, pageSize uint32) func() {
-	f := wrapFile(base, FileTypeWAL, nilCommitGate{}, pageSize)
+	f := wrapFile(base, FileTypeWAL, nilCommitGate{}, pageSize, hclog.NewNullLogger())
 
 	hdr := commitFrameHeader(1, 1)
 	headerOff := int64(walHeaderSize)

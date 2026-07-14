@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 	ncrdriver "github.com/ncruces/go-sqlite3/driver"
@@ -32,7 +33,8 @@ var ErrKeyNotFound = errors.New("not found")
 // same philosophy applied to the replicated database itself (see
 // CLAUDE.md): journal_mode=WAL, synchronous=NORMAL.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	logger hclog.Logger
 }
 
 // New opens (creating if necessary) a SQLite database at path as a Store.
@@ -93,7 +95,9 @@ func New(path string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("failed to create stable table: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	logger := o.logger.Named("raftsqlite")
+	logger.Info("opened raft store", "path", path)
+	return &Store{db: db, logger: logger}, nil
 }
 
 // Close closes the underlying SQLite connection.
@@ -185,6 +189,7 @@ func (s *Store) StoreLogs(logs []*raft.Log) error {
 // DeleteRange implements raft.LogStore, deleting logs in [min, max]
 // inclusive.
 func (s *Store) DeleteRange(min, max uint64) error {
+	s.logger.Debug("deleting log range", "min", min, "max", max)
 	_, err := s.db.Exec(`DELETE FROM logs WHERE idx BETWEEN ? AND ?`, int64(min), int64(max))
 	return err
 }

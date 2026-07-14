@@ -10,6 +10,7 @@
 package vfs
 
 import (
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3/util/vfsutil"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 )
@@ -22,11 +23,13 @@ import (
 // also used unconditionally to compute frame-header offsets, so a wrong or
 // zero value silently corrupts frame parsing rather than merely disabling
 // a check. Register panics if pageSize is 0.
-func Register(name string, base sqlite3vfs.VFS, gate Gate, pageSize uint32) {
+//
+// logger must be non-nil; pass hclog.NewNullLogger() to disable output.
+func Register(name string, base sqlite3vfs.VFS, gate Gate, pageSize uint32, logger hclog.Logger) {
 	if pageSize == 0 {
 		panic("vfs: pageSize must be the real, non-zero cluster page size")
 	}
-	sqlite3vfs.Register(name, &VFS{base, gate, pageSize})
+	sqlite3vfs.Register(name, &VFS{base, gate, pageSize, logger})
 }
 
 // VFS wraps a base sqlite3vfs.VFS. See package doc.
@@ -34,6 +37,7 @@ type VFS struct {
 	base     sqlite3vfs.VFS
 	gate     Gate
 	pageSize uint32
+	logger   hclog.Logger
 }
 
 var (
@@ -47,7 +51,7 @@ func (v *VFS) Open(name string, flags sqlite3vfs.OpenFlag) (sqlite3vfs.File, sql
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags), v.gate, v.pageSize), flags, nil
+	return wrapFile(file, fileType(flags), v.gate, v.pageSize, v.logger), flags, nil
 }
 
 // OpenFilename implements sqlite3vfs.VFSFilename.
@@ -56,7 +60,7 @@ func (v *VFS) OpenFilename(name *sqlite3vfs.Filename, flags sqlite3vfs.OpenFlag)
 	if err != nil {
 		return nil, flags, err
 	}
-	return wrapFile(file, fileType(flags), v.gate, v.pageSize), flags, nil
+	return wrapFile(file, fileType(flags), v.gate, v.pageSize, v.logger), flags, nil
 }
 
 // Delete implements sqlite3vfs.VFS.

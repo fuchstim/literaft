@@ -9,6 +9,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -35,6 +36,7 @@ type Server struct {
 	raft        Raft
 	dialOptions []grpc.DialOption
 	timeout     time.Duration
+	logger      hclog.Logger
 }
 
 // NewServer returns a Membership server driving r, dialing forwarded calls
@@ -45,7 +47,7 @@ func NewServer(r Raft, dialOptions []grpc.DialOption, opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	return &Server{raft: r, dialOptions: dialOptions, timeout: o.timeout}
+	return &Server{raft: r, dialOptions: dialOptions, timeout: o.timeout, logger: o.logger.Named("membership")}
 }
 
 // Register installs the Membership service on a gRPC server.
@@ -67,8 +69,10 @@ func (s *Server) AddVoter(ctx context.Context, req *membershippb.AddVoterRequest
 	}
 
 	if err := s.raft.AddVoter(raft.ServerID(req.GetId()), raft.ServerAddress(req.GetAddress()), 0, s.timeout).Error(); err != nil {
+		s.logger.Info("failed to add voter", "id", req.GetId(), "address", req.GetAddress(), "error", err)
 		return nil, status.Errorf(codes.Internal, "add voter %s: %v", req.GetId(), err)
 	}
+	s.logger.Info("added voter", "id", req.GetId(), "address", req.GetAddress())
 	return &membershippb.AddVoterResponse{}, nil
 }
 
@@ -85,8 +89,10 @@ func (s *Server) RemoveVoter(ctx context.Context, req *membershippb.RemoveVoterR
 	}
 
 	if err := s.raft.RemoveServer(raft.ServerID(req.GetId()), 0, s.timeout).Error(); err != nil {
+		s.logger.Info("failed to remove voter", "id", req.GetId(), "error", err)
 		return nil, status.Errorf(codes.Internal, "remove voter %s: %v", req.GetId(), err)
 	}
+	s.logger.Info("removed voter", "id", req.GetId())
 	return &membershippb.RemoveVoterResponse{}, nil
 }
 
