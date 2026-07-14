@@ -33,8 +33,6 @@ type WALAppender struct {
 	shm      *shm.SharedMemory
 
 	checkpointTicker         *time.Ticker
-	checkpointStop           chan struct{}
-	checkpointStopOnce       sync.Once
 	checkpointThresholdPages int
 	dirtyPageCount           int
 
@@ -113,7 +111,6 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 	// before the goroutine is scheduled.
 	if checkpointInterval > 0 {
 		w.checkpointTicker = time.NewTicker(checkpointInterval)
-		w.checkpointStop = make(chan struct{})
 		go w.runCheckpointer()
 	}
 
@@ -122,13 +119,7 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 
 func (a *WALAppender) Close() error {
 	if a.checkpointTicker != nil {
-		// Signal the checkpointer to return; stopping the ticker alone leaves
-		// it blocked on the ticker channel forever. Once-guarded against a
-		// repeated close of the stop channel.
-		a.checkpointStopOnce.Do(func() {
-			a.checkpointTicker.Stop()
-			close(a.checkpointStop)
-		})
+		a.checkpointTicker.Stop()
 	}
 
 	return errors.Join(a.db.Close(), a.f.Close(), a.shm.Close())
@@ -200,10 +191,8 @@ func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction, afterCommit 
 
 // AppendTransactionUnderLock appends txn under an already-held lock: it
 // neither acquires nor releases the write lock, and skips the threshold
-// checkpoint (which would extend the hold by a full passive checkpoint). The
-// pages still count as dirty, but only the periodic checkpointer clears that
-// debt here, so a node writing solely through this path relies on it to bound
-// WAL growth. afterCommit runs under the held lock, as above.
+// checkpoint (which would extend the hold by a full passive checkpoint -- the
+// ticker covers the debt). afterCommit runs under the held lock, as above.
 func (a *WALAppender) AppendTransactionUnderLock(h *HeldLock, txn *raftproto.Transaction, afterCommit func()) error {
 	if h == nil || h.a != a || h.released {
 		return fmt.Errorf("AppendTransactionUnderLock called without a valid held lock for this appender")
@@ -450,13 +439,8 @@ func (a *WALAppender) writeWALFileHeader() ([2]uint32, [saltSize]byte, error) {
 }
 
 func (a *WALAppender) runCheckpointer() {
-	for {
-		select {
-		case <-a.checkpointStop:
-			return
-		case <-a.checkpointTicker.C:
-			a.checkpoint()
-		}
+	for range a.checkpointTicker.C {
+		a.checkpoint()
 	}
 }
 

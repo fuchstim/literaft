@@ -217,8 +217,7 @@ func run() error {
 	reg.add(func() error { l.Close(); return nil })
 
 	// With forwarding enabled the adapter forwards a follower's write to the
-	// leader; otherwise follower writes are rejected. Build a single driver --
-	// each one registers a VFS that leaks unless it is closed.
+	// leader; otherwise follower writes are rejected.
 	var adapter raftgate.LogAdapter = l
 	if *forwardWrites {
 		adapter = log.NewForwardingLog(l, fwdTransport, f)
