@@ -16,18 +16,23 @@ on-disk file compatibility. Pure Go (no cgo), built on
   SQLite process (e.g. the `sqlite3` CLI) can open the database read-only
   while a node is running.
 
-Writes are **leader-only**: a write attempted on a follower is rejected with
-a leader hint rather than resolved via conflict merging. See
-[`docs/DESIGN.md`](docs/DESIGN.md) for the full design and
+Writes are **leader-only**, and there is no conflict merging anywhere: a write
+on a follower is either rejected with a leader hint, or — with the opt-in
+forwarding transport — sent to the leader and accepted only if it was computed
+on the leader's current state. See [Consistency
+guarantees](#consistency-guarantees) below for the full picture,
+[`docs/DESIGN.md`](docs/DESIGN.md) for the design, and
 [`docs/DECISIONS.md`](docs/DECISIONS.md) for why alternatives were rejected.
 
 ## Status
 
 M0–M6 are done: wrapper VFS, external-reader compatibility, the commit-frame
 gate, follower apply, real `hashicorp/raft` integration, leadership-churn
-correctness, and snapshot-based catch-up for far-behind followers. Current
-work is M7 hardening (fault injection, fuzzing, a couple of known flakes) —
-see [`docs/ROADMAP.md`](docs/ROADMAP.md) for the up-to-date list.
+correctness, and snapshot-based catch-up for far-behind followers. Opt-in
+follower write-forwarding (M9) is also built, and `cmd/literaft` turns it on by
+default. The current milestone is M7 hardening — fault injection, fuzzing, and
+a few known flakes. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
+up-to-date, per-issue status.
 
 ## Install
 
@@ -158,6 +163,18 @@ name — more `*sql.DB` handles, or another goroutine's `db.Conn()` — gets the
 same concurrent read-write semantics as stock SQLite in WAL mode. Reads never
 block on the RAFT round-trip; only commits do.
 
+### Accepting writes on followers
+
+The quickstart above wires the leader-only contract: a `log.SingleWriterLog`
+handed straight to `driver.New`, so a write on a follower fails fast. To let
+follower connections accept writes instead, wrap that log in a
+[`log.ForwardingLog`](log/forward.go) with a `log.LeaderTransport` and pass
+*that* to `driver.New`. A follower then forwards its captured write to the
+leader, which accepts it only if it was computed on the leader's current
+applied state (otherwise the client re-runs it against fresher state).
+`cmd/literaft` sets this up by default; see
+[`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+
 ## Running a real cluster
 
 [`cmd/literaft`](cmd/literaft) is a complete node process built on the same
@@ -192,6 +209,10 @@ the `-join` hint if given — so the leader learns the new address and
 reconnects. Removing a node is therefore an explicit act (`-leave`, or
 `RemoveVoter` over gRPC), not a side effect of stopping the process. The
 leader's REPL also has `.addvoter <id> <address>` for adding a member by hand.
+
+Follower connections accept writes by default, forwarded to the leader under
+the base-index check; pass `-forward-writes=false` to reject them with a leader
+hint instead.
 
 ## Consistency guarantees
 
@@ -249,6 +270,9 @@ for the full treatment.
   checkpoint/follower-apply paths, external-reader safety, conflict handling.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — ADR log of what was rejected and
   why.
+- [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md) — the write-forwarding
+  protocol: base-index check, the skip-marker state machine, and the failure
+  matrix.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone status, mirrored from
   GitHub issues.
 - [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md) — on-disk byte layout reference.
