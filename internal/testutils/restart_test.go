@@ -88,10 +88,10 @@ var _ = Describe("node restart", func() {
 			Expect(nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i))).To(Succeed())
 		}
 
-		// The leader's own pre-restart -wal holds real-SQLite-written
-		// commit-path frames that were never previously touched by
-		// walAppender at all -- restart must rebuild those via replay just
-		// as faithfully as a follower's.
+		// The leader's own pre-restart -wal holds commit frames SQLite wrote
+		// directly, never routed through the follower-apply write path --
+		// restart must rebuild those via replay just as faithfully as a
+		// follower's.
 		target := leader.FSM.LastApplied()
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
@@ -100,9 +100,9 @@ var _ = Describe("node restart", func() {
 
 	// snapshottingCluster uses low enough snapshot thresholds that a local
 	// RAFT snapshot reliably exists by the time restart runs -- the case
-	// that specifically exercises FSM.Snapshot/Restore being wired
-	// correctly across a real process restart (hraft.NewRaft synchronously
-	// restores this node's latest local snapshot on startup).
+	// that specifically exercises snapshot capture and restore being wired
+	// correctly across a real process restart, which synchronously restores
+	// this node's latest local snapshot on startup.
 	snapshottingCluster := func() *testutils.TCPCluster {
 		GinkgoHelper()
 		return testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), 3,
@@ -122,9 +122,9 @@ var _ = Describe("node restart", func() {
 				return nodeExec(leader, fmt.Sprintf("INSERT INTO t (v) VALUES ('row%d')", i)) == nil
 			}, "leader to accept the next insert")
 		}
-		// Give the snapshot goroutine (SnapshotInterval ticks every 200ms)
-		// time to actually fire at least once, on every node, before
-		// restarting anything.
+		// Give the snapshot goroutine (it ticks on the configured 200ms
+		// interval) time to actually fire at least once, on every node,
+		// before restarting anything.
 		testutils.Eventually(GinkgoT(), 5*time.Second, 50*time.Millisecond, func() bool {
 			return leader.Raft.LastIndex() > uint64(rows)
 		}, "the leader's log to grow past the row count (snapshot compaction happened)")
@@ -155,10 +155,10 @@ var _ = Describe("node restart", func() {
 		assertRestarted(restarted, 40, target)
 	})
 
-	// FSM.Restore (run on startup whenever a local snapshot exists) resets
-	// local state back to the snapshot, so every self-authored log entry
-	// after it must replay normally on restart rather than being skipped
-	// as already-applied.
+	// The snapshot restore that runs on startup whenever a local snapshot
+	// exists resets local state back to the snapshot, so every self-authored
+	// log entry after it must replay normally on restart rather than being
+	// skipped as already-applied.
 	It("recovers a leader restarted after it has taken a local snapshot", func() {
 		c := snapshottingCluster()
 		defer c.Shutdown()
