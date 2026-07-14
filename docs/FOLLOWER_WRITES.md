@@ -372,11 +372,14 @@ adversarial review and are the difference between "design" and "footgun":
    wait before its `ApplyFuture` resolves.** That wait is bounded — hraft
    resolves every in-flight future with `ErrLeadershipLost` during
    step-down, so the future can't hang past a leadership change.
-5. **A loaned append skips the deferred threshold checkpoint.** That
-   checkpoint runs on the FSM goroutine at the end of `AppendFrames`; under
-   a loan it would extend the handler's lock hold (which local writers are
-   queued on) by a full passive checkpoint. The ticker-driven checkpointer
-   covers the debt.
+5. **A loaned append defers its threshold checkpoint to lock release.** Run
+   inline under the loan, that checkpoint would extend the handler's lock hold
+   (which local writers are queued on) by a full passive checkpoint across the
+   round trip. So it runs when the loaned lock is released instead — on the
+   handler's goroutine, after the OS lock is dropped, off the critical section
+   — giving a forwarded-write burst the same threshold backpressure a
+   self-locked append has rather than growing the `-wal` up to a full ticker
+   interval. The ticker remains the backstop for sub-threshold trickle.
 
 ### Deadlock audit (result: none, given the rules above)
 
