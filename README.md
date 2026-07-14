@@ -193,6 +193,56 @@ reconnects. Removing a node is therefore an explicit act (`-leave`, or
 `RemoveVoter` over gRPC), not a side effect of stopping the process. The
 leader's REPL also has `.addvoter <id> <address>` for adding a member by hand.
 
+## Consistency guarantees
+
+literaft replicates **physical page images** through RAFT, applied in the same
+total order on every node, so all replicas converge to byte-for-byte identical
+`.db`/`-wal`/`-shm` files. What that does and does not guarantee:
+
+- **Totally-ordered writes, no merges.** Every committed write is serialized
+  through RAFT's single-leader log. There is no page-level conflict resolution
+  anywhere — conflicts are *prevented* by that total order, never merged.
+- **Quorum-gated visibility and durability.** A write becomes visible (to local
+  readers and to external SQLite processes) only after it reaches RAFT quorum:
+  the commit-frame gate withholds the transaction's commit frame until RAFT
+  commits. A rejected write's commit frame never reaches disk, so it isn't even
+  crash-recoverable. Durability comes from the quorum, not from local `fsync`
+  (`synchronous=NORMAL` is expected).
+- **Read-your-writes on the node that wrote.** Once `COMMIT` returns, every
+  subsequent read on that node — including an external, unmodified SQLite
+  process reading its files — observes the write.
+- **Follower reads can be stale.** A follower serves reads from its own
+  most-recently-applied state, which may lag the leader. literaft does **not**
+  provide linearizable cross-node reads: a read on one node is not guaranteed to
+  see a write another node's `COMMIT` just returned.
+- **Writes are leader-only.** A write attempted on a follower is rejected with a
+  leader hint (the client redirects), *unless* the node is configured with the
+  opt-in write-forwarding transport (`cmd/literaft` enables it by default). A
+  forwarded write is accepted only if its page images were computed on exactly
+  the leader's current applied state; otherwise it is rejected as stale and the
+  client re-runs it against fresher state.
+
+### The stale-read no-op caveat
+
+Follower reads being stale-able has one sharp edge worth calling out. A
+*read-modify-write* issued on a follower — an `UPDATE`/`DELETE` with a `WHERE`
+clause, or an `INSERT ... SELECT` — evaluates its condition against the
+follower's local, possibly-stale snapshot.
+
+- If the statement **changes rows**, its page images are validated against the
+  leader's current state before being accepted; if the follower was stale, the
+  write is rejected and re-run against fresher state, so correctness holds.
+- But if the stale read makes the statement **match nothing**, it produces no
+  changes at all — so it never enters the RAFT log, is never validated, and
+  returns success as a local no-op. Against the up-to-date cluster state the
+  same statement might have modified rows.
+
+So a conditional write on a follower can silently do nothing based on a stale
+view. An application that needs a read-modify-write evaluated against the latest
+committed cluster state should issue it on the leader (or ensure the follower
+has caught up first). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md)
+for the full treatment.
+
 ## Further reading
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the complete design: write/read/
