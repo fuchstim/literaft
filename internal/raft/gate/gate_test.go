@@ -5,13 +5,12 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/raft"
-	"github.com/ncruces/go-sqlite3"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/fuchstim/literaft/fsm"
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
-	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -120,20 +119,20 @@ var _ = Describe("Gate", func() {
 		Expect(gate.LastRejection()).To(BeNil(), "a successful proposal must clear the previous rejection")
 	})
 
-	// vfs.File relies on errors.As to recover a *gateError's carried sqlite
-	// code (internal/vfs/file.go), so Gate's own error wrapping must not
-	// break that chain.
-	It("wraps a LogAdapter error without breaking errors.Is discovery of the concrete cause", func() {
+	// vfs.File relies on errors.As to recover a taxonomy error's carried sqlite
+	// code (internal/vfs/file.go), so whatever Gate returns must preserve the
+	// LogAdapter's concrete error.
+	It("surfaces a LogAdapter rejection without breaking errors.Is discovery of the concrete cause", func() {
 		f := newTestFSM()
 		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]
 
-		sentinel := vfs.GateError(errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY))
+		sentinel := rafterrors.NewCatchingUpError()
 		l := &fakeLog{apply: func(entry []byte) error { return sentinel }}
 		gate := raftgate.New(f, l)
 
 		err := gate.ProposeTransaction(txn.frames, txn.nTruncate)
 		Expect(err).To(HaveOccurred())
 		Expect(errors.Is(err, sentinel)).To(BeTrue(),
-			"a rejected LogAdapter error must stay discoverable through Gate's own wrap")
+			"a rejected LogAdapter error must stay discoverable to the caller")
 	})
 })

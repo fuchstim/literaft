@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	forwardpb "github.com/fuchstim/literaft/cmd/literaft/forward/proto"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/log"
 )
 
@@ -71,8 +72,9 @@ func (t *Transport) Handle(handler func(ctx context.Context, request []byte) ([]
 func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request []byte) ([]byte, error) {
 	conn, err := t.conn(t.resolve(leader))
 	if err != nil {
-		// No client was created, so nothing was transmitted to the leader.
-		return nil, &log.NotDeliveredError{Err: err}
+		// No client was created, so nothing was transmitted to the leader: a
+		// proven non-delivery, which is a clean retryable rejection.
+		return nil, rafterrors.NewNotAppliedError("forward request not delivered to the leader", err)
 	}
 	// A failed RPC is deliberately left ambiguous: gRPC can't prove a unary
 	// call that errored wasn't already received and processed.

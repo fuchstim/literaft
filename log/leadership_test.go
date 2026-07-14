@@ -7,9 +7,9 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/vfs"
-	"github.com/fuchstim/literaft/log"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -88,7 +88,7 @@ var _ = Describe("SingleWriterLog gaining-leadership drain", func() {
 		// the frame content here is never validated -- unlike txns above,
 		// it doesn't need to be real, valid page content.
 		proposeErr := newGate.ProposeTransaction([]*vfs.Frame{{Pgno: 1, Page: []byte("premature")}}, 1)
-		var catchingUp log.CatchingUpError
+		var catchingUp *rafterrors.CatchingUpError
 		Expect(errors.As(proposeErr, &catchingUp)).To(BeTrue(), "got %v (%T), not a CatchingUpError", proposeErr, proposeErr)
 
 		// Release the backlog: the drain's Barrier can now complete,

@@ -2,11 +2,11 @@ package testutils
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/hashicorp/raft"
 
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/log"
 )
 
@@ -46,8 +46,9 @@ func (t *inmemForwardTransport) Propose(ctx context.Context, leader raft.ServerA
 	handler := t.hub.handlers[leader]
 	t.hub.mu.RUnlock()
 	if handler == nil {
-		// No handler for the target: nothing was delivered anywhere.
-		return nil, &log.NotDeliveredError{Err: fmt.Errorf("no forward handler registered for %s", leader)}
+		// No handler for the target: nothing was delivered anywhere, a proven
+		// non-delivery (clean retryable rejection).
+		return nil, rafterrors.NewNotAppliedError("no forward handler registered for "+string(leader), nil)
 	}
 	return handler(ctx, req)
 }

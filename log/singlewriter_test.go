@@ -7,9 +7,9 @@ import (
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/vfs"
-	"github.com/fuchstim/literaft/log"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,7 +30,7 @@ var _ = Describe("SingleWriterLog", func() {
 		defer c.Shutdown()
 		c.ReadyLeader(GinkgoT())
 
-		var hint raft.ServerAddress
+		var hint string
 		testutils.Eventually(GinkgoT(), 5*time.Second, 20*time.Millisecond, func() bool {
 			leader := findLeader(c)
 			if leader == nil {
@@ -41,8 +41,8 @@ var _ = Describe("SingleWriterLog", func() {
 			if err == nil {
 				return false
 			}
-			var notLeader *log.NotLeaderError
-			if !errors.As(err, &notLeader) || notLeader.Leader != leader.Addr {
+			var notLeader *rafterrors.NotLeaderError
+			if !errors.As(err, &notLeader) || notLeader.Leader != string(leader.Addr) {
 				return false
 			}
 			hint = notLeader.Leader
@@ -64,7 +64,7 @@ var _ = Describe("SingleWriterLog", func() {
 
 		err := c.Gate(follower).ProposeTransaction([]*vfs.Frame{{Pgno: 1, Page: []byte("x")}}, 1)
 		Expect(err).To(HaveOccurred())
-		var notLeader *log.NotLeaderError
+		var notLeader *rafterrors.NotLeaderError
 		Expect(errors.As(c.Gate(follower).LastRejection(), &notLeader)).To(BeTrue(),
 			"LastRejection must return the same concrete error ProposeTransaction returned")
 

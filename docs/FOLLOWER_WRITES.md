@@ -93,8 +93,8 @@ accepted.
 3. The configured adapter is a `log.ForwardingLog` wrapping the node's
    `*log.SingleWriterLog`. `ForwardingLog.Apply` first calls the inner
    adapter. If that returns nil or any error other than
-   `*log.NotLeaderError`, it returns the result as-is — on a leader this
-   adapter is byte-for-byte today's behavior. A `NotLeaderError` is the
+   `*rafterrors.NotLeaderError`, it returns the result as-is — on a leader
+   this adapter is byte-for-byte today's behavior. A `NotLeaderError` is the
    forward trigger: it is returned strictly *before* anything was proposed,
    so forwarding is always safe at that point.
 4. Forward path: unmarshal E (for `Header.Id`), read
@@ -494,12 +494,12 @@ acquisition deadline behind `BUSY`).
 
 `SingleWriterLog` grows two small things: a leader-address accessor (for
 `transport.Propose` targeting; it already knows `LeaderWithID`), and typed
-classification of its non-`NotLeaderError` failures — today an
-`ErrEnqueueTimeout` (definitively **not** proposed) and an
-`ErrLeadershipLost` (ambiguous) both come back as anonymous wrapped errors;
-the handler and the forward path need to tell "safe to report
-definitively-rejected" from "ambiguous," and callers today would benefit from
-the same distinction.
+classification of its non-`NotLeaderError` failures through the shared
+`rafterrors` taxonomy — an `ErrEnqueueTimeout` (definitively **not** proposed)
+becomes a `*rafterrors.NotAppliedError` and an `ErrLeadershipLost` (ambiguous)
+becomes a `*rafterrors.AmbiguousError`; the handler and the forward path need
+to tell "safe to report definitively-rejected" from "ambiguous," which the
+taxonomy's `SafeToRetry` classifier answers directly.
 
 Wire format, `internal/raft/proto/forward.proto`:
 
@@ -530,16 +530,19 @@ bytes it validated (one decode for validation, zero re-encodes). Statuses
 `NOT_LEADER`/`STALE_BASE`/`CATCHING_UP`/`BUSY` are all **pre-propose**: the
 entry definitively did not enter the log.
 
-Error mapping on the follower (all through the existing `vfs.GateError`
-mechanism, mirroring how `CatchingUpError` already surfaces):
-`STALE_BASE`/`CATCHING_UP`/`BUSY` → retryable, tagged `sqlite3.BUSY` — the
-app re-runs the transaction and recomputes on fresher state. `NOT_LEADER`
-with a usable hint → `ForwardingLog` may re-resolve and re-send **the same
-request once** (safe: nothing was proposed, and the base check re-validates
-staleness at the new leader) before surfacing a retryable error.
+Error mapping on the follower (all through the shared `rafterrors` taxonomy,
+whose category fixes the surfaced `sqlite3` result code):
+`STALE_BASE`/`BUSY` → a retryable `*rafterrors.NotAppliedError` and
+`CATCHING_UP` → a retryable `*rafterrors.CatchingUpError`, both surfaced as
+`sqlite3.BUSY` — the app re-runs the transaction and recomputes on fresher
+state. `NOT_LEADER` with a usable hint → `ForwardingLog` may re-resolve and
+re-send **the same request once** (safe: nothing was proposed, and the base
+check re-validates staleness at the new leader); if it still can't place the
+write it surfaces a `*rafterrors.NotLeaderError` (redirect, `sqlite3.READONLY`,
+carrying the best-known hint), which is also `SafeToRetry`.
 `AMBIGUOUS`/transport-error-after-send → resolve via the marker CAS
 (§marker); if it lands on the error side, surface a **non-retryable-as-is**
-error: the write may still commit and then materializes locally via
+`*rafterrors.AmbiguousError`: the write may still commit and then materializes locally via
 `walappender` — the application must treat it exactly like today's
 ambiguous-commit on the leader (re-run only logic that is safe under
 at-least-once, or check state first).

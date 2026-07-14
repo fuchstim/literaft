@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/ncruces/go-sqlite3"
@@ -214,11 +213,8 @@ func (f *File) writeFrameData(p []byte, off int64) (int, error) {
 		f.txnDone = false
 
 		code := sqlite3.IOERR_WRITE
-		gateErr := &gateError{}
-		if errors.As(err, &gateErr) {
-			if gateErr.code != 0 {
-				code = gateErr.code
-			}
+		if c, ok := ErrCode(err); ok && c != 0 {
+			code = c
 		}
 
 		// Wrap, don't discard: err may carry a leader-redirect hint or

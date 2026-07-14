@@ -7,17 +7,12 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/ncruces/go-sqlite3"
 	"google.golang.org/protobuf/proto"
 
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
-	"github.com/fuchstim/literaft/internal/vfs"
 )
-
-// busyCode tags a retryable rejection so it surfaces as sqlite3.BUSY (retry)
-// rather than as a hard I/O failure.
-var busyCode = sqlite3.ExtendedErrorCode(sqlite3.BUSY)
 
 // LeaderTransport ships opaque byte blobs between nodes (the blobs are
 // proto-encoded forward request/response messages). Implementations own
@@ -96,13 +91,13 @@ func NewForwardingLog(inner *SingleWriterLog, transport LeaderTransport, target 
 // proposed -- is the forward trigger.
 func (f *ForwardingLog) Apply(entry []byte) error {
 	err := f.inner.Apply(entry)
-	var notLeader *NotLeaderError
+	var notLeader *rafterrors.NotLeaderError
 	if err == nil || !errors.As(err, &notLeader) {
 		return err
 	}
 
 	if notLeader.Leader == "" {
-		// No known leader to forward to: fall back to rejection.
+		// No known leader to forward to: fall back to the redirect.
 		return err
 	}
 
@@ -120,7 +115,7 @@ func (f *ForwardingLog) Apply(entry []byte) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), f.forwardTimeout)
 	defer cancel()
-	return f.forward(ctx, id, reqBytes, notLeader.Leader)
+	return f.forward(ctx, id, reqBytes, raft.ServerAddress(notLeader.Leader))
 }
 
 // forward sends reqBytes to the leader and interprets the response, retrying
@@ -130,25 +125,27 @@ func (f *ForwardingLog) Apply(entry []byte) error {
 func (f *ForwardingLog) forward(ctx context.Context, id string, reqBytes []byte, leader raft.ServerAddress) error {
 	for attempt := 0; ; attempt++ {
 		if leader == "" {
-			return &NotLeaderError{}
+			return rafterrors.NewNotLeaderError("")
 		}
 		respBytes, err := f.transport.Propose(ctx, leader, reqBytes)
 		if err != nil {
 			// A proven non-delivery (nothing proposed) is a clean retryable
-			// rejection: re-running is safe, the base check re-validates. Any
-			// other failure could have been delivered and its answer lost, so
-			// resolve via the marker CAS -- consumed if it committed, abandoned
-			// on timeout otherwise.
-			var notDelivered *NotDeliveredError
-			if errors.As(err, &notDelivered) {
-				return vfs.GateError(err, busyCode)
+			// rejection: re-running is safe, the base check re-validates. A
+			// transport signals it by returning a rafterrors.NotAppliedError,
+			// which is already retryable, so surface it as-is. Any other
+			// failure could have been delivered and its answer lost, so resolve
+			// via the marker CAS -- consumed if it committed, abandoned on
+			// timeout otherwise.
+			var notApplied *rafterrors.NotAppliedError
+			if errors.As(err, &notApplied) {
+				return err
 			}
-			return f.resolve(ctx, id, &AmbiguousForwardError{Err: err})
+			return f.resolve(ctx, id, err)
 		}
 
 		resp := &raftproto.ForwardResponse{}
 		if err := proto.Unmarshal(respBytes, resp); err != nil {
-			return f.resolve(ctx, id, &AmbiguousForwardError{Err: fmt.Errorf("decoding forward response: %w", err)})
+			return f.resolve(ctx, id, fmt.Errorf("decoding forward response: %w", err))
 		}
 
 		switch resp.GetStatus() {
@@ -157,34 +154,40 @@ func (f *ForwardingLog) forward(ctx context.Context, id string, reqBytes []byte,
 			// consumed, then publish. Consumption proves commitment.
 			return f.resolve(ctx, id, nil)
 		case raftproto.ForwardResponse_STALE_BASE:
-			return vfs.GateError(&StaleBaseError{LeaderLastApplied: resp.GetLastApplied()}, busyCode)
+			return rafterrors.NewNotAppliedError(
+				fmt.Sprintf("forwarded write lost to a concurrent write (leader applied index %d)", resp.GetLastApplied()), nil)
 		case raftproto.ForwardResponse_CATCHING_UP:
-			return vfs.GateError(CatchingUpError{}, busyCode)
+			return rafterrors.NewCatchingUpError()
 		case raftproto.ForwardResponse_BUSY:
-			return vfs.GateError(&ForwardBusyError{Reason: resp.GetDetail()}, busyCode)
+			reason := "leader busy"
+			if d := resp.GetDetail(); d != "" {
+				reason = "leader busy: " + d
+			}
+			return rafterrors.NewNotAppliedError(reason, nil)
 		case raftproto.ForwardResponse_NOT_LEADER:
 			if attempt == 0 && resp.GetLeaderAddr() != "" {
 				leader = raft.ServerAddress(resp.GetLeaderAddr())
 				continue
 			}
-			return vfs.GateError(&NotLeaderError{Leader: raft.ServerAddress(resp.GetLeaderAddr())}, busyCode)
+			return rafterrors.NewNotLeaderError(resp.GetLeaderAddr())
 		case raftproto.ForwardResponse_AMBIGUOUS:
-			return f.resolve(ctx, id, &AmbiguousForwardError{Err: errors.New(resp.GetDetail())})
+			return f.resolve(ctx, id, errors.New(resp.GetDetail()))
 		default:
-			return f.resolve(ctx, id, &AmbiguousForwardError{Err: fmt.Errorf("unknown forward status %v", resp.GetStatus())})
+			return f.resolve(ctx, id, fmt.Errorf("unknown forward status %v", resp.GetStatus()))
 		}
 	}
 }
 
 // resolve completes a forwarded proposal through the marker CAS: it waits for
 // local consumption (returning nil -> publish) or for ctx to expire (marker
-// abandoned -> the ambiguous error). It never re-proposes.
-func (f *ForwardingLog) resolve(ctx context.Context, id string, ambiguous *AmbiguousForwardError) error {
+// abandoned -> a non-retryable ambiguous error wrapping cause, or the await
+// error if cause is nil). It never re-proposes.
+func (f *ForwardingLog) resolve(ctx context.Context, id string, cause error) error {
 	if err := f.target.AwaitEntryApplied(ctx, id); err != nil {
-		if ambiguous != nil {
-			return ambiguous
+		if cause != nil {
+			return rafterrors.NewAmbiguousError(cause)
 		}
-		return &AmbiguousForwardError{Err: err}
+		return rafterrors.NewAmbiguousError(err)
 	}
 	return nil
 }
@@ -274,20 +277,20 @@ func (f *ForwardingLog) validateShape(e *raftproto.Entry) error {
 // NOT_LEADER/CATCHING_UP/BUSY are pre-propose (the entry did not enter the
 // log); AMBIGUOUS means it was proposed but its outcome is unknown.
 func (f *ForwardingLog) classifyApplyErr(err error) *raftproto.ForwardResponse {
-	var notLeader *NotLeaderError
+	var notLeader *rafterrors.NotLeaderError
 	if errors.As(err, &notLeader) {
 		return &raftproto.ForwardResponse{
 			Status:     raftproto.ForwardResponse_NOT_LEADER,
-			LeaderAddr: string(notLeader.Leader),
+			LeaderAddr: notLeader.Leader,
 			Detail:     err.Error(),
 		}
 	}
-	var catchingUp CatchingUpError
+	var catchingUp *rafterrors.CatchingUpError
 	if errors.As(err, &catchingUp) {
 		return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_CATCHING_UP, Detail: err.Error()}
 	}
-	var enqueue *EnqueueTimeoutError
-	if errors.As(err, &enqueue) {
+	var notApplied *rafterrors.NotAppliedError
+	if errors.As(err, &notApplied) {
 		return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_BUSY, Detail: err.Error()}
 	}
 	return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_AMBIGUOUS, Detail: err.Error()}

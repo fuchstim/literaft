@@ -9,6 +9,7 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	"github.com/fuchstim/literaft/driver"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/log"
 
@@ -68,7 +69,7 @@ var _ = Describe("Driver", func() {
 		_, err := db.ExecContext(context.Background(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 		Expect(err).To(HaveOccurred())
 
-		var notLeader *log.NotLeaderError
+		var notLeader *rafterrors.NotLeaderError
 		rejection := followerDriver.LastRejection()
 		Expect(errors.As(rejection, &notLeader)).To(BeTrue(),
 			"got %v (%T), not a NotLeaderError", rejection, rejection)

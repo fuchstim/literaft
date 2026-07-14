@@ -616,3 +616,63 @@ The FSM must own its own counter, advanced under the write lock.
   load-bearing: the leader-side handler is the first second-in-process
   acquirer, so the new lock-loan API fronts the OS lock with an in-process
   mutex and suppresses the appender's own lock/unlock under a loan.
+
+---
+
+## ADR-016 — One rejection taxonomy in `rafterrors`, superseding scattered typed errors + `vfs.GateError`
+
+**Status: ACCEPTED and BUILT (milestone M7, issue #74).** Supersedes the
+error-plumbing detail recorded under ADR-014 (`vfs.GateError`) and the
+per-status typed errors ADR-015's forwarding work grew.
+
+**Problem.** By the end of M9, a rejected write proposal could be one of eight
+concrete error types split across `log/` (`NotLeaderError`, `CatchingUpError`,
+`EnqueueTimeoutError`, `AmbiguousError`, `StaleBaseError`, `ForwardBusyError`,
+`AmbiguousForwardError`, `NotDeliveredError`), with retryability encoded
+*separately* by whether a call site wrapped the error in
+`vfs.GateError(err, sqlite3.BUSY)`. Knowledge was split three ways — the error
+types in `log`, the BUSY tagging applied ad-hoc in `log`, the code
+interpretation in `internal/vfs` — and the same type surfaced with different
+codes on different paths (`NotLeaderError` was untagged on the direct path but
+BUSY-tagged on the forwarding post-retry path). There was no single place that
+answered "is this retryable."
+
+**Decision.** A single taxonomy package, `internal/raft/gate/errors`
+(`rafterrors`), with three categories — `Redirect`, `Retryable`, `Ambiguous` —
+and four concrete types constructed via `NewNotLeaderError` /
+`NewCatchingUpError` / `NewNotAppliedError` / `NewAmbiguousError`. The category
+is the single source of truth: it fixes the surfaced `sqlite3` result code
+(`Category.ResultCode`: Redirect→`READONLY`, Retryable→`BUSY`,
+Ambiguous→`IOERR_WRITE`), so there is no per-call-site tagging. `log`'s
+adapters (and the reference/test transports) now *translate* their conditions
+into these errors instead of defining their own; the eight old types collapse
+into the four (enqueue-timeout / stale-base / forward-busy / proven
+non-delivery all become `NotAppliedError`; both ambiguous variants become
+`AmbiguousError`).
+
+`internal/vfs` stays raft-agnostic: it defines a generic `vfs.CodedError`
+interface (`ResultCode() sqlite3.ExtendedErrorCode`) that the taxonomy errors
+satisfy, and `vfs.ErrCode` reads it — the old concrete `vfs.gateError` wrapper
+and `vfs.GateError` constructor are gone.
+
+**Why `NotLeaderError` → `READONLY` (issue #28).** A redirect is its own
+category, distinct from a retryable BUSY: a client on a bare
+`SingleWriterLog` follower should redirect to the leader, not spin retrying the
+same connection. Giving it a distinct code (a follower is effectively
+read-only for writes) lets a client tell redirect from retry from the result
+code alone, not only from the concrete type recovered via `LastRejection`.
+Both redirect and retryable are `SafeToRetry` (both provably pre-commit), which
+is what the forwarding correctness test keys on; only `Ambiguous` is not.
+
+**Consequences.**
+- `SingleWriterLog.Apply`'s dead FSM-rejection branch (`future.Response()`)
+  is removed: `fsm.FSM.Apply` panics on failure and otherwise returns nil, so
+  that response was always nil.
+- `Gate.proposeTransaction` no longer wraps the adapter error in an opaque
+  `fmt.Errorf("failed to apply entry: %w", …)`; it returns the taxonomy error
+  directly, so `LastRejection` surfaces it cleanly.
+- The returned-code vs `LastRejection` duality (also flagged by #28) stays,
+  but is no longer a smell: the code carries coarse retryability (and often
+  doesn't survive `database/sql`), while `LastRejection` remains the reliable
+  channel for recovering the concrete type and its detail (e.g. a leader
+  hint).

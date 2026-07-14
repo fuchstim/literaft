@@ -370,6 +370,24 @@ size to M3's shm work.
   so the WALAppender joins the recovered wal-index rather than tripping its
   "recovery from an existing WAL isn't implemented" guard. That load-bearing
   open ordering is documented and pinned by a regression test.
+- [**Consolidate LogAdapter/raftgate error handling into one taxonomy**](https://github.com/fuchstim/literaft/issues/74)
+  *(done, `DECISIONS.md` ADR-016)* Error handling across the
+  `raftgate.Gate`/`LogAdapter`/`SingleWriterLog`/`ForwardingLog`/`internal/vfs`
+  stack had grown scattered — retryability was encoded ad-hoc by whether a
+  call site wrapped the error in `vfs.GateError(err, BUSY)`, the same type
+  surfaced with different codes on different paths, and eight typed errors
+  lived in `log`. Replaced by a single taxonomy package,
+  `internal/raft/gate/errors` (`rafterrors`): three categories
+  (Redirect/Retryable/Ambiguous) and four constructors (`NewNotLeaderError`,
+  `NewCatchingUpError`, `NewNotAppliedError`, `NewAmbiguousError`), each
+  category fixing the surfaced `sqlite3` result code
+  (`Category.ResultCode`: `READONLY`/`BUSY`/`IOERR_WRITE`). `log`'s adapters
+  translate into the taxonomy instead of defining their own types;
+  `internal/vfs` keeps a generic `CodedError` interface (raft-agnostic) that
+  the taxonomy satisfies. Also removed the dead FSM-rejection branch in
+  `SingleWriterLog.Apply` and `Gate`'s opaque error wrap. Subsumes `#28`
+  (`NotLeaderError` now maps to `READONLY` so a client can tell redirect from
+  retry).
 
 ## M8 — Library polish & packaging
 
