@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -50,7 +51,7 @@ func captureTransactions(pageSize uint32, stmts ...string) []capturedTxn {
 	})
 
 	name := "raftgate-test-capture-" + uuid.NewString()
-	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSize)
+	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSize, hclog.NewNullLogger())
 
 	path := filepath.Join(GinkgoT().TempDir(), "capture.db")
 	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)

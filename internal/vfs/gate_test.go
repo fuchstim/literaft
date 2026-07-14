@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -66,7 +67,7 @@ func (g *spyGate) snapshot() []capturedEntry {
 func openGated(path string, gate vfs.Gate) *sqlite3.Conn {
 	GinkgoHelper()
 	name := "literaft-gate-test-" + filepath.Base(path)
-	vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize())
+	vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
 
 	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 	Expect(err).NotTo(HaveOccurred())
@@ -246,7 +247,7 @@ var _ = Describe("commit-frame interception", func() {
 		// Registering with any value other than SQLite's actual page size
 		// guarantees a mismatch on the very first captured frame.
 		actual := probePageSize()
-		vfs.Register(name, sqlite3vfs.Find(""), gate, actual+1)
+		vfs.Register(name, sqlite3vfs.Find(""), gate, actual+1, hclog.NewNullLogger())
 
 		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 		Expect(err).NotTo(HaveOccurred())

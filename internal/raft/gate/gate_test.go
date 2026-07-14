@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
 
@@ -34,7 +35,7 @@ var _ = Describe("Gate", func() {
 	It("builds a wire entry from the captured frames, with a fresh header id per proposal", func() {
 		f := newTestFSM()
 		l := &fakeLog{}
-		gate := raftgate.New(f, l)
+		gate := raftgate.New(f, l, hclog.NewNullLogger())
 
 		txns := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")
 		Expect(txns).To(HaveLen(1))
@@ -84,7 +85,7 @@ var _ = Describe("Gate", func() {
 			duringApply = tableExists(f.DBPath(), "t")
 			return nil
 		}
-		gate := raftgate.New(f, l)
+		gate := raftgate.New(f, l, hclog.NewNullLogger())
 
 		Expect(gate.ProposeTransaction(txn.frames, txn.nTruncate)).To(Succeed())
 		Expect(duringApply).To(BeFalse(), "the proposer's own entry must not materialize while still in flight")
@@ -106,7 +107,7 @@ var _ = Describe("Gate", func() {
 		txn := captureTransactions(f.PageSize(), "CREATE TABLE t (id INTEGER PRIMARY KEY)")[0]
 
 		l := &fakeLog{apply: func(entry []byte) error { return errors.New("fakeLog: rejected") }}
-		gate := raftgate.New(f, l)
+		gate := raftgate.New(f, l, hclog.NewNullLogger())
 
 		Expect(gate.LastRejection()).To(BeNil(), "no proposal attempted yet")
 
@@ -128,7 +129,7 @@ var _ = Describe("Gate", func() {
 
 		sentinel := rafterrors.NewCatchingUpError()
 		l := &fakeLog{apply: func(entry []byte) error { return sentinel }}
-		gate := raftgate.New(f, l)
+		gate := raftgate.New(f, l, hclog.NewNullLogger())
 
 		err := gate.ProposeTransaction(txn.frames, txn.nTruncate)
 		Expect(err).To(HaveOccurred())

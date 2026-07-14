@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"golang.org/x/sys/unix"
 )
 
@@ -43,17 +44,18 @@ func ReadLock(i int) int { return 3 + i }
 type SharedMemory struct {
 	file    *os.File
 	regions [][]byte
+	logger  hclog.Logger
 }
 
 // Open opens (creating if necessary) the wal-index file at path and
 // performs the shm-open handshake: if no one else has it open, truncate
 // and reinitialize it; otherwise join the existing mapping.
-func Open(path string) (*SharedMemory, error) {
+func Open(path string, logger hclog.Logger) (*SharedMemory, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
 	}
-	s := &SharedMemory{file: f}
+	s := &SharedMemory{file: f, logger: logger}
 
 	typ, err := testLock(f, dmsOffset, 1)
 	if err != nil {
@@ -82,6 +84,9 @@ func Open(path string) (*SharedMemory, error) {
 			f.Close()
 			return nil, err
 		}
+		logger.Debug("opened wal-index as first opener; truncated stale content", "path", path)
+	} else {
+		logger.Debug("joined existing wal-index mapping", "path", path)
 	}
 	// Also non-blocking: the
 	// only way this conflicts is the same narrow exclusive-claim window

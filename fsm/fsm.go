@@ -12,6 +12,7 @@ import (
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 	"google.golang.org/protobuf/proto"
@@ -29,6 +30,7 @@ type FSM struct {
 	pageSize    uint32
 	walAppender *walappender.WALAppender
 	snapshotter *snapshotter.Snapshotter
+	logger      hclog.Logger
 
 	// lastApplied is the raft index of the last command entry materialized
 	// into this node's local database. It is advanced under the WAL write
@@ -126,12 +128,15 @@ func New(dbPath string, opts ...Option) (*FSM, error) {
 	// run SQLite's own WAL recovery (during the WAL-mode PRAGMA above) and
 	// holding the shm alive so the appender joins the recovered mapping
 	// rather than re-initializing it.
-	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval)
+	walAppender, err := walappender.Open(dbPath, pageSize, o.checkpointThresholdPages, o.checkpointInterval, o.logger.Named("walappender"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open WAL appender: %w", err)
 	}
 
-	snapshotter := snapshotter.New(dbPath, pageSize)
+	snapshotter := snapshotter.New(dbPath, pageSize, o.logger.Named("snapshotter"))
+
+	logger := o.logger.Named("fsm")
+	logger.Info("opened FSM", "dbPath", dbPath, "pageSize", pageSize)
 
 	return &FSM{
 		dbPath:      dbPath,
@@ -140,6 +145,7 @@ func New(dbPath string, opts ...Option) (*FSM, error) {
 		pageSize:    uint32(pageSize),
 		walAppender: walAppender,
 		snapshotter: snapshotter,
+		logger:      logger,
 
 		skipEntries: make(map[string]*skipEntry),
 		loans:       make(map[string]*walappender.HeldLock),
@@ -277,6 +283,7 @@ func (f *FSM) Apply(log *raft.Log) any {
 
 	entry := &raftproto.Entry{}
 	if err := proto.Unmarshal(log.Data, entry); err != nil {
+		f.logger.Error("failed to unmarshal committed entry", "index", log.Index, "error", err)
 		panic(fmt.Sprintf("failed to unmarshal committed entry at index %d: %v", log.Index, err))
 	}
 
@@ -286,6 +293,7 @@ func (f *FSM) Apply(log *raft.Log) any {
 	// This node's own in-flight proposal, already published via its own write
 	// path: consume the marker, don't re-materialize.
 	if f.tryConsumeSkip(id, index) {
+		f.logger.Debug("consumed skip marker; entry already published locally", "index", index, "id", id)
 		return nil
 	}
 
@@ -297,14 +305,20 @@ func (f *FSM) Apply(log *raft.Log) any {
 	// An accepted forwarded entry whose write lock a handler is still holding
 	// across its round trip: materialize under that loaned lock.
 	if loan := f.takeLoan(id); loan != nil {
+		f.logger.Debug("applying forwarded entry under loaned lock",
+			"index", index, "id", id, "pages", len(txn.Pages), "nTruncate", txn.NTruncate)
 		if err := f.walAppender.AppendTransactionUnderLock(loan, txn, func() { f.lastApplied.Store(index) }); err != nil {
+			f.logger.Error("failed to append forwarded entry", "index", index, "id", id, "error", err)
 			panic(fmt.Sprintf("failed to append forwarded entry at index %d: %v", index, err))
 		}
 		return nil
 	}
 
 	// Otherwise materialize under our own write lock.
+	f.logger.Debug("applying entry",
+		"index", index, "id", id, "pages", len(txn.Pages), "nTruncate", txn.NTruncate)
 	if err := f.walAppender.AppendTransaction(txn, func() { f.lastApplied.Store(index) }); err != nil {
+		f.logger.Error("failed to append entry", "index", index, "id", id, "error", err)
 		panic(fmt.Sprintf("failed to append entry at index %d: %v", index, err))
 	}
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
@@ -74,7 +75,7 @@ func captureTransactions(pageSize uint32, stmts ...string) []capturedTxn {
 	})
 
 	name := "literaft-log-test-capture-" + uuid.NewString()
-	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSize)
+	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSize, hclog.NewNullLogger())
 
 	path := filepath.Join(GinkgoT().TempDir(), "capture.db")
 	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
@@ -151,7 +152,7 @@ func newGatedCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster
 	nodes := make(map[*testutils.Node]nodeGate, n)
 	for _, node := range c.Nodes() {
 		l := log.NewSingleWriterLog(node.Raft, log.WithApplyTimeout(timeout))
-		nodes[node] = nodeGate{log: l, gate: raftgate.New(node.FSM, l)}
+		nodes[node] = nodeGate{log: l, gate: raftgate.New(node.FSM, l, hclog.NewNullLogger())}
 	}
 	return &gatedCluster{c, nodes}
 }

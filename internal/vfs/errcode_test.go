@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -36,7 +37,7 @@ var _ = Describe("rejected-write error code mapping", func() {
 
 		gate := codeGate{err: codedErr{errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY)}}
 		name := "literaft-errcode-test-busy"
-		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize())
+		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
 
 		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 		Expect(err).NotTo(HaveOccurred())
@@ -56,7 +57,7 @@ var _ = Describe("rejected-write error code mapping", func() {
 
 		gate := codeGate{err: errors.New("rejected for test")}
 		name := "literaft-errcode-test-plain"
-		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize())
+		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
 
 		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 		Expect(err).NotTo(HaveOccurred())

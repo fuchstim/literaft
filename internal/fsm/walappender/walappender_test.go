@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -104,7 +105,7 @@ func pageSizeProbe() uint32 {
 func leaderConn(path string, gate vfs.Gate) *sqlite3.Conn {
 	GinkgoHelper()
 	name := "literaft-walappender-test-" + filepath.Base(path)
-	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSizeProbe())
+	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSizeProbe(), hclog.NewNullLogger())
 
 	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 	Expect(err).NotTo(HaveOccurred())
@@ -197,7 +198,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		followerPath := filepath.Join(dir, "follower.db")
 		primeFollowerWALMode(followerPath)
 
-		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0)
+		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
@@ -264,7 +265,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		followerPath := filepath.Join(dir, "follower-multipage.db")
 		primeFollowerWALMode(followerPath)
 
-		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0)
+		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
@@ -344,7 +345,7 @@ var _ = Describe("WALAppender WAL recovery at open", func() {
 		defer recoverConn.Close()
 		Expect(recoverConn.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
 
-		appender, err := walappender.Open(crashPath, pageSize, -1, 0)
+		appender, err := walappender.Open(crashPath, pageSize, -1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred(),
 			"Open must not reject the crash-left -wal once SQLite has recovered the wal-index")
 		defer appender.Close()
@@ -388,7 +389,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// Threshold of 1: every applied transaction is immediately
 		// followed by a PASSIVE checkpoint attempt, giving the very next
 		// apply the best possible chance to rewind.
-		appender, err := walappender.Open(followerPath, pageSize, 1, 0)
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
@@ -437,7 +438,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// reached through the forwarded-write path. Before the release-path
 		// checkpoint, a loaned append skipped the threshold entirely, so with no
 		// ticker nothing ever checkpointed and the -wal grew without bound.
-		appender, err := walappender.Open(followerPath, pageSize, 1, 0)
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
@@ -491,7 +492,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// nBackfill lags maxFrame. A reader connecting in that window must
 		// claim a real, non-zero read-mark rather than the mark-0
 		// fallback, which only applies once nBackfill is fully caught up.
-		appender, err := walappender.Open(followerPath, pageSize, 3, 0)
+		appender, err := walappender.Open(followerPath, pageSize, 3, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 

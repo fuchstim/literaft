@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
 
@@ -60,6 +61,7 @@ type ForwardingLog struct {
 	inner     innerLog
 	transport LeaderTransport
 	target    ForwardTarget
+	logger    hclog.Logger
 
 	forwardTimeout     time.Duration
 	handlerLockTimeout time.Duration
@@ -78,6 +80,7 @@ func NewForwardingLog(inner *SingleWriterLog, transport LeaderTransport, target 
 		inner:              inner,
 		transport:          transport,
 		target:             target,
+		logger:             o.logger.Named("forward"),
 		forwardTimeout:     o.forwardTimeout,
 		handlerLockTimeout: o.handlerLockTimeout,
 	}
@@ -112,6 +115,9 @@ func (f *ForwardingLog) Apply(entry []byte) error {
 	if merr != nil {
 		return fmt.Errorf("failed to marshal forward request: %w", merr)
 	}
+
+	f.logger.Debug("forwarding follower write to leader",
+		"id", id, "baseIndex", req.BaseIndex, "leader", notLeader.Leader)
 
 	ctx, cancel := context.WithTimeout(context.Background(), f.forwardTimeout)
 	defer cancel()
@@ -151,8 +157,11 @@ func (f *ForwardingLog) forward(ctx context.Context, id string, reqBytes []byte,
 		case raftproto.ForwardResponse_OK:
 			// Dual-wait: block until the entry replicates back and is locally
 			// consumed, then publish. Consumption proves commitment.
+			f.logger.Debug("leader accepted forwarded write", "id", id)
 			return f.resolve(ctx, id, nil)
 		case raftproto.ForwardResponse_STALE_BASE:
+			f.logger.Debug("leader rejected forwarded write: stale base",
+				"id", id, "leaderApplied", resp.GetLastApplied())
 			return rafterrors.NewNotAppliedError(
 				fmt.Sprintf("forwarded write lost to a concurrent write (leader applied index %d)", resp.GetLastApplied()), nil)
 		case raftproto.ForwardResponse_CATCHING_UP:
@@ -214,6 +223,7 @@ func (f *ForwardingLog) handleRequest(ctx context.Context, req *raftproto.Forwar
 	// touching the write lock, so the follower re-resolves rather than
 	// re-running its whole txn on a STALE_BASE.
 	if !f.inner.IsLeader() {
+		f.logger.Info("redirecting mis-routed forwarded write", "id", id, "leader", f.inner.LeaderAddr())
 		return &raftproto.ForwardResponse{
 			Status:     raftproto.ForwardResponse_NOT_LEADER,
 			LeaderAddr: string(f.inner.LeaderAddr()),
@@ -232,15 +242,20 @@ func (f *ForwardingLog) handleRequest(ctx context.Context, req *raftproto.Forwar
 
 	// Base check under the held lock. Nothing has been proposed yet.
 	if la := f.target.LastApplied(); req.GetBaseIndex() != la {
+		f.logger.Info("rejecting forwarded write: stale base",
+			"id", id, "baseIndex", req.GetBaseIndex(), "lastApplied", la)
 		return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STALE_BASE, LastApplied: la}
 	}
+	f.logger.Debug("forwarded write base-index check passed", "id", id, "baseIndex", req.GetBaseIndex())
 
 	// Propose through the inner adapter. On nil the entry is committed and --
 	// via the loan -- already applied on this leader.
 	if err := f.inner.Apply(req.GetEntry()); err != nil {
+		f.logger.Info("forwarded write proposal failed", "id", id, "error", err)
 		return f.classifyApplyErr(err)
 	}
 
+	f.logger.Info("accepted forwarded write", "id", id, "lastApplied", f.target.LastApplied())
 	return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_OK, LastApplied: f.target.LastApplied()}
 }
 

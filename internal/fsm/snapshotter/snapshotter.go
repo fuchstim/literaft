@@ -9,18 +9,21 @@ import (
 	"os"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 )
 
 type Snapshotter struct {
 	dbPath   string
 	pageSize uint32
+	logger   hclog.Logger
 }
 
-func New(dbPath string, pageSize uint32) *Snapshotter {
+func New(dbPath string, pageSize uint32, logger hclog.Logger) *Snapshotter {
 	return &Snapshotter{
 		dbPath:   dbPath,
 		pageSize: pageSize,
+		logger:   logger,
 	}
 }
 
@@ -29,6 +32,8 @@ func New(dbPath string, pageSize uint32) *Snapshotter {
 // (carrying index -- the raft index this snapshot was taken at) followed by
 // that file's bytes.
 func (s *Snapshotter) Snapshot(index uint64) (io.ReadCloser, error) {
+	s.logger.Info("capturing snapshot", "index", index)
+
 	db, err := sqlite3.Open("file:" + s.dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database at path `%s`: %w", s.dbPath, err)
@@ -60,6 +65,7 @@ func (s *Snapshotter) Snapshot(index uint64) (io.ReadCloser, error) {
 
 	header := encodeHeader(index)
 	tf := &tempFileReader{tmp}
+	s.logger.Info("captured snapshot", "index", index)
 	return &headeredReader{
 		Reader: io.MultiReader(bytes.NewReader(header[:]), tmp),
 		closer: tf,
@@ -75,6 +81,7 @@ func (b *Snapshotter) Restore(r io.Reader) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	b.logger.Info("restoring snapshot", "index", index)
 
 	tmp, err := os.CreateTemp("", "literaft-restore-*")
 	if err != nil {
@@ -94,7 +101,7 @@ func (b *Snapshotter) Restore(r io.Reader) (uint64, error) {
 		return 0, fmt.Errorf("snapshot is %d bytes, not a whole multiple of the page size %d", size, b.pageSize)
 	}
 
-	w, err := walappender.Open(b.dbPath, b.pageSize, -1, 0)
+	w, err := walappender.Open(b.dbPath, b.pageSize, -1, 0, b.logger.Named("walappender"))
 	if err != nil {
 		return 0, fmt.Errorf("failed to open WAL at path `%s`: %w", b.dbPath, err)
 	}
@@ -140,5 +147,6 @@ func (b *Snapshotter) Restore(r io.Reader) (uint64, error) {
 		return 0, fmt.Errorf("failed to checkpoint database at path `%s`: %w", b.dbPath, err)
 	}
 
+	b.logger.Info("restored snapshot", "index", index, "pages", nPages)
 	return index, nil
 }

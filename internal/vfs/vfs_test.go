@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -22,7 +23,7 @@ import (
 var _ = Describe("Register", func() {
 	It("panics if pageSize is 0", func() {
 		Expect(func() {
-			vfs.Register("literaft-vfs-test-zero-pagesize", sqlite3vfs.Find(""), alwaysCommitGate{}, 0)
+			vfs.Register("literaft-vfs-test-zero-pagesize", sqlite3vfs.Find(""), alwaysCommitGate{}, 0, hclog.NewNullLogger())
 		}).To(Panic())
 	})
 })

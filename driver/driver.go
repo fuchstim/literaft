@@ -14,11 +14,16 @@ type Driver struct {
 	dbPath, vfsName string
 }
 
-func New(fsm *fsm.FSM, log raftgate.LogAdapter) *Driver {
+func New(fsm *fsm.FSM, log raftgate.LogAdapter, opts ...Option) *Driver {
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	vfsName := uuid.NewString()
 
-	gate := raftgate.New(fsm, log)
-	vfs.Register(vfsName, sqlite3vfs.Find("os"), gate, fsm.PageSize())
+	gate := raftgate.New(fsm, log, o.logger.Named("gate"))
+	vfs.Register(vfsName, sqlite3vfs.Find("os"), gate, fsm.PageSize(), o.logger.Named("vfs"))
 
 	return &Driver{gate, fsm.DBPath(), vfsName}
 }

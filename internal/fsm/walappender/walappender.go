@@ -12,6 +12,7 @@ import (
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 )
 
@@ -31,6 +32,7 @@ type WALAppender struct {
 	db       *sqlite3.Conn
 	f        *os.File
 	shm      *shm.SharedMemory
+	logger   hclog.Logger
 
 	checkpointTicker         *time.Ticker
 	checkpointThresholdPages int
@@ -79,7 +81,7 @@ type WALAppender struct {
 // journal_mode=WAL enabled but never had an actual write transaction, and
 // trusting it would chain every frame's checksum from a salt real readers
 // never see written into the -wal file's own header.
-func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpointInterval time.Duration) (*WALAppender, error) {
+func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpointInterval time.Duration, logger hclog.Logger) (*WALAppender, error) {
 	db, err := sqlite3.Open("file:" + dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database at path `%s`: %w", dbPath, err)
@@ -90,7 +92,7 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 		return nil, errors.Join(db.Close(), fmt.Errorf("failed to open -wal file at path `%s`: %w", dbPath+"-wal", err))
 	}
 
-	sm, err := shm.Open(dbPath + "-shm")
+	sm, err := shm.Open(dbPath+"-shm", logger.Named("shm"))
 	if err != nil {
 		return nil, errors.Join(db.Close(), f.Close(), fmt.Errorf("failed to open -shm file at path `%s`: %w", dbPath+"-shm", err))
 	}
@@ -100,6 +102,7 @@ func Open(dbPath string, pageSize uint32, checkpointThresholdPages int, checkpoi
 		db:                       db,
 		f:                        f,
 		shm:                      sm,
+		logger:                   logger,
 		checkpointThresholdPages: checkpointThresholdPages,
 		lockCh:                   make(chan struct{}, 1),
 	}
@@ -313,6 +316,8 @@ func (a *WALAppender) appendFramesLocked(fs []*Frame, afterCommit func()) error 
 			hdr.frameCksum = cksum
 			hdr.change++
 			writeWALIndexHeader(region0, hdr)
+			a.logger.Debug("published wal-index header",
+				"mxFrame", frame, "nPage", f.nTruncate, "frames", len(fs))
 		}
 	}
 
@@ -354,6 +359,7 @@ func (a *WALAppender) rewindLogIfBackfilled(region0 []byte, hdr walIndexHeader) 
 	hdr.change++
 	resetCkptInfoForRewind(region0)
 	writeWALIndexHeader(region0, hdr)
+	a.logger.Debug("rewound backfilled WAL log to start")
 
 	return hdr, nil
 }
@@ -485,5 +491,10 @@ func (a *WALAppender) checkpoint() {
 	if a.closed {
 		return
 	}
-	a.db.WALCheckpoint("main", sqlite3.CHECKPOINT_PASSIVE)
+	nLog, nCkpt, err := a.db.WALCheckpoint("main", sqlite3.CHECKPOINT_PASSIVE)
+	if err != nil {
+		a.logger.Debug("passive checkpoint failed", "error", err)
+		return
+	}
+	a.logger.Debug("ran passive checkpoint", "walFrames", nLog, "checkpointed", nCkpt)
 }

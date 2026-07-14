@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
@@ -17,6 +18,7 @@ var _ raftgate.LogAdapter = (*SingleWriterLog)(nil)
 type SingleWriterLog struct {
 	raft    *raft.Raft
 	timeout time.Duration
+	logger  hclog.Logger
 
 	readyMu sync.RWMutex
 	ready   bool
@@ -39,7 +41,7 @@ func NewSingleWriterLog(r *raft.Raft, opts ...Option) *SingleWriterLog {
 		opt(&o)
 	}
 
-	g := &SingleWriterLog{raft: r, timeout: o.applyTimeout, stop: make(chan struct{})}
+	g := &SingleWriterLog{raft: r, timeout: o.applyTimeout, logger: o.logger.Named("log"), stop: make(chan struct{})}
 	g.wg.Go(g.watchLeadership)
 
 	return g
@@ -95,12 +97,14 @@ func (g *SingleWriterLog) watchLeadership() {
 			g.readyMu.Unlock()
 
 			if !isLeader {
+				g.logger.Info("lost leadership", "term", g.raft.CurrentTerm())
 				continue
 			}
 
 			// Closed until proven otherwise, even if some earlier drain
 			// already left it open -- a fresh term starts undrained.
 			term := g.raft.CurrentTerm()
+			g.logger.Info("gained leadership; draining apply backlog", "term", term)
 			g.wg.Go(func() { g.drain(term) })
 		}
 	}
@@ -140,6 +144,7 @@ func (g *SingleWriterLog) drain(term uint64) {
 			defer g.readyMu.Unlock()
 			if g.raft.State() == raft.Leader && g.raft.CurrentTerm() == term {
 				g.ready = true
+				g.logger.Info("drained apply backlog; ready to serve writes", "term", term)
 			}
 
 			return

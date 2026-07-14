@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -20,7 +22,7 @@ var _ = Describe("Open", func() {
 		dir := GinkgoT().TempDir()
 		path := filepath.Join(dir, "test.db-shm")
 
-		first, err := Open(path)
+		first, err := Open(path, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer first.Close()
 
@@ -28,7 +30,7 @@ var _ = Describe("Open", func() {
 		Expect(err).NotTo(HaveOccurred())
 		region[0] = 0x42
 
-		second, err := Open(path)
+		second, err := Open(path, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer second.Close()
 

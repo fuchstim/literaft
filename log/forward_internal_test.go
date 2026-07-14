@@ -107,6 +107,7 @@ func newFL(inner *fakeInner, tr *fakeTransport, tg *fakeTarget) *ForwardingLog {
 		inner:              inner,
 		transport:          tr,
 		target:             tg,
+		logger:             o.logger.Named("forward"),
 		forwardTimeout:     o.forwardTimeout,
 		handlerLockTimeout: o.handlerLockTimeout,
 	}

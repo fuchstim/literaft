@@ -3,6 +3,7 @@ package vfs_test
 import (
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -51,7 +52,7 @@ func probePageSize() uint32 {
 const vfsName = "literaft-vfs-test"
 
 func init() {
-	vfs.Register(vfsName, sqlite3vfs.Find(""), alwaysCommitGate{}, probePageSize())
+	vfs.Register(vfsName, sqlite3vfs.Find(""), alwaysCommitGate{}, probePageSize(), hclog.NewNullLogger())
 }
 
 func queryInt(c *sqlite3.Conn, sql string) int64 {
