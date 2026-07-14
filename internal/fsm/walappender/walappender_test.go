@@ -421,6 +421,62 @@ var _ = Describe("WALAppender log rewind", func() {
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
 	})
 
+	It("keeps the follower -wal bounded for loaned (forwarded-write) appends via the release-path checkpoint, with no ticker", func() {
+		dir := GinkgoT().TempDir()
+
+		const numUpdates = 30
+		setup, updates, pageSize := singleRowUpdates(dir, numUpdates)
+
+		followerPath := filepath.Join(dir, "follower-loaned-bounded.db")
+		primeFollowerWALMode(followerPath)
+
+		// Ticker disabled (interval 0), so the only thing that can checkpoint a
+		// loaned append is the threshold check that runs when its lock is
+		// released. Threshold of 1 so every released loan attempts a checkpoint,
+		// letting the next apply rewind -- exactly the self-locked behavior, but
+		// reached through the forwarded-write path. Before the release-path
+		// checkpoint, a loaned append skipped the threshold entirely, so with no
+		// ticker nothing ever checkpointed and the -wal grew without bound.
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0)
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		// applyLoaned materializes txn the way a forwarded write does: under a
+		// lock acquired up front and released only after the append, so the
+		// threshold checkpoint runs on release rather than under the (would-be
+		// round-trip) hold.
+		applyLoaned := func(txn *raftproto.Transaction) {
+			GinkgoHelper()
+			h, err := appender.AcquireWriteLock(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(appender.AppendTransactionUnderLock(h, txn, nil)).To(Succeed())
+			h.Release()
+		}
+
+		for _, txn := range setup {
+			applyLoaned(txn)
+		}
+
+		var peak int64
+		for _, txn := range updates {
+			applyLoaned(txn)
+			if size := walFileSize(followerPath); size > peak {
+				peak = size
+			}
+		}
+
+		unboundedEstimate := int64(numUpdates) * int64(frameHeaderSize+pageSize)
+		Expect(peak).To(BeNumerically("<", unboundedEstimate/4),
+			"peak -wal size %d bytes looks like it grew proportionally to all %d loaned updates instead of staying bounded by the release-path checkpoint",
+			peak, numUpdates)
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
+	})
+
 	It("does not rewind while a reader holds an older snapshot, and resumes once it's released", func() {
 		dir := GinkgoT().TempDir()
 

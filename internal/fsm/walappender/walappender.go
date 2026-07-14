@@ -34,7 +34,14 @@ type WALAppender struct {
 
 	checkpointTicker         *time.Ticker
 	checkpointThresholdPages int
-	dirtyPageCount           int
+
+	// dirtyMu guards dirtyPageCount. An append increments it while holding the
+	// WAL write lock, but the threshold checkpoint reads and resets it after
+	// that lock is released -- for a loaned (forwarded-write) append, on a
+	// different goroutine than the one that appended -- so the counter needs
+	// its own synchronization independent of the write lock.
+	dirtyMu        sync.Mutex
+	dirtyPageCount int
 
 	// lockCh is a one-token semaphore fronting the OFD WAL_WRITE_LOCK. The OFD
 	// lock excludes SQLite's connections and other processes, but two
@@ -44,13 +51,15 @@ type WALAppender struct {
 	// second in-process holder exists. Lock order: token, then OS lock.
 	lockCh chan struct{}
 
-	// checkpointMu serializes checkpoint(): a *sqlite3.Conn is not safe for
-	// concurrent use, and checkpoint() is called from both the background
-	// checkpointer goroutine and AppendFrames' deferred threshold checkpoint
-	// (which runs on the caller's goroutine). Overlapping WALCheckpoint calls
-	// on the shared db connection corrupt the checkpoint, silently leaving
-	// frames uncopied that a later log rewind then discards for good.
+	// checkpointMu serializes passive checkpoints on the shared db connection: a
+	// *sqlite3.Conn is not safe for concurrent use, and a checkpoint runs from
+	// both the background checkpointer goroutine and a write lock's release (on
+	// the releasing goroutine). Overlapping WALCheckpoint calls corrupt the
+	// checkpoint, silently leaving frames uncopied that a later log rewind then
+	// discards for good. It also guards closed, so shutdown waits out any
+	// in-flight checkpoint and no later one touches the db once it's closed.
 	checkpointMu sync.Mutex
+	closed       bool
 }
 
 // Open opens (creating if necessary) the -wal and -shm files alongside the
@@ -122,6 +131,13 @@ func (a *WALAppender) Close() error {
 		a.checkpointTicker.Stop()
 	}
 
+	// Take checkpointMu before closing the db: it waits out any checkpoint
+	// already running (ticker or lock release) and marks the appender closed so
+	// no later checkpoint touches the db connection being closed.
+	a.checkpointMu.Lock()
+	a.closed = true
+	a.checkpointMu.Unlock()
+
 	return errors.Join(a.db.Close(), a.f.Close(), a.shm.Close())
 }
 
@@ -170,7 +186,12 @@ func (a *WALAppender) lockOFD(ctx context.Context) error {
 	}
 }
 
-// Release releases the OFD lock and returns the in-process token.
+// Release releases the OFD lock and returns the in-process token, then runs a
+// threshold checkpoint if enough dirty pages have accumulated. The checkpoint
+// runs strictly after the lock is dropped -- never under it -- so it can't
+// extend the critical section. That matters most on the forwarded-write path,
+// where the loan is released here on the handler's goroutine after the RAFT
+// round trip.
 func (h *HeldLock) Release() {
 	if h.released {
 		return
@@ -178,6 +199,7 @@ func (h *HeldLock) Release() {
 	h.released = true
 	h.a.shm.Unlock(shm.WriteLock)
 	h.a.lockCh <- struct{}{}
+	h.a.maybeThresholdCheckpoint()
 }
 
 // AppendTransaction appends txn's frames to the local -wal, acquiring and
@@ -189,10 +211,11 @@ func (a *WALAppender) AppendTransaction(txn *raftproto.Transaction, afterCommit 
 	return a.appendFramesSelfLocked(framesFromTransaction(txn), afterCommit)
 }
 
-// AppendTransactionUnderLock appends txn under an already-held lock: it
-// neither acquires nor releases the write lock, and skips the threshold
-// checkpoint (which would extend the hold by a full passive checkpoint -- the
-// ticker covers the debt). afterCommit runs under the held lock, as above.
+// AppendTransactionUnderLock appends txn under an already-held lock: it neither
+// acquires nor releases the write lock, and runs no checkpoint inline (which
+// would extend the hold by a full passive checkpoint across the round trip).
+// The threshold checkpoint runs when that lock is later released, off the
+// critical section. afterCommit runs under the held lock, as above.
 func (a *WALAppender) AppendTransactionUnderLock(h *HeldLock, txn *raftproto.Transaction, afterCommit func()) error {
 	if h == nil || h.a != a || h.released {
 		return fmt.Errorf("AppendTransactionUnderLock called without a valid held lock for this appender")
@@ -219,18 +242,9 @@ func (a *WALAppender) AppendFrames(fs []*Frame) error {
 	return a.appendFramesSelfLocked(fs, nil)
 }
 
-// appendFramesSelfLocked acquires the write lock, appends, releases, and then
-// (after release) runs the threshold checkpoint if enough dirty pages have
-// accumulated.
+// appendFramesSelfLocked acquires the write lock, appends, and releases it. The
+// threshold checkpoint runs on release, after the lock is dropped.
 func (a *WALAppender) appendFramesSelfLocked(fs []*Frame, afterCommit func()) error {
-	// Run after the write lock is released.
-	defer func() {
-		if a.dirtyPageCount >= a.checkpointThresholdPages {
-			a.checkpoint()
-			a.dirtyPageCount = 0
-		}
-	}()
-
 	h, err := a.AcquireWriteLock(context.Background())
 	if err != nil {
 		return err
@@ -289,7 +303,9 @@ func (a *WALAppender) appendFramesLocked(fs []*Frame, afterCommit func()) error 
 		}
 		addFrameToWALIndex(region, frame, f.pgNo)
 
+		a.dirtyMu.Lock()
 		a.dirtyPageCount++
+		a.dirtyMu.Unlock()
 
 		if f.nTruncate != 0 {
 			hdr.maxFrame = frame
@@ -444,8 +460,30 @@ func (a *WALAppender) runCheckpointer() {
 	}
 }
 
+// maybeThresholdCheckpoint runs a passive checkpoint and resets the dirty-page
+// counter once at least checkpointThresholdPages have accumulated. It must run
+// only after the WAL write lock is released, so the checkpoint stays off the
+// critical section. dirtyMu across the check-and-reset keeps the counter safe
+// between the appending goroutine and the releasing goroutine, and lets a
+// single crossing trigger a single checkpoint.
+func (a *WALAppender) maybeThresholdCheckpoint() {
+	a.dirtyMu.Lock()
+	crossed := a.dirtyPageCount >= a.checkpointThresholdPages
+	if crossed {
+		a.dirtyPageCount = 0
+	}
+	a.dirtyMu.Unlock()
+
+	if crossed {
+		a.checkpoint()
+	}
+}
+
 func (a *WALAppender) checkpoint() {
 	a.checkpointMu.Lock()
 	defer a.checkpointMu.Unlock()
+	if a.closed {
+		return
+	}
 	a.db.WALCheckpoint("main", sqlite3.CHECKPOINT_PASSIVE)
 }

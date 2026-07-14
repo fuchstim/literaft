@@ -17,10 +17,11 @@ func defaultOptions() options {
 }
 
 // WithCheckpointInterval sets how often the background checkpointer runs; a
-// non-positive value disables it, leaving only the dirty-page threshold. A
-// node accepting forwarded writes must keep this positive: those writes skip
-// the threshold checkpoint, so without the periodic one the WAL grows
-// unbounded.
+// non-positive value disables it, leaving only the dirty-page threshold. Keep
+// it positive in production: the threshold only fires once enough dirty pages
+// accumulate (on release, for both self-locked and forwarded writes), so a
+// steady sub-threshold trickle still needs the periodic checkpoint to keep the
+// WAL from growing.
 func WithCheckpointInterval(d time.Duration) Option {
 	return func(o *options) { o.checkpointInterval = d }
 }
