@@ -28,6 +28,7 @@ import (
 	"github.com/fuchstim/literaft/cmd/literaft/membership"
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
+	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
 	"github.com/fuchstim/literaft/log"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
@@ -215,13 +216,13 @@ func run() error {
 	l := log.NewSingleWriterLog(r)
 	reg.add(func() error { l.Close(); return nil })
 
-	// With forwarding enabled, the driver's adapter forwards a follower's
-	// write to the leader over fwdTransport; otherwise l is used directly and
-	// follower writes are rejected.
-	d := driver.New(f, l)
+	// With forwarding enabled the adapter forwards a follower's write to the
+	// leader; otherwise follower writes are rejected.
+	var adapter raftgate.LogAdapter = l
 	if *forwardWrites {
-		d = driver.New(f, log.NewForwardingLog(l, fwdTransport, f))
+		adapter = log.NewForwardingLog(l, fwdTransport, f)
 	}
+	d := driver.New(f, adapter)
 	reg.add(func() error { d.Close(); return nil })
 
 	sql.Register("literaft", d)

@@ -134,10 +134,15 @@ func (f *ForwardingLog) forward(ctx context.Context, id string, reqBytes []byte,
 		}
 		respBytes, err := f.transport.Propose(ctx, leader, reqBytes)
 		if err != nil {
-			// The transport failed; we cannot tell "never delivered" from
-			// "delivered, answer lost." Resolve via the marker CAS, which is
-			// safe either way: if it committed, replication consumes the
-			// marker (success); otherwise it times out and abandons.
+			// A proven non-delivery (nothing proposed) is a clean retryable
+			// rejection: re-running is safe, the base check re-validates. Any
+			// other failure could have been delivered and its answer lost, so
+			// resolve via the marker CAS -- consumed if it committed, abandoned
+			// on timeout otherwise.
+			var notDelivered *NotDeliveredError
+			if errors.As(err, &notDelivered) {
+				return vfs.GateError(err, busyCode)
+			}
 			return f.resolve(ctx, id, &AmbiguousForwardError{Err: err})
 		}
 

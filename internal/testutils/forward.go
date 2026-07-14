@@ -46,7 +46,8 @@ func (t *inmemForwardTransport) Propose(ctx context.Context, leader raft.ServerA
 	handler := t.hub.handlers[leader]
 	t.hub.mu.RUnlock()
 	if handler == nil {
-		return nil, fmt.Errorf("no forward handler registered for %s", leader)
+		// No handler for the target: nothing was delivered anywhere.
+		return nil, &log.NotDeliveredError{Err: fmt.Errorf("no forward handler registered for %s", leader)}
 	}
 	return handler(ctx, req)
 }

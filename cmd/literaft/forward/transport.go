@@ -71,8 +71,11 @@ func (t *Transport) Handle(handler func(ctx context.Context, request []byte) ([]
 func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request []byte) ([]byte, error) {
 	conn, err := t.conn(t.resolve(leader))
 	if err != nil {
-		return nil, err
+		// No client was created, so nothing was transmitted to the leader.
+		return nil, &log.NotDeliveredError{Err: err}
 	}
+	// A failed RPC is deliberately left ambiguous: gRPC can't prove a unary
+	// call that errored wasn't already received and processed.
 	resp, err := forwardpb.NewForwardingClient(conn).Propose(ctx, &forwardpb.Envelope{Payload: request})
 	if err != nil {
 		return nil, err
