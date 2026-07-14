@@ -87,3 +87,18 @@ func (e *AmbiguousForwardError) Error() string {
 	return "forwarded write outcome ambiguous: " + e.Err.Error()
 }
 func (e *AmbiguousForwardError) Unwrap() error { return e.Err }
+
+// NotDeliveredError means a transport proved the forward request never
+// reached the leader, so nothing was proposed. Retryable, and cleanly so: it
+// skips the ambiguous-outcome wait. Return it only when non-delivery is
+// certain -- an in-flight request whose outcome is unknown (e.g. a connection
+// dropped mid-call) must stay a plain, possibly-committed error.
+type NotDeliveredError struct{ Err error }
+
+func (e *NotDeliveredError) Error() string {
+	if e.Err == nil {
+		return "forward request not delivered to the leader"
+	}
+	return "forward request not delivered to the leader: " + e.Err.Error()
+}
+func (e *NotDeliveredError) Unwrap() error { return e.Err }

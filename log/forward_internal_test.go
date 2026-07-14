@@ -267,6 +267,25 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		Expect(errors.As(err, &amb)).To(BeTrue())
 		Expect(tr.calls).To(Equal(1))
 	})
+
+	It("rejects a proven-not-delivered transport error as retryable without waiting on the marker", func() {
+		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
+			return nil, &NotDeliveredError{Err: errors.New("connection refused")}
+		}}
+		awaited := false
+		tg := &fakeTarget{pageSize: pageSize, await: func(context.Context, string) error {
+			awaited = true
+			return nil
+		}}
+		fl := newFL(inner, tr, tg)
+
+		err := fl.Apply(entryBytes("x", pageSize))
+		var notDelivered *NotDeliveredError
+		Expect(errors.As(err, &notDelivered)).To(BeTrue())
+		assertRetryable(err)
+		Expect(awaited).To(BeFalse(), "a proven non-delivery must not wait out the ambiguous timeout")
+	})
 })
 
 // --- leader (handler) path -------------------------------------------------
