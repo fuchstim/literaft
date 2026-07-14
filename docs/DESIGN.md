@@ -62,10 +62,11 @@ into an `internal/raft/proto.Entry`, self-skip-marks it on the `fsm.FSM`
 `log.SingleWriterLog` (package `log`, a sibling of `driver`/`fsm`, not the
 standard library) is the real, hraft-backed `LogAdapter`: it owns the
 `*hraft.Raft` handle, the leader/ready/drain state machine (`§Role
-transitions` below), and translates hraft's own failure modes into
-`*log.NotLeaderError`/`log.CatchingUpError`. Gate knows nothing of any of
-that — it would work unchanged against a `LogAdapter` backed by some other
-consensus mechanism entirely.
+transitions` below), and translates hraft's own failure modes into the shared
+rejection taxonomy in `internal/raft/gate/errors` (`rafterrors`) — a
+`*rafterrors.NotLeaderError`, a `*rafterrors.CatchingUpError`, etc. Gate knows
+nothing of any of that — it would work unchanged against a `LogAdapter` backed
+by some other consensus mechanism entirely.
 
 A second `LogAdapter` is designed but not yet built (`FOLLOWER_WRITES.md`,
 milestone M9/issue #32): `log.ForwardingLog` wraps a `*log.SingleWriterLog`
@@ -170,18 +171,22 @@ reqID field is ever added.
    re-materializing via `walappender` — everyone else applies it normally.
 
 5. **RAFT fails** (lost leadership / timeout / no quorum / not-leader):
-   `Gate.ProposeTransaction` returns an error wrapping whatever its
-   `LogAdapter.Apply` returned — for `log.SingleWriterLog`, a
-   `*log.NotLeaderError`, a `log.CatchingUpError` (tagged via
-   `vfs.GateError` with a retriable `sqlite3.BUSY` code instead of the
-   default `IOERR_WRITE`, since a caller should retry rather than redirect),
-   or a wrapped `hraft` error. `internal/vfs.File` discards the buffered
-   commit frame and returns the corresponding I/O error from `xWrite`. The
-   failure occurs *before* the wal-index append, so `mxFrame` never moves
-   and the shm is untouched. The data frames already on disk are inert and get
-   overwritten by the next txn at the same offset. `COMMIT` fails; the app
-   rolls back and redirects to the leader (the error carries a leader hint —
-   see `Gate.LastRejection`, `driver.Driver.LastRejection`).
+   `Gate.ProposeTransaction` returns whatever its `LogAdapter.Apply` returned
+   — for `log.SingleWriterLog`, one of the shared `rafterrors` taxonomy
+   errors: a `*rafterrors.NotLeaderError` (redirect, surfaced as
+   `sqlite3.READONLY`), a `*rafterrors.CatchingUpError` (retryable, surfaced
+   as `sqlite3.BUSY` so a caller retries rather than treats it as a hard I/O
+   failure), a `*rafterrors.NotAppliedError` (retryable), or a
+   `*rafterrors.AmbiguousError` (possibly-committed, surfaced as the default
+   `IOERR_WRITE`). Each error's category fixes its `sqlite3` result code
+   (`rafterrors.Category.ResultCode`), and `internal/vfs.File` reads it via
+   `vfs.ErrCode`, discards the buffered commit frame, and returns the
+   corresponding I/O error from `xWrite`. The failure occurs *before* the
+   wal-index append, so `mxFrame` never moves and the shm is untouched. The
+   data frames already on disk are inert and get overwritten by the next txn
+   at the same offset. `COMMIT` fails; the app rolls back and redirects to the
+   leader (the `NotLeaderError` carries a leader hint — see
+   `Gate.LastRejection`, `driver.Driver.LastRejection`).
 
 Because the gate is the commit-frame *write*, not a sync, this works under
 `synchronous=NORMAL` (see `§durability`).
@@ -438,8 +443,8 @@ forwards whatever its `LogAdapter.Apply` returns.
   current-term `hraft.Barrier` call returns — which by construction blocks
   until every already-committed entry, including any backlog, has been sent
   through `fsm.FSM.Apply` on this node (`SingleWriterLog.drain`).
-  `SingleWriterLog.Apply` rejects with a `CatchingUpError` while closed
-  (tagged via `vfs.GateError` with a retriable `sqlite3.BUSY` code), which
+  `SingleWriterLog.Apply` rejects with a `*rafterrors.CatchingUpError` while
+  closed (a retryable-category error, surfaced as `sqlite3.BUSY`), which
   `Gate.ProposeTransaction` passes straight through.
 
   This drain is also what closes the Figure-8 self-apply race: the stale

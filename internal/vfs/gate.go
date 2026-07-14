@@ -14,32 +14,24 @@ type Gate interface {
 	ProposeTransaction(frames []*Frame, nTruncate uint32) error
 }
 
-type gateError struct {
+// CodedError is an error that names the sqlite3 result code the write path
+// should surface for it instead of the IOERR_WRITE default. A Gate returns one
+// to say how a rejection must be reported -- e.g. a retryable rejection as
+// sqlite3.BUSY so a client retries rather than treating it as a hard I/O
+// failure. The rejection taxonomy itself lives outside this package (the VFS
+// stays agnostic of raft); vfs only needs the carried code.
+type CodedError interface {
 	error
-	code sqlite3.ExtendedErrorCode
+	ResultCode() sqlite3.ExtendedErrorCode
 }
 
-// Unwrap exposes the wrapped error to errors.As/errors.Is: callers like
-// Driver.LastRejection recover concrete types (e.g. a CatchingUpError)
-// through the chain, and embedding alone doesn't provide this -- the
-// promoted Error method comes from the embedded field's static (interface)
-// type, which declares no Unwrap.
-func (e *gateError) Unwrap() error { return e.error }
-
-// GateError tags a ProposeTransaction rejection with the sqlite3 result
-// code File should surface for it, instead of the IOERR_WRITE default.
-func GateError(err error, code sqlite3.ExtendedErrorCode) *gateError {
-	return &gateError{error: err, code: code}
-}
-
-// ErrCode reports the sqlite3 result code a GateError anywhere in err's chain
-// was tagged with, and whether such a tag was found. It lets a caller tell a
-// retryable rejection (sqlite3.BUSY) from a hard I/O failure without matching
-// on the concrete error type behind the tag.
+// ErrCode reports the result code carried by a CodedError anywhere in err's
+// chain, and whether one was found. It lets the write path tell a retryable
+// rejection from a hard I/O failure without matching on any concrete type.
 func ErrCode(err error) (sqlite3.ExtendedErrorCode, bool) {
-	ge := &gateError{}
-	if errors.As(err, &ge) {
-		return ge.code, true
+	var c CodedError
+	if errors.As(err, &c) {
+		return c.ResultCode(), true
 	}
 	return 0, false
 }

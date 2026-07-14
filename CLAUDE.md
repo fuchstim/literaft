@@ -186,6 +186,10 @@ this file's context — update it *from* GitHub, not the other way around.
         gate/                     – thin, hraft-agnostic commit-frame gate: builds a
                                      RAFT entry and proposes it through a
                                      raftgate.LogAdapter
+            errors/               – rafterrors: the single rejected-proposal
+                                     taxonomy (Redirect/Retryable/Ambiguous +
+                                     the sqlite result code each maps to);
+                                     LogAdapters translate into it
         proto/                    – RAFT log entry wire format (encode/decode)
     membership/                   – cluster join/leave control plane: a gRPC
                                      service (membership.go + proto/) sharing the
@@ -201,9 +205,9 @@ this file's context — update it *from* GitHub, not the other way around.
                                      real TCP+raftsqlite), used by _test.go files
                                      across the module
 /log/                             – log.SingleWriterLog: the real hraft-backed
-                                     raftgate.LogAdapter, owning *hraft.Raft,
-                                     leader/ready/drain state, and
-                                     NotLeaderError/CatchingUpError
+                                     raftgate.LogAdapter, owning *hraft.Raft and
+                                     leader/ready/drain state; translates
+                                     rejections into the rafterrors taxonomy
 /driver/                          – database/sql-compatible driver: wires a
                                      caller-supplied fsm.FSM + raftgate.LogAdapter
                                      into a gate + registered VFS + database/sql.Driver

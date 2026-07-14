@@ -9,6 +9,7 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	"google.golang.org/protobuf/proto"
 
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 
@@ -138,18 +139,18 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 	})
 
 	It("does not forward a NotLeaderError with no leader hint", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("") }}
 		tr := &fakeTransport{}
 		fl := newFL(inner, tr, &fakeTarget{pageSize: pageSize})
 
 		err := fl.Apply(entryBytes("x", pageSize))
-		var nl *NotLeaderError
+		var nl *rafterrors.NotLeaderError
 		Expect(errors.As(err, &nl)).To(BeTrue())
 		Expect(tr.calls).To(Equal(0))
 	})
 
 	It("forwards on NotLeaderError, stamping the base index, and succeeds on OK once consumed", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		var gotBase uint64
 		var gotLeader raft.ServerAddress
 		tr := &fakeTransport{propose: func(_ context.Context, leader raft.ServerAddress, req []byte) ([]byte, error) {
@@ -172,17 +173,17 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		Expect(consumed).To(BeTrue(), "OK must dual-wait on local consumption")
 	})
 
-	It("surfaces STALE_BASE as a retryable (sqlite3.BUSY) StaleBaseError", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+	It("surfaces STALE_BASE as a retryable (sqlite3.BUSY) NotAppliedError", func() {
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 			return respBytes(&raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STALE_BASE, LastApplied: 99}), nil
 		}}
 		fl := newFL(inner, tr, &fakeTarget{pageSize: pageSize})
 
 		err := fl.Apply(entryBytes("x", pageSize))
-		var stale *StaleBaseError
-		Expect(errors.As(err, &stale)).To(BeTrue())
-		Expect(stale.LeaderLastApplied).To(Equal(uint64(99)))
+		var notApplied *rafterrors.NotAppliedError
+		Expect(errors.As(err, &notApplied)).To(BeTrue())
+		Expect(err.Error()).To(ContainSubstring("99"), "the leader's applied index is a diagnostic")
 		assertRetryable(err)
 	})
 
@@ -190,7 +191,7 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		for _, tc := range []struct {
 			status raftproto.ForwardResponse_Status
 		}{{raftproto.ForwardResponse_CATCHING_UP}, {raftproto.ForwardResponse_BUSY}} {
-			inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+			inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 			status := tc.status
 			tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 				return respBytes(&raftproto.ForwardResponse{Status: status}), nil
@@ -201,7 +202,7 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 	})
 
 	It("re-resolves and re-sends exactly once on NOT_LEADER with a fresh hint", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "stale:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("stale:1") }}
 		var targets []raft.ServerAddress
 		tr := &fakeTransport{propose: func(_ context.Context, leader raft.ServerAddress, _ []byte) ([]byte, error) {
 			targets = append(targets, leader)
@@ -217,7 +218,7 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 	})
 
 	It("does not re-send more than once even if NOT_LEADER keeps coming back", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "a:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("a:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 			return respBytes(&raftproto.ForwardResponse{Status: raftproto.ForwardResponse_NOT_LEADER, LeaderAddr: "b:2"}), nil
 		}}
@@ -229,7 +230,7 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 	})
 
 	It("resolves AMBIGUOUS via the marker CAS: consumed -> success", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 			return respBytes(&raftproto.ForwardResponse{Status: raftproto.ForwardResponse_AMBIGUOUS, Detail: "lost leadership"}), nil
 		}}
@@ -241,7 +242,7 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 	})
 
 	It("resolves AMBIGUOUS via the marker CAS: abandoned -> non-retryable ambiguous error", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 			return respBytes(&raftproto.ForwardResponse{Status: raftproto.ForwardResponse_AMBIGUOUS}), nil
 		}}
@@ -249,13 +250,13 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		fl := newFL(inner, tr, tg)
 
 		err := fl.Apply(entryBytes("x", pageSize))
-		var amb *AmbiguousForwardError
+		var amb *rafterrors.AmbiguousError
 		Expect(errors.As(err, &amb)).To(BeTrue())
 		assertNotRetryable(err)
 	})
 
 	It("resolves a transport error via the marker CAS without re-proposing", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
 			return nil, errors.New("connection reset")
 		}}
@@ -263,15 +264,17 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		fl := newFL(inner, tr, tg)
 
 		err := fl.Apply(entryBytes("x", pageSize))
-		var amb *AmbiguousForwardError
+		var amb *rafterrors.AmbiguousError
 		Expect(errors.As(err, &amb)).To(BeTrue())
 		Expect(tr.calls).To(Equal(1))
 	})
 
 	It("rejects a proven-not-delivered transport error as retryable without waiting on the marker", func() {
-		inner := &fakeInner{apply: func([]byte) error { return &NotLeaderError{Leader: "leader:1"} }}
+		inner := &fakeInner{apply: func([]byte) error { return rafterrors.NewNotLeaderError("leader:1") }}
 		tr := &fakeTransport{propose: func(context.Context, raft.ServerAddress, []byte) ([]byte, error) {
-			return nil, &NotDeliveredError{Err: errors.New("connection refused")}
+			// A transport signals a proven non-delivery with a retryable
+			// NotAppliedError.
+			return nil, rafterrors.NewNotAppliedError("not delivered", errors.New("connection refused"))
 		}}
 		awaited := false
 		tg := &fakeTarget{pageSize: pageSize, await: func(context.Context, string) error {
@@ -281,8 +284,8 @@ var _ = Describe("ForwardingLog follower Apply path", func() {
 		fl := newFL(inner, tr, tg)
 
 		err := fl.Apply(entryBytes("x", pageSize))
-		var notDelivered *NotDeliveredError
-		Expect(errors.As(err, &notDelivered)).To(BeTrue())
+		var notApplied *rafterrors.NotAppliedError
+		Expect(errors.As(err, &notApplied)).To(BeTrue())
 		assertRetryable(err)
 		Expect(awaited).To(BeFalse(), "a proven non-delivery must not wait out the ambiguous timeout")
 	})
@@ -397,28 +400,28 @@ var _ = Describe("ForwardingLog leader handler path", func() {
 			Expect(resp.GetStatus()).To(Equal(want))
 			Expect(tg.releases).To(Equal(1), "the loan must be released on every error path")
 		},
-		Entry("NotLeader -> NOT_LEADER", &NotLeaderError{Leader: "l:1"}, raftproto.ForwardResponse_NOT_LEADER),
-		Entry("CatchingUp -> CATCHING_UP", vfs.GateError(CatchingUpError{}, sqlite3.ExtendedErrorCode(sqlite3.BUSY)), raftproto.ForwardResponse_CATCHING_UP),
-		Entry("EnqueueTimeout -> BUSY", &EnqueueTimeoutError{Err: errors.New("enqueue")}, raftproto.ForwardResponse_BUSY),
-		Entry("ambiguous -> AMBIGUOUS", &AmbiguousError{Err: errors.New("lost")}, raftproto.ForwardResponse_AMBIGUOUS),
+		Entry("NotLeader -> NOT_LEADER", rafterrors.NewNotLeaderError("l:1"), raftproto.ForwardResponse_NOT_LEADER),
+		Entry("CatchingUp -> CATCHING_UP", rafterrors.NewCatchingUpError(), raftproto.ForwardResponse_CATCHING_UP),
+		Entry("NotApplied -> BUSY", rafterrors.NewNotAppliedError("enqueue", errors.New("enqueue")), raftproto.ForwardResponse_BUSY),
+		Entry("ambiguous -> AMBIGUOUS", rafterrors.NewAmbiguousError(errors.New("lost")), raftproto.ForwardResponse_AMBIGUOUS),
 	)
 })
 
-// assertRetryable checks err carries a sqlite3.BUSY-tagged gate error so
-// internal/vfs surfaces it as retryable.
+// assertRetryable checks err surfaces as retryable -- a taxonomy error whose
+// result code is sqlite3.BUSY, so internal/vfs reports it as retryable.
 func assertRetryable(err error) {
 	GinkgoHelper()
 	Expect(err).To(HaveOccurred())
 	code, ok := vfs.ErrCode(err)
-	Expect(ok).To(BeTrue(), "retryable rejection must be a tagged gate error")
-	Expect(code).To(Equal(busyCode))
+	Expect(ok).To(BeTrue(), "retryable rejection must carry a result code")
+	Expect(code).To(Equal(sqlite3.ExtendedErrorCode(sqlite3.BUSY)))
 }
 
 func assertNotRetryable(err error) {
 	GinkgoHelper()
 	Expect(err).To(HaveOccurred())
 	code, ok := vfs.ErrCode(err)
-	Expect(ok && code == busyCode).To(BeFalse(), "must not be BUSY-tagged")
+	Expect(ok && code == sqlite3.ExtendedErrorCode(sqlite3.BUSY)).To(BeFalse(), "must not be BUSY")
 }
 
 var _ = Describe("classification", func() {

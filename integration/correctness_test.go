@@ -12,8 +12,8 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	ncrdriver "github.com/ncruces/go-sqlite3/driver"
 
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
-	"github.com/fuchstim/literaft/internal/vfs"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -284,9 +284,9 @@ func execForwarded(t testutils.TB, n *testutils.Node, o op) int64 {
 			rows, _ = res.RowsAffected()
 			return true
 		}
-		code, ok := vfs.ErrCode(n.Driver.LastRejection())
-		Expect(ok && code == sqlite3.ExtendedErrorCode(sqlite3.BUSY)).To(BeTrue(),
-			"non-retryable follower-write outcome (not safe to re-run): %v", n.Driver.LastRejection())
+		rej := n.Driver.LastRejection()
+		Expect(rafterrors.SafeToRetry(rej)).To(BeTrue(),
+			"non-retryable follower-write outcome (not safe to re-run): %v", rej)
 		return false
 	}, fmt.Sprintf("follower write to be accepted: %s", o.sql))
 	return rows

@@ -66,8 +66,11 @@ func (g *Gate) proposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
 		return fmt.Errorf("failed to marshal entry: %w", err)
 	}
 
+	// Return the LogAdapter's rejection unwrapped: it already carries its own
+	// category and result code, and this is the value LastRejection surfaces,
+	// so callers recover it directly.
 	if err := g.log.Apply(b); err != nil {
-		return fmt.Errorf("failed to apply entry: %w", err)
+		return err
 	}
 
 	return nil

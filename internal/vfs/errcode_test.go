@@ -20,12 +20,21 @@ type codeGate struct{ err error }
 
 func (g codeGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error { return g.err }
 
+// codedErr is a minimal vfs.CodedError, standing in for a taxonomy error so
+// this test stays raft-agnostic (it only exercises the vfs code-extraction).
+type codedErr struct {
+	error
+	code sqlite3.ExtendedErrorCode
+}
+
+func (e codedErr) ResultCode() sqlite3.ExtendedErrorCode { return e.code }
+
 var _ = Describe("rejected-write error code mapping", func() {
-	It("surfaces a GateError's carried code instead of the IOERR_WRITE default", func() {
+	It("surfaces a CodedError's carried code instead of the IOERR_WRITE default", func() {
 		dir := GinkgoT().TempDir()
 		path := filepath.Join(dir, "busy.db")
 
-		gate := codeGate{err: vfs.GateError(errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY))}
+		gate := codeGate{err: codedErr{errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY)}}
 		name := "literaft-errcode-test-busy"
 		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize())
 
@@ -38,7 +47,7 @@ var _ = Describe("rejected-write error code mapping", func() {
 		writeErr := c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 		Expect(writeErr).To(HaveOccurred())
 		Expect(errors.Is(writeErr, sqlite3.BUSY)).To(BeTrue(),
-			"a GateError(..., BUSY) rejection must surface as sqlite3.BUSY, got: %v", writeErr)
+			"a CodedError(..., BUSY) rejection must surface as sqlite3.BUSY, got: %v", writeErr)
 	})
 
 	It("defaults to IOERR_WRITE for a plain, uncoded rejection error", func() {

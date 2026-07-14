@@ -2,15 +2,13 @@ package log
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/ncruces/go-sqlite3"
 
 	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
-	"github.com/fuchstim/literaft/internal/vfs"
+	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 )
 
 var _ raftgate.LogAdapter = (*SingleWriterLog)(nil)
@@ -154,17 +152,17 @@ func (g *SingleWriterLog) drain(term uint64) {
 	}
 }
 
-// Apply implements raftgate.LogAdapter. A rejected or ambiguous proposal
-// (including ErrLeadershipLost -- "proposed, outcome unknown") surfaces as
-// an error.
+// Apply implements raftgate.LogAdapter, translating every rejection into the
+// shared error taxonomy. A rejected or ambiguous proposal (including a
+// lost-leadership "proposed, outcome unknown" case) surfaces as an error.
 func (g *SingleWriterLog) Apply(e []byte) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
-		return &NotLeaderError{Leader: leader}
+		return rafterrors.NewNotLeaderError(string(leader))
 	}
 
 	if !g.Ready() {
-		return vfs.GateError(CatchingUpError{}, sqlite3.ExtendedErrorCode(sqlite3.BUSY))
+		return rafterrors.NewCatchingUpError()
 	}
 
 	future := g.raft.Apply(e, g.timeout)
@@ -173,15 +171,9 @@ func (g *SingleWriterLog) Apply(e []byte) error {
 		// from an ambiguous one. An enqueue timeout never entered the log;
 		// any other failure leaves the outcome unknown.
 		if errors.Is(err, raft.ErrEnqueueTimeout) {
-			return &EnqueueTimeoutError{Err: err}
+			return rafterrors.NewNotAppliedError("proposal not enqueued before timeout", err)
 		}
-		return &AmbiguousError{Err: err}
-	}
-
-	if resp := future.Response(); resp != nil {
-		if err, ok := resp.(error); ok && err != nil {
-			return fmt.Errorf("proposal committed but the FSM rejected it: %w", err)
-		}
+		return rafterrors.NewAmbiguousError(err)
 	}
 
 	return nil
