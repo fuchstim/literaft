@@ -23,12 +23,25 @@ import (
 // and the same from a completely plain, unmodified-VFS external reader --
 // proving the on-disk files are actually correct, not just readable
 // through the same VFS that wrote them.
-func assertRestarted(restarted *testutils.Node, wantRows int64) {
+//
+// It waits for the node's applied index to reach minApplied, not just for the
+// row count to hit wantRows. A restart recovers the row count almost at once
+// from SQLite's own WAL recovery, but the replay that follows re-materializes
+// every already-committed transaction as fresh physical-redo frames, each of
+// which briefly reverts its pages to an older image -- so the visible count
+// dips and climbs back, for local and external readers alike, until replay
+// drains. minApplied is where replay ends; the row count alone is already
+// right in the recovered-but-not-yet-replayed state, so it can't tell that
+// window from a settled one.
+func assertRestarted(restarted *testutils.Node, wantRows int64, minApplied uint64) {
 	GinkgoHelper()
 	testutils.Eventually(GinkgoT(), 10*time.Second, 20*time.Millisecond, func() bool {
+		if restarted.FSM.LastApplied() < minApplied {
+			return false
+		}
 		n, err := rowCount(restarted)
 		return err == nil && n == wantRows
-	}, "restarted node to recover its rows")
+	}, "restarted node to finish replaying and recover its rows")
 	Expect(nodeQueryText(restarted, "PRAGMA integrity_check")).To(Equal("ok"))
 
 	Expect(externalQueryText(restarted.DBPath, "PRAGMA integrity_check")).To(Equal("ok"))
@@ -58,8 +71,11 @@ var _ = Describe("node restart", func() {
 			return err == nil && n == 20
 		}, "follower to catch up")
 
+		// The applied index the restart must replay back up to, captured
+		// while quiescent so no in-flight write moves it.
+		target := follower.FSM.LastApplied()
 		restarted := c.RestartNode(GinkgoT(), c.IndexOf(follower))
-		assertRestarted(restarted, 20)
+		assertRestarted(restarted, 20, target)
 	})
 
 	It("recovers a leader restarted before any local snapshot has been taken", func() {
@@ -76,9 +92,10 @@ var _ = Describe("node restart", func() {
 		// commit-path frames that were never previously touched by
 		// walAppender at all -- restart must rebuild those via replay just
 		// as faithfully as a follower's.
+		target := leader.FSM.LastApplied()
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
-		assertRestarted(restarted, 20)
+		assertRestarted(restarted, 20, target)
 	})
 
 	// snapshottingCluster uses low enough snapshot thresholds that a local
@@ -133,8 +150,9 @@ var _ = Describe("node restart", func() {
 			return err == nil && n == 40
 		}, "follower to catch up")
 
+		target := follower.FSM.LastApplied()
 		restarted := c.RestartNode(GinkgoT(), c.IndexOf(follower))
-		assertRestarted(restarted, 40)
+		assertRestarted(restarted, 40, target)
 	})
 
 	// FSM.Restore (run on startup whenever a local snapshot exists) resets
@@ -147,8 +165,9 @@ var _ = Describe("node restart", func() {
 
 		leader := writeRowsAndForceSnapshot(c, 40)
 
+		target := leader.FSM.LastApplied()
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
-		assertRestarted(restarted, 40)
+		assertRestarted(restarted, 40, target)
 	})
 })
