@@ -8,9 +8,10 @@ still holds. `DECISIONS.md` ADR-015 records the decision; this file is the
 reference for the protocol itself. The protocol was adversarially reviewed
 against the current code and the vendored `hashicorp/raft` before
 acceptance; the review's corrections are folded in throughout and called out
-where they changed the obvious-looking design. (One heavier correctness test
-and the remaining failure-matrix cluster tests are still outstanding — see
-`ROADMAP.md` M9.)
+where they changed the obvious-looking design. The byte-identical correctness
+check through follower connections and the failure-matrix cluster tests
+(leadership churn mid-forward, `InstallSnapshot` during forwarding) are now in
+place — see `ROADMAP.md` M9.
 
 ---
 
@@ -569,6 +570,34 @@ intermediate state. Other followers see E when their own apply reaches it
 (ordinary follower staleness, unchanged); linearizable cross-node reads
 remain #35.
 
+### The stale-read no-op sharp edge
+
+What read-your-writes does **not** give you: a follower write whose *effect*
+depends on reading state written elsewhere. A read-modify-write on a follower
+(an `UPDATE`/`DELETE` with a `WHERE` clause, an `INSERT ... SELECT`) evaluates
+that read against the follower's **local, stale-able** snapshot — not the
+leader's. The base-index check keeps every write that *produces frames* honest:
+computed on a stale base, it is rejected (`STALE_BASE`) and the application
+recomputes on fresher state. But a statement whose stale read matches nothing
+produces **no commit frame at all**, so it never reaches the gate — and so the
+base check never runs. It returns success as a local no-op, even though the
+same statement against the up-to-date state would have changed rows.
+
+Concretely: node A commits a write that makes row *r* eligible for deletion;
+a client on follower B, not yet caught up to A's write, runs
+`DELETE ... WHERE <r is eligible>`. B's snapshot doesn't show *r* as eligible,
+so the `DELETE` matches nothing, writes nothing, and succeeds — *r* is never
+deleted cluster-wide, and B silently diverges from what a linearizable
+execution would produce. This is not a bug in the forwarding/apply path (an
+accepted forwarded entry is still provably computed on exactly the state it
+applies against); it is the direct consequence of follower reads being
+stale-able (#35). An application that needs a read-modify-write validated
+against current cluster state must either issue it on the leader, or ensure the
+follower is current first (e.g. by gating on its applied index). This is the
+exact edge `integration/correctness_test.go`'s forwarding spec had to account
+for: it only re-runs a zero-row `UPDATE`/`DELETE` after the originating
+follower has caught up.
+
 ---
 
 ## Failure matrix
@@ -643,19 +672,25 @@ converges.
   sanity-check rejects); the forward path's response/consumption race (both
   orders), the single `NOT_LEADER` re-resolve, and the
   never-re-propose-after-ambiguous rule.
-- **Cluster, `log/` (the existing figure8/leadership harness style):**
-  forward accepted while a leader-local write is in flight (loser staled);
-  leadership lost between `raft.Apply` and response (case 8, both
-  ultimate outcomes — the Figure-8 spec extended to a *forwarded* entry);
-  drain-window forwards get `CATCHING_UP`.
-- **`internal/testutils` / `integration/`:** extend
-  `integration/correctness_test.go`'s trigger-heavy workload so a share of
-  writes goes through follower connections via a real (test) transport —
-  the byte-identical-to-plain-SQLite bar plus `PRAGMA integrity_check` and
-  the external unmodified-VFS reader must hold unchanged; restart and
-  InstallSnapshot cases from `restart_test.go`/`snapshot_test.go` re-run
-  with an in-flight forward (cases 7, 10, 12); read-your-writes asserted on
-  the originating node immediately after `COMMIT`.
+- **Cluster failure matrix (`internal/testutils`, real `TCPCluster` +
+  `WithForwarding`):** leadership churn while forwards are in flight (case 8)
+  and `InstallSnapshot` catch-up of a far-behind node while forwarding
+  continues (case 12), both asserting cluster-wide byte-identical convergence
+  + `integrity_check` with no lost or duplicated write. These drive
+  idempotent, always-frame-producing writes retried through every transient/
+  ambiguous outcome, so the final state is deterministic despite the churn.
+  (The narrower, fully-deterministic slices — `CATCHING_UP` in the drain
+  window, the response/consumption race, the never-re-propose rule — stay in
+  the `log/` handler+follower unit matrix against fakes.)
+- **`internal/testutils` / `integration/`:**
+  `integration/correctness_test.go`'s trigger-heavy workload runs a share of
+  writes through follower connections via a real (test) transport — the
+  byte-identical-to-plain-SQLite bar plus `PRAGMA integrity_check` and the
+  external unmodified-VFS reader hold unchanged. Because follower reads are
+  stale-able (§read-your-writes' stale-read no-op edge), the spec re-runs a
+  zero-row `UPDATE`/`DELETE` only after the originating follower has caught up;
+  read-your-writes on the originating node holds after every frame-producing
+  `COMMIT`.
 - **Fault injection (#24 ties in):** kill the leader mid-handler (case 9);
   fail the commit-frame flush after `OK` and assert the fatal path (#60's
   regression test); drop transport responses while letting replication
@@ -676,4 +711,7 @@ converges.
   not statements. An app-level helper is the most that fits.
 - **Linearizable reads** (#35): unrelated mechanism (read-index/lease), but
   note forwarding does *not* provide it — a follower's reads outside its own
-  just-committed writes remain stale-able.
+  just-committed writes remain stale-able. This is what makes a follower
+  read-modify-write able to silently no-op against stale state (see §read-
+  your-writes' "stale-read no-op sharp edge"); linearizable reads would close
+  it, but nothing in this design does.

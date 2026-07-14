@@ -100,9 +100,15 @@ forwarding** machinery (`log.ForwardingLog` + a `log.LeaderTransport`), now
 **built** (ADR-015, `docs/FOLLOWER_WRITES.md`, issue #32): a follower's
 captured page images are forwarded to the leader under a whole-db base-index
 check (no OCC), accepted iff computed on exactly the leader's applied state.
-`cmd/literaft` enables it by default (`-forward-writes`). Issue #32 stays
-open: one heavier correctness test is pending a root-cause and the remaining
-failure-matrix cluster tests aren't written yet. The OCC apparatus (read-set
+`cmd/literaft` enables it by default (`-forward-writes`). The heavier
+byte-identical correctness check through follower connections and the
+failure-matrix cluster tests (leadership churn mid-forward, `InstallSnapshot`
+during forwarding) are now in place; the earlier intermittent divergence
+(issue #64) was root-caused to a follower read-modify-write silently
+no-opping against a stale local snapshot — a frame-less statement never
+reaches the gate, so the base-index check never runs (a manifestation of
+stale-able follower reads, not a forwarding/apply fault; see
+`docs/FOLLOWER_WRITES.md §read-your-writes`). The OCC apparatus (read-set
 capture, per-page version pagemap) remains fully deferred — see
 `docs/DECISIONS.md` ADR-007/008. Do not build it.
 
