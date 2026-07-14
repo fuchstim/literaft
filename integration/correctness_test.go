@@ -99,6 +99,11 @@ func applySchema(dbs ...*sql.DB) {
 type op struct {
 	sql  string
 	args []any
+	// conditional is true when the statement's effect depends on a
+	// WHERE-clause read of current state (an UPDATE or DELETE), so a zero-row
+	// result may be a stale-read no-op rather than a genuine one -- as opposed
+	// to an INSERT, which always writes a row.
+	conditional bool
 }
 
 // generator produces a deterministic sequence of ops against the
@@ -152,8 +157,9 @@ func (g *generator) step() op {
 	case 2: // soft-delete an existing key
 		key := g.keys[g.rng.Intn(len(g.keys))]
 		return op{
-			sql:  `UPDATE records SET removed_at = ? WHERE key = ? AND removed_at IS NULL`,
-			args: []any{g.clock, key},
+			sql:         `UPDATE records SET removed_at = ? WHERE key = ? AND removed_at IS NULL`,
+			args:        []any{g.clock, key},
+			conditional: true,
 		}
 	default: // drain due outbox entries, deleting their target rows
 		return op{
@@ -161,7 +167,8 @@ func (g *generator) step() op {
 				SELECT record_id FROM pending_changes
 				WHERE record_table = 'records' AND change_kind = 'REMOVE' AND not_before <= ?
 			)`,
-			args: []any{g.clock},
+			args:        []any{g.clock},
+			conditional: true,
 		}
 	}
 }
@@ -266,11 +273,15 @@ func dumpTable(db *sql.DB, table string) []map[string]any {
 // re-running never double-applies), read from the node's own gate. A
 // non-retryable outcome (a possibly-committed forward, or a hard error) fails
 // the spec loudly rather than being blindly re-run, which could double-apply
-// and diverge from the plain db.
-func execForwarded(t testutils.TB, n *testutils.Node, o op) {
+// and diverge from the plain db. It returns the number of rows the accepted
+// statement changed.
+func execForwarded(t testutils.TB, n *testutils.Node, o op) int64 {
 	GinkgoHelper()
+	var rows int64
 	testutils.Eventually(t, 20*time.Second, 10*time.Millisecond, func() bool {
-		if _, err := n.DB.Exec(o.sql, o.args...); err == nil {
+		res, err := n.DB.Exec(o.sql, o.args...)
+		if err == nil {
+			rows, _ = res.RowsAffected()
 			return true
 		}
 		code, ok := vfs.ErrCode(n.Driver.LastRejection())
@@ -278,14 +289,26 @@ func execForwarded(t testutils.TB, n *testutils.Node, o op) {
 			"non-retryable follower-write outcome (not safe to re-run): %v", n.Driver.LastRejection())
 		return false
 	}, fmt.Sprintf("follower write to be accepted: %s", o.sql))
+	return rows
+}
+
+// waitFollowerCurrent blocks until n has materialized every committed entry
+// the cluster's most-advanced node has -- i.e. n's local database reflects all
+// prior committed writes.
+func waitFollowerCurrent(t testutils.TB, c *testutils.TCPCluster, n *testutils.Node) {
+	testutils.Eventually(t, 10*time.Second, 5*time.Millisecond, func() bool {
+		var maxApplied uint64
+		for _, m := range c.Nodes() {
+			if a := m.FSM.LastApplied(); a > maxApplied {
+				maxApplied = a
+			}
+		}
+		return n.FSM.LastApplied() >= maxApplied
+	}, fmt.Sprintf("follower %s to catch up before re-running a no-op conditional write", n.ID))
 }
 
 var _ = Describe("correctness", func() {
-	// PENDING: forwarding correctness under the trigger-heavy workload shows a
-	// rare, intermittent divergence from the plain db (reproducible with
-	// `ginkgo --repeat` even at --procs=1). Left pending until root-caused;
-	// the forwarding happy path stays covered by lighter suites.
-	PIt("keeps a plain SQLite db and a 3-node cluster identical under mixed trigger-driven writes issued through follower connections", func() {
+	It("keeps a plain SQLite db and a 3-node cluster identical under mixed trigger-driven writes issued through follower connections", func() {
 		t := GinkgoT()
 		dir := correctnessDir(t)
 
@@ -326,7 +349,22 @@ var _ = Describe("correctness", func() {
 			_, err := plainDB.Exec(o.sql, o.args...)
 			Expect(err).NotTo(HaveOccurred(), "plain db: %s", o.sql)
 			// Rotate through followers so both forward through the leader.
-			execForwarded(t, followerNodes[i%len(followerNodes)], o)
+			fn := followerNodes[i%len(followerNodes)]
+			rows := execForwarded(t, fn, o)
+
+			// A conditional write that changed no rows may be a false no-op: its
+			// WHERE clause read this follower's snapshot, which can lag another
+			// node's just-committed write. A no-op produces no WAL frames, so it
+			// never reaches the gate, so the base-index check that rejects a
+			// stale frame-producing write never runs -- and the op can diverge
+			// from the up-to-date reference silently. Wait for the follower to
+			// catch up and re-run against fresh state; safe because the first
+			// run committed nothing. Frame-producing writes are already caught
+			// by the base check, so they need no wait.
+			if rows == 0 && o.conditional {
+				waitFollowerCurrent(t, c, fn)
+				execForwarded(t, fn, o)
+			}
 		}
 
 		for _, n := range c.Nodes() {

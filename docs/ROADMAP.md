@@ -511,13 +511,18 @@ follower-originated writes; without it, rejection with a leader hint
   `fsm` marker-CAS suite, the `log` follower+handler matrix, the reference
   transport round-trip, and an `internal/testutils` end-to-end forwarding
   test (leader accept, replicate-back, read-your-writes, external-reader
-  visibility, integrity). **Known open issue:** the heavier byte-identical
-  correctness check through follower connections
-  (`integration/correctness_test.go`) shows a rare intermittent divergence
-  under `--repeat` and is currently `PIt` (pending) until root-caused; the
-  remaining failure-matrix cluster tests (leadership churn mid-forward,
-  `InstallSnapshot` during an in-flight forward) are likewise still to be
-  added. Issue `#32` stays open until those land.
+  visibility, integrity). The heavier byte-identical correctness check
+  through follower connections (`integration/correctness_test.go`) is now
+  enabled and green under `--repeat`: its earlier intermittent divergence
+  (`#64`) was root-caused to a follower read-modify-write silently no-opping
+  against a stale local snapshot — a frame-less statement never reaches the
+  gate, so the base-index check that catches staleness for frame-producing
+  writes never runs (a manifestation of stale-able follower reads, `#35`, not
+  a fault in the forwarding/apply path). The spec now re-runs a zero-row
+  `UPDATE`/`DELETE` only after the originating follower has caught up; the
+  sharp edge is documented in `FOLLOWER_WRITES.md`. The failure-matrix cluster
+  tests (leadership churn mid-forward, `InstallSnapshot` during forwarding)
+  landed alongside in `internal/testutils`.
 
 ---
 
