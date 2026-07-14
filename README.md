@@ -1,5 +1,7 @@
 # literaft
 
+![literaft interactive TUI](res/screenshot.png)
+
 A `database/sql` driver that turns a single-node SQLite database into a
 RAFT-replicated one — without patching SQLite and without giving up
 on-disk file compatibility. Pure Go (no cgo), built on

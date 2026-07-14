@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	transport "github.com/Jille/raft-grpc-transport"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
+	"github.com/mattn/go-isatty"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -61,6 +63,7 @@ func run() error {
 		leave         = flag.Bool("leave", false, "decommission mode: remove -id from the cluster via -join, then exit (does not start a node)")
 		logLevel      = flag.String("log-level", "info", "log level (trace, debug, info, warn, error, off)")
 		forwardWrites = flag.Bool("forward-writes", true, "accept writes on follower connections by forwarding them to the leader under a base-index check; when false, follower writes are rejected with a leader hint")
+		useTUI        = flag.Bool("tui", true, "run the split-pane terminal UI (REPL + live log stream) when stdin/stdout are a terminal; -tui=false forces the plain line REPL with logs on stderr")
 	)
 	flag.Parse()
 
@@ -69,13 +72,32 @@ func run() error {
 		return fmt.Errorf("invalid log level %q (want trace, debug, info, warn, error, or off)", *logLevel)
 	}
 
+	// The split-pane TUI is used only for an interactive node: a real
+	// terminal on both ends and not the one-shot -leave admin command (whose
+	// output must stay on stderr, since it never starts a UI).
+	interactive := *useTUI && !*leave &&
+		isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
+
+	// In TUI mode the logger feeds the log-stream pane instead of stderr (which
+	// would corrupt the alt-screen display); a sink buffers records until the
+	// pane drains them and colorizes them itself, so hclog's own color is off.
+	// Startup records logged before the pane appears simply queue in the sink.
+	logOutput := io.Writer(os.Stderr)
+	logColor := hclog.AutoColor
+	var sink *logSink
+	if interactive {
+		sink = newLogSink()
+		logOutput = sink
+		logColor = hclog.ColorOff
+	}
+
 	// One root logger for the whole process: each subsystem takes a named
 	// child of it, and hraft shares it so its logs use the same format.
 	logger := hclog.New(&hclog.LoggerOptions{
 		Name:   "literaft",
 		Level:  lvl,
-		Output: os.Stderr,
-		Color:  hclog.AutoColor,
+		Output: logOutput,
+		Color:  logColor,
 	})
 
 	// Insecure creds are deliberate: the same options dial peers (raft
@@ -237,26 +259,33 @@ func run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	// runREPL blocks reading os.Stdin, which can't be interrupted directly;
-	// running it in its own goroutine lets a signal on sigCh win the race
-	// and shut down immediately instead of waiting for stdin to produce
-	// another line. A REPL goroutine left blocked on stdin in that case dies
-	// with the process, same as any other in-flight work at signal time.
-	replDone := make(chan bool, 1)
-	go func() {
-		replDone <- runREPL(r, db, os.Stdin, os.Stdout)
-	}()
+	if interactive {
+		// The TUI owns the terminal until the operator quits (.exit/.quit or
+		// ctrl+c) or a signal arrives; either way we then shut the node down.
+		runInteractiveTUI(*id, r, db, sink, sigCh)
+		fmt.Fprintln(os.Stdout, "literaft: shutting down")
+	} else {
+		// runREPL blocks reading os.Stdin, which can't be interrupted directly;
+		// running it in its own goroutine lets a signal on sigCh win the race
+		// and shut down immediately instead of waiting for stdin to produce
+		// another line. A REPL goroutine left blocked on stdin in that case dies
+		// with the process, same as any other in-flight work at signal time.
+		replDone := make(chan bool, 1)
+		go func() {
+			replDone <- runREPL(r, db, os.Stdin, os.Stdout)
+		}()
 
-	// Only an explicit .exit/.quit means "shut this node down now". A bare
-	// EOF -- stdin from /dev/null under a headless launch, or a piped
-	// script finishing -- must not stop a node that's still supposed to
-	// serve raft traffic and reads, so fall back to waiting on a real
-	// signal instead.
-	select {
-	case <-sigCh:
-	case explicitExit := <-replDone:
-		if !explicitExit {
-			<-sigCh
+		// Only an explicit .exit/.quit means "shut this node down now". A bare
+		// EOF -- stdin from /dev/null under a headless launch, or a piped
+		// script finishing -- must not stop a node that's still supposed to
+		// serve raft traffic and reads, so fall back to waiting on a real
+		// signal instead.
+		select {
+		case <-sigCh:
+		case explicitExit := <-replDone:
+			if !explicitExit {
+				<-sigCh
+			}
 		}
 	}
 
