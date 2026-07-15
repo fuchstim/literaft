@@ -94,7 +94,6 @@ func run() error {
 	// One root logger for the whole process: each subsystem takes a named
 	// child of it, and hraft shares it so its logs use the same format.
 	logger := hclog.New(&hclog.LoggerOptions{
-		Name:   "literaft",
 		Level:  lvl,
 		Output: logOutput,
 		Color:  logColor,

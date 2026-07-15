@@ -68,7 +68,9 @@ const (
 // tuiHelp is printed by the ".help" REPL meta-command.
 const tuiHelp = `commands:
   <sql>;                 run a SQL statement (may span multiple lines)
+  .servers               show the cluster servers and their roles
   .addvoter <id> <addr>  add a voter to the cluster
+  .removevoter <id>      remove a voter from the cluster
   .help                  show this help
   .exit / .quit          shut this node down and exit
 
@@ -136,11 +138,10 @@ type tuiModel struct {
 	db     *sql.DB
 	sink   *logSink
 
-	input   textinput.Model
-	repl    viewport.Model
-	logs    viewport.Model
-	spinner spinner.Model
-	zone    *zone.Manager
+	input      textinput.Model
+	logs, repl viewport.Model
+	spinner    spinner.Model
+	zone       *zone.Manager
 
 	transcript []string // REPL prompts, echoes, and results
 	logLines   []string // colorized log stream lines
@@ -337,9 +338,15 @@ func (m *tuiModel) processLine(line string) tea.Cmd {
 		case trimmed == ".help":
 			m.appendTranscript(tuiHelp)
 			return nil
+		case trimmed == ".servers":
+			m.running = true
+			return tea.Batch(runServersCmd(m.raft), m.spinner.Tick)
 		case trimmed == ".addvoter" || strings.HasPrefix(trimmed, ".addvoter "):
 			m.running = true
 			return tea.Batch(runAddVoterCmd(m.raft, trimmed), m.spinner.Tick)
+		case trimmed == ".removevoter" || strings.HasPrefix(trimmed, ".removevoter "):
+			m.running = true
+			return tea.Batch(runRemoveVoterCmd(m.raft, trimmed), m.spinner.Tick)
 		}
 	}
 
@@ -536,8 +543,16 @@ func (m tuiModel) renderHeader() string {
 		leader = "(none)"
 	}
 
+	stats := m.raft.Stats()
+	term := stats["term"]
+	commitIndex := stats["commit_index"]
+	appliedIdx := stats["applied_index"]
+	fsmPending := stats["fsm_pending"]
+	snapshotTerm := stats["last_snapshot_term"]
+	snapshotIndex := stats["last_snapshot_index"]
+
 	name := headerNameStyle.Render(" literaft ")
-	info := fmt.Sprintf(" node %s  •  %s  •  leader %s ", m.nodeID, stateStyle.Render(state.String()), leader)
+	info := fmt.Sprintf(" Node: %s  •  State: %s  •  Leader: %s  •  Term: %s  •  Log Index (committed/applied/pending): %s/%s/%s  •  Snapshot (term/index): %s/%s ", m.nodeID, stateStyle.Render(state.String()), leader, term, commitIndex, appliedIdx, fsmPending, snapshotTerm, snapshotIndex)
 	return headerBarStyle.Width(m.width).Render(name + info)
 }
 
@@ -606,10 +621,26 @@ func runStmtCmd(db *sql.DB, stmt string) tea.Cmd {
 	}
 }
 
+func runServersCmd(r *raft.Raft) tea.Cmd {
+	return func() tea.Msg {
+		var b strings.Builder
+		runServers(r, &b)
+		return stmtResultMsg(b.String())
+	}
+}
+
 func runAddVoterCmd(r *raft.Raft, line string) tea.Cmd {
 	return func() tea.Msg {
 		var b strings.Builder
 		runAddVoter(r, line, &b)
+		return stmtResultMsg(b.String())
+	}
+}
+
+func runRemoveVoterCmd(r *raft.Raft, line string) tea.Cmd {
+	return func() tea.Msg {
+		var b strings.Builder
+		runRemoveVoter(r, line, &b)
 		return stmtResultMsg(b.String())
 	}
 }
