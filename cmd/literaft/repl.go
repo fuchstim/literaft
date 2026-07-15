@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -87,12 +88,20 @@ func runREPL(r *raft.Raft, db *sql.DB, in io.Reader, out io.Writer) bool {
 // runServers implements the REPL's ".servers" command, which prints the current Raft configuration.
 // It is a read-only operation and can be run on any node.
 func runServers(r *raft.Raft, out io.Writer) {
-	servers := r.GetConfiguration().Configuration().Servers
-	fmt.Fprintln(out, "ID\tAddress\tRole")
-	for _, s := range servers {
-		fmt.Fprintf(out, "%s\t%s\t%s\n", s.ID, s.Address, s.Suffrage.String())
+	conf := r.GetConfiguration()
+	if conf.Error() != nil {
+		fmt.Fprintln(out, "error:", conf.Error())
+		return
 	}
-	fmt.Fprintln(out, "OK")
+
+	servers := conf.Configuration().Servers
+
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tAddress\tRole")
+	for _, s := range servers {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", s.ID, s.Address, s.Suffrage.String())
+	}
+	w.Flush()
 }
 
 // runAddVoter implements the REPL's ".addvoter <id> <address>" command. It

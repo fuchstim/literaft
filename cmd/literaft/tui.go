@@ -72,6 +72,7 @@ const tuiHelp = `commands:
   .addvoter <id> <addr>  add a voter to the cluster
   .removevoter <id>      remove a voter from the cluster
   .help                  show this help
+  .clear 			     clear the REPL transcript
   .exit / .quit          shut this node down and exit
 
 keys:
@@ -335,6 +336,10 @@ func (m *tuiModel) processLine(line string) tea.Cmd {
 		case trimmed == ".exit" || trimmed == ".quit":
 			m.quitting = true
 			return tea.Quit
+		case trimmed == ".clear":
+			m.transcript = nil
+			m.syncViewport(&m.repl, m.transcript)
+			return nil
 		case trimmed == ".help":
 			m.appendTranscript(tuiHelp)
 			return nil
