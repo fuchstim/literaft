@@ -215,7 +215,12 @@ this file's context — update it *from* GitHub, not the other way around.
                                      SQLite (replaces raft-boltdb, which fsyncs
                                      on every write)
 /cmd/literaft/                    – node process entrypoint (flag parsing,
-                                     lifecycle) + an interactive SQL REPL
+                                     lifecycle) + an interactive SQL REPL. On a
+                                     TTY it defaults to a bubbletea split-pane
+                                     TUI (tui.go: REPL pane + live log-stream
+                                     pane fed by logsink.go); -tui=false or a
+                                     non-TTY falls back to the plain line REPL
+                                     (repl.go)
 /integration/                     – whole-system tests too slow for the unit
                                      suites they exercise: a throughput
                                      benchmark and a replication-fidelity

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -84,6 +85,25 @@ func runREPL(r *raft.Raft, db *sql.DB, in io.Reader, out io.Writer) bool {
 	return false
 }
 
+// runServers implements the REPL's ".servers" command, which prints the current Raft configuration.
+// It is a read-only operation and can be run on any node.
+func runServers(r *raft.Raft, out io.Writer) {
+	conf := r.GetConfiguration()
+	if conf.Error() != nil {
+		fmt.Fprintln(out, "error:", conf.Error())
+		return
+	}
+
+	servers := conf.Configuration().Servers
+
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tAddress\tRole")
+	for _, s := range servers {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", s.ID, s.Address, s.Suffrage.String())
+	}
+	w.Flush()
+}
+
 // runAddVoter implements the REPL's ".addvoter <id> <address>" command. It
 // hands straight off to raft's own raft.AddVoter, so it fails the same way
 // any other write does when this node isn't the leader.
@@ -95,7 +115,38 @@ func runAddVoter(r *raft.Raft, line string, out io.Writer) {
 	}
 	id, addr := fields[1], fields[2]
 
-	err := r.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), 0, addVoterTimeout).Error()
+	conf := r.GetConfiguration()
+	if conf.Error() != nil {
+		fmt.Fprintln(out, "error:", conf.Error())
+		return
+	}
+
+	err := r.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), conf.Index(), addVoterTimeout).Error()
+	if err != nil {
+		fmt.Fprintln(out, "error:", err)
+		return
+	}
+	fmt.Fprintln(out, "OK")
+}
+
+// runRemoveVoter implements the REPL's ".removevoter <id>" command. It
+// hands straight off to raft's own raft.RemoveServer, so it fails the same
+// way any other write does when this node isn't the leader.
+func runRemoveVoter(r *raft.Raft, line string, out io.Writer) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 {
+		fmt.Fprintln(out, "usage: .removevoter <id>")
+		return
+	}
+	id := fields[1]
+
+	conf := r.GetConfiguration()
+	if conf.Error() != nil {
+		fmt.Fprintln(out, "error:", conf.Error())
+		return
+	}
+
+	err := r.RemoveServer(raft.ServerID(id), conf.Index(), addVoterTimeout).Error()
 	if err != nil {
 		fmt.Fprintln(out, "error:", err)
 		return

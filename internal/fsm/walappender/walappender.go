@@ -403,7 +403,7 @@ func (a *WALAppender) maybeBootstrap() error {
 	if err != nil {
 		return fmt.Errorf("failed to stat -wal file: %w", err)
 	}
-	if fi.Size() != 0 {
+	if fi.Size() > walHeaderSize {
 		return fmt.Errorf("-wal file already has %d bytes but the wal-index is uninitialized; "+
 			"recovery from an existing WAL isn't implemented yet", fi.Size())
 	}
