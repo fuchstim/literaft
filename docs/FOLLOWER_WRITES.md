@@ -1,17 +1,17 @@
-# FOLLOWER_WRITES — forwarding follower-computed writes under a base-index check
+# FOLLOWER_WRITES: forwarding follower-computed writes under a base-index check
 
 Design for accepting write transactions on follower nodes. Status: **built**
 (milestone M9, [issue #32](https://github.com/fuchstim/literaft/issues/32)),
-as opt-in machinery — a node wired with `log.ForwardingLog` accepts
+as opt-in machinery. A node wired with `log.ForwardingLog` accepts
 follower-originated writes; without it, ADR-007's "reject with a leader hint"
 still holds. `DECISIONS.md` ADR-015 records the decision; this file is the
 reference for the protocol itself. The protocol was adversarially reviewed
 against the current code and the vendored `hashicorp/raft` before
-acceptance; the review's corrections are folded in throughout and called out
-where they changed the obvious-looking design. The byte-identical correctness
+acceptance; the review's corrections are folded in throughout and noted
+where they changed the design. The byte-identical correctness
 check through follower connections and the failure-matrix cluster tests
-(leadership churn mid-forward, `InstallSnapshot` during forwarding) are now in
-place — see `ROADMAP.md` M9.
+(leadership churn mid-forward, `InstallSnapshot` during forwarding) are in
+place; see `ROADMAP.md` M9.
 
 ---
 
@@ -21,31 +21,31 @@ A write transaction executed on a follower computes physical page images
 against that follower's **local** (possibly stale) snapshot. Those images are
 valid only against that exact base state (ADR-003), so they cannot be spliced
 into the RAFT log unconditionally. This design forwards them to the leader
-together with the **base index** they were computed on — the raft log index
-of the last transaction applied to the follower's local database — and the
+together with the **base index** they were computed on (the raft log index
+of the last transaction applied to the follower's local database), and the
 leader proposes them to RAFT **iff** that base equals the leader's own last
 applied index, under a serialization discipline that makes the comparison
 exact (see §soundness). Any mismatch is a rejection; the application retries
 by re-running the transaction, which recomputes against fresher state.
 
-This is deliberately **whole-database-granularity optimism**: any concurrent
-write anywhere in the cluster — even to disjoint pages — invalidates an
+This is **whole-database-granularity optimism**: any concurrent
+write anywhere in the cluster (even to disjoint pages) invalidates an
 in-flight follower proposal. What it buys for that price:
 
 - **No page-level conflict machinery.** No read-set capture, no pagemap, no
-  OCC validation engine — ADR-008's steps 2–4 stay deferred, and the "no
+  OCC validation engine; ADR-008's steps 2–4 stay deferred, and the "no
   conflict resolution anywhere" invariant survives: conflicts are still
   *prevented* (by rejection), never merged.
 - **Strict correctness.** An accepted forwarded entry is, provably, computed
-  on exactly the state it will apply against — the same guarantee a
+  on exactly the state it will apply against, the same guarantee a
   leader-local write gets from SQLite's own snapshot check.
 - **Read-your-writes on the originating follower**: its `COMMIT` returns only
   after the leader accepted the entry *and* the follower's own FSM applied it
   locally.
 
 Out of scope (unchanged deferrals): page-level OCC (ADR-008), SQL/statement
-forwarding and interactive-transaction models (ADR-009 — still the right
-answer for interactive txns), client-request-ID dedup (#34 — not needed here,
+forwarding and interactive-transaction models (ADR-009; still the right
+answer for interactive txns), client-request-ID dedup (#34; not needed here,
 see §failure-handling), transport authentication/encryption (caller-owned),
 linearizable reads (#35).
 
@@ -56,20 +56,20 @@ linearizable reads (#35).
 ADR-008 already worked through a "base index token + leader compare-and-swap"
 design as its **step 1** and rejected the naive version for one precise
 reason: the index the leader must compare against is its **last log index
-(log head)**, not `lastApplied` — the head runs ahead of applied state while
+(log head)**, not `lastApplied`. The head runs ahead of applied state while
 proposals are in flight, and checking applied state admits a lost update.
 This design adopts step 1 and answers that objection not by tracking the log
 head (which only hraft knows) but by **forcing `lastApplied == log head` at
-the moment of the check** (§soundness). ADR-008's other conclusion — that
-widening the acceptance window requires the full OCC apparatus — is
-unchallenged; this design simply accepts the narrow window.
+the moment of the check** (§soundness). ADR-008's other conclusion, that
+widening the acceptance window requires the full OCC apparatus, is
+unchallenged; this design accepts the narrow window.
 
 ADR-007's rejection-with-hint remains the *default* behavior and the fallback
 whenever forwarding can't proceed (no transport configured, leader unknown,
 rejection). ADR-009's statement-forwarding recommendation is unaffected:
 forwarding *SQL* re-executes on the leader's authoritative state and never
-needs any of this; forward *page images* only where re-execution on the
-leader is what you're trying to avoid.
+needs any of this; page images are forwarded only where the goal is to avoid
+re-execution on the leader.
 
 ---
 
@@ -85,7 +85,7 @@ accepted.
 1. A local RW connection on F runs a write txn. Stock behavior throughout:
    SQLite takes `WAL_WRITE_LOCK`, writes non-commit frames through to F's own
    `-wal` (invisible, beyond `mxFrame`), and the wrapper VFS captures
-   `(pgno, page)` pairs — exactly `DESIGN.md §write path` steps 1–2, which
+   `(pgno, page)` pairs, exactly `DESIGN.md §write path` steps 1–2, which
    are role-agnostic.
 2. On the commit frame, `Gate.proposeTransaction` runs **unchanged**: build
    E with a fresh per-proposal `Header.Id`, mark it in `fsm.FSM`'s skip
@@ -93,7 +93,7 @@ accepted.
 3. The configured adapter is a `log.ForwardingLog` wrapping the node's
    `*log.SingleWriterLog`. `ForwardingLog.Apply` first calls the inner
    adapter. If that returns nil or any error other than
-   `*rafterrors.NotLeaderError`, it returns the result as-is — on a leader
+   `*rafterrors.NotLeaderError`, it returns the result as-is; on a leader
    this adapter is byte-for-byte today's behavior. A `NotLeaderError` is the
    forward trigger: it is returned strictly *before* anything was proposed,
    so forwarding is always safe at that point.
@@ -107,16 +107,16 @@ accepted.
    (`SQLITE_BUSY_SNAPSHOT`) already guaranteed the txn's read snapshot
    equals the published state at lock acquisition. So
    `base == the state E was computed on`, always.
-5. Dual-wait: on an `OK` response, wait (bounded — §liveness) until F's own
+5. Dual-wait: on an `OK` response, wait (bounded, §liveness) until F's own
    `fsm.FSM.Apply` has **consumed E's skip marker**, i.e. E replicated back
    to F through the ordinary raft stream and was recognized as this
    in-flight proposal. Only then return nil. The gate then releases the
    withheld commit frame and SQLite performs its normal publish
-   (`walIndexAppend` + `walIndexWriteHdr`) — the originating follower
-   **self-applies via SQLite**, exactly like a leader does (ADR-005);
+   (`walIndexAppend` + `walIndexWriteHdr`); the originating follower
+   **self-applies via SQLite**, exactly like a leader does (ADR-005), and
    `walappender` is not involved on F for its own accepted proposal.
-6. Every non-OK outcome resolves through the marker CAS (§marker) — this is
-   load-bearing, not cleanup; see §failure-handling.
+6. Every non-OK outcome resolves through the marker CAS (§marker); this
+   resolution is required for correctness, not cleanup. See §failure-handling.
 
 ### Leader side (handler)
 
@@ -126,43 +126,43 @@ only the node that is currently leader will accept work through it.
 1. Decode the `ForwardRequest` and E; sanity-check shape: every page image
    is exactly `fsm.PageSize()` bytes (the fixed cluster-wide page size),
    pgnos are non-zero, `nTruncate != 0` (a forwarded entry is always a
-   whole committed txn). This is shape validation, not content validation —
+   whole committed txn). This is shape validation, not content validation:
    RAFT is non-Byzantine and forwarded images are trusted, same as ADR-008
-   noted; a malicious or buggy follower can corrupt the cluster and the
+   noted; a malicious or buggy follower can corrupt the cluster, and the
    transport's authentication (caller-owned) is the boundary.
 2. Acquire L's **`WAL_WRITE_LOCK`** through the walappender's shm handle,
    with a deadline (→ `BUSY` response on timeout), and register a **held-lock
-   loan** under E's `Header.Id` (§locking — the loan is how L's own
+   loan** under E's `Header.Id` (§locking; the loan is how L's own
    `FSM.Apply` will materialize E without re-acquiring the lock the handler
    already holds).
 3. Under the held lock: if `base != fsm.LastApplied()` → release, respond
    `STALE_BASE` (with L's `lastApplied` as a diagnostic). Nothing was
    proposed.
-4. Call the **inner** `SingleWriterLog.Apply(entry_bytes)` — reusing its
+4. Call the **inner** `SingleWriterLog.Apply(entry_bytes)`, reusing its
    existing checks and semantics verbatim: not leader → `NOT_LEADER` (+
    hint), not `Ready` (drain in progress) → `CATCHING_UP`, enqueue timeout →
    definitively-not-proposed failure, and on nil the entry is **committed
    and applied on L** (hraft's `ApplyFuture` responds only after L's own
-   `FSM.Apply` ran — verified in the vendored source, `fsm.go`'s
+   `FSM.Apply` ran, verified in the vendored source: `fsm.go`'s
    `applySingle` responds after `fsm.Apply` returns).
 5. Respond `OK` (with M as a diagnostic), release the loan and the lock
    (also on every error path, per the loan lifecycle rules in §locking).
 
 On L, E is *not* marked in `skipEntries` (only F marked it), so L's
-`FSM.Apply` materializes E via `walappender` — under the handler's loaned
-lock — and advances L's `lastApplied` before the handler responds. Every
+`FSM.Apply` materializes E via `walappender` (under the handler's loaned
+lock) and advances L's `lastApplied` before the handler responds. Every
 other follower applies E through the ordinary `DESIGN.md §follower-apply`
 path, indistinguishable from a leader-originated entry.
 
 ---
 
-## Soundness: why `base == lastApplied` is the log-head check here
+## Soundness: `base == lastApplied` as the log-head check
 
 The apply invariant (ADR-003) demands: E, computed on base B, may only be
 appended where the set of data entries preceding it is exactly the set at B.
-Equivalently, at the instant of `raft.Apply`, there must be **no data entry —
-committed, in-flight, or lurking uncommitted in the log — beyond B**. Three
-mechanisms together make the simple `base == lastApplied` comparison
+Equivalently, at the instant of `raft.Apply`, there must be **no data entry
+(committed, in-flight, or uncommitted in the log) beyond B**. Three
+mechanisms together make the `base == lastApplied` comparison
 equivalent to that:
 
 1. **`Ready` (the existing drain).** `SingleWriterLog` only accepts proposals
@@ -170,18 +170,19 @@ equivalent to that:
    transitions`). hraft commits prior-term entries only by committing a
    current-term entry (the Figure-8 rule; `commitment.go`'s
    `quorumMatchIndex >= startIndex` check in the vendored source), and the
-   Barrier is such an entry — so a `Ready` leader has **no uncommitted data
-   entries in its log and no committed-unapplied backlog**. This kills the
-   "stale entry from an earlier term commits retroactively after we checked"
-   case, and it means a resent proposal after an ambiguous outcome can never
-   double-apply: if the earlier attempt's entry is still in the new leader's
-   log, either it commits during the drain (then `lastApplied` includes it →
-   `STALE_BASE`) or the leader isn't `Ready` yet (→ `CATCHING_UP`).
+   Barrier is such an entry, so a `Ready` leader has **no uncommitted data
+   entries in its log and no committed-unapplied backlog**. This eliminates
+   the "stale entry from an earlier term commits retroactively after the
+   check" case, and it means a resent proposal after an ambiguous outcome can
+   never double-apply: if the earlier attempt's entry is still in the new
+   leader's log, either it commits during the drain (then `lastApplied`
+   includes it → `STALE_BASE`) or the leader isn't `Ready` yet (→
+   `CATCHING_UP`).
 2. **All proposals on a node serialize on that node's `WAL_WRITE_LOCK`, held
    until the entry is applied on that node.** Leader-local writers hold it
    natively across the gate (that's `DESIGN.md §conflicts`' "≤1 in-flight
    local proposal"); the forward handler holds it explicitly across steps
-   2–5. So under the lock, nothing else is in flight *from this node* — and
+   2–5. So under the lock, nothing else is in flight *from this node*, and
    since the leader is the only node that proposes, nothing is in flight at
    all.
 3. **`lastApplied` catches up to the log head before the lock is ever
@@ -190,39 +191,39 @@ equivalent to that:
    materializing apply. Combined with (1) and (2): under the held lock on a
    `Ready` leader, `lastApplied == last data-entry log index`. The
    comparison the user-visible protocol makes (`base == lastApplied`) *is*
-   ADR-008's required log-head comparison — using the one index the FSM can
+   ADR-008's required log-head comparison, using the one index the FSM can
    know without asking hraft.
 
 Why the handler must hold the lock **across the round-trip**, not just the
 check: suppose it released after `raft.Apply`. E (accepted, committing)
 materializes on L *asynchronously* via the FSM. A leader-local writer W could
 take the write lock in that window; SQLite's `BUSY_SNAPSHOT` check validates
-W's snapshot only against **locally published** state — which doesn't include
-E yet — so W sails through and computes pages on a base missing E. W's entry
-lands after E in the log. Lost update, exactly the anomaly ADR-008 step 1
-warned about. Holding the lock until E is locally applied closes it: W blocks
-on the lock, and when it finally acquires, E is published, so W's snapshot
-check sees it.
+W's snapshot only against **locally published** state (which doesn't include
+E yet), so W passes the check and computes pages on a base missing E. W's
+entry lands after E in the log. This is a lost update, exactly the anomaly
+ADR-008 step 1 warned about. Holding the lock until E is locally applied
+closes it: W blocks on the lock, and when it finally acquires, E is
+published, so W's snapshot check sees it.
 
 One structural constraint falls out of the verification: **`fsm.FSM` must
 never implement hraft's `BatchingFSM`**. The argument above leans on hraft
 responding to each entry's future after *that entry's* `FSM.Apply` (per-entry
 ordering inside batches); `ApplyBatch` changes when futures resolve relative
 to individual applies. hraft's group commit / batching at the log layer is
-fine (verified — `dispatchLogs` assigns indexes in dispatch order and the
+fine (verified: `dispatchLogs` assigns indexes in dispatch order and the
 per-entry future semantics survive it); only the FSM-side batching interface
 is off-limits.
 
 ---
 
-## `lastApplied` — the counter everything keys off
+## `lastApplied`: definition and advance rules
 
 **Definition.** Per node: the raft log index of the last `LogCommand` entry
 whose effects are durably in this node's **local** database (`-wal` +
 wal-index). In-memory, owned by `fsm.FSM`.
 
 **Why not `raft.AppliedIndex()`.** hraft advances its `lastApplied` in
-`processLogs`, when a batch is *dispatched to the FSM goroutine's channel* —
+`processLogs`, when a batch is *dispatched to the FSM goroutine's channel*,
 before `FSM.Apply` has run. Its own doc comment says so explicitly ("does
 NOT mean that the application's FSM has yet consumed it"; vendored
 `api.go`). Using it would stamp bases for state the local db doesn't have
@@ -232,39 +233,39 @@ yet.
 *someone*, which is what makes reads under the lock exact):
 
 - **Materialize path** (any non-self entry): inside
-  `walappender`'s append, within the locked section — *not* after the lock
+  `walappender`'s append, within the locked section, *not* after the lock
   is released. Advancing after unlock opens a window where a local txn
   acquires the lock, passes SQLite's snapshot check against the
   just-published state, but stamps the *previous* index → spurious
-  `STALE_BASE` on every write that races an apply. Safe direction, but
-  pointless aborts; keep the invariant tight instead:
+  `STALE_BASE` on every write that races an apply. This direction is safe,
+  but causes pointless aborts, so the invariant is instead:
   **`lastApplied` never leads the locally published state, and never trails
   it except under the publisher's own held write lock.**
 - **Skip path** (the node's own in-flight proposal): at marker consumption,
   on the FSM goroutine. The proposer holds the write lock at that moment and
   publishes via SQLite before releasing it, so the "leads published state"
-  window exists only under the proposer's own hold — unobservable to any
+  window exists only under the proposer's own hold, unobservable to any
   other base-stamper (they'd need the lock). The one way to observably break
-  this invariant is a *failed publish after consumption* — which is why that
-  failure is fatal by design (§prerequisites).
+  this invariant is a *failed publish after consumption*, which is why that
+  failure is fatal (§prerequisites).
 
 **Initialization & Restore.** Starts at 0 on a fresh db; ordinary startup
 replay (hraft snapshot-restore + log replay) rebuilds it through the two
 rules above. But `FSM.Restore` needs the snapshot's raft index, and **hraft
-does not pass it** — `raft.FSM.Restore(io.ReadCloser)` gets only the stream;
-`meta.Index` stays inside hraft. Without it, a restored node's `lastApplied`
-undershoots until the next live entry applies; on a quiet cluster it would
-stamp stale bases and get `STALE_BASE` **forever** (retrying doesn't help —
-the base never changes). So this design requires a small **versioned header
-on the snapshot stream**: magic (chosen to be impossible as a page-1 prefix,
-which is always `"SQLite format 3\0"`), a format version, and the snapshot's
-raft index. `Snapshot()` runs on hraft's FSM goroutine, serialized with
-`Apply`, so the backup copy is taken at exactly `lastApplied` and that's the
-index the header carries. `Restore` sets `lastApplied` to the header's index
-**unconditionally** — including *downward* on the startup-rewind case
-(ADR-011's scenario 2: restore to an older snapshot, then replay forward).
-Old headerless snapshots are rejected with a clear error; same clean-slate
-upgrade stance as the #42 wire-format change.
+does not pass it**: `raft.FSM.Restore(io.ReadCloser)` gets only the stream,
+and `meta.Index` stays inside hraft. Without it, a restored node's
+`lastApplied` undershoots until the next live entry applies; on a quiet
+cluster it would stamp stale bases and get `STALE_BASE` **forever** (retrying
+doesn't help, since the base never changes). So this design requires a
+**versioned header on the snapshot stream**: magic (chosen to be impossible
+as a page-1 prefix, which is always `"SQLite format 3\0"`), a format version,
+and the snapshot's raft index. `Snapshot()` runs on hraft's FSM goroutine,
+serialized with `Apply`, so the backup copy is taken at exactly `lastApplied`
+and that's the index the header carries. `Restore` sets `lastApplied` to the
+header's index **unconditionally**, including *downward* on the
+startup-rewind case (ADR-011's scenario 2: restore to an older snapshot, then
+replay forward). Old headerless snapshots are rejected with an error; same
+clean-slate upgrade stance as the #42 wire-format change.
 
 ---
 
@@ -272,8 +273,8 @@ upgrade stance as the #42 wire-format change.
 
 `fsm.FSM.skipEntries` grows from a set to a per-proposal state machine,
 guarded by the existing mutex. The gate's call sites are **unchanged**
-(`SkipEntry` before `LogAdapter.Apply`, deferred `UnskipEntry` after) —
-ADR-011's hard-won transience is preserved exactly: a marker exists only
+(`SkipEntry` before `LogAdapter.Apply`, deferred `UnskipEntry` after);
+ADR-011's transience is preserved exactly: a marker exists only
 inside the one `Gate.proposeTransaction` call that owns it.
 
 States: **pending** → **consumed** (terminal) or **pending** → **abandoned**
@@ -288,33 +289,34 @@ States: **pending** → **consumed** (terminal) or **pending** → **abandoned**
   FSM goroutine.
 - The proposer's failure path (`ForwardingLog`, on timeout or any non-OK
   response): atomically, if **pending** → **abandoned**, return the error;
-  if already **consumed** → **return nil instead** — the proposal
-  succeeded, publish.
+  if already **consumed** → **return nil instead** (the proposal
+  succeeded, publish).
 - `UnskipEntry(id)`: delete the entry whatever its state (by then it's
   terminal); pure bookkeeping.
 
-The two invariants this encodes — both directions were verified to be
-corruption or divergence if violated:
+The two invariants this encodes; violating either was verified to cause
+corruption or divergence:
 
 1. **Consumed obligates publish.** Once the FSM has skipped materialization,
    this node's *only* copy of E's effects is the SQLite write path's
    withheld commit frame; roll that back and E never exists locally
-   (silently, forever — hraft won't deliver the index again). So the
-   proposal's outcome is decided by *whichever proves commitment first*: the
-   transport's `OK`, or local consumption. A lost response race — leader
-   accepted, E replicated back and got consumed, then the transport errored
-   — **must** resolve as success. This also degrades gracefully: if the
-   response channel is flaky but replication works, forwards still succeed.
+   (silently and permanently, since hraft won't deliver the index again). So
+   the proposal's outcome is decided by *whichever proves commitment first*:
+   the transport's `OK`, or local consumption. A lost response race (leader
+   accepted, E replicated back and got consumed, then the transport errored)
+   **must** resolve as success. This also holds when the response channel is
+   flaky but replication works: forwards still succeed.
 2. **Never publish without consumption.** If the gate released the commit
    frame while the marker went **abandoned**, the FSM would *also*
    materialize E on arrival. Re-appending the same images is harmless only
    if nothing interleaved; if any later entry applied in between,
-   re-materializing E **reorders page images** — corruption. (This is the
-   same argument as ADR-003's gapless-order requirement, applied locally.)
+   re-materializing E **reorders page images**, which is corruption. (This
+   is the same argument as ADR-003's gapless-order requirement, applied
+   locally.)
 
 Rejections that never proposed (`STALE_BASE`, `NOT_LEADER`, `CATCHING_UP`,
-`BUSY`) can't race consumption at all — no entry exists to be consumed —
-but they take the same CAS path for uniformity.
+`BUSY`) can't race consumption at all (no entry exists to be consumed), but
+they take the same CAS path for uniformity.
 
 ---
 
@@ -323,15 +325,14 @@ but they take the same CAS path for uniformity.
 Three serializers, one per layer, same as the rest of the design
 (`CLAUDE.md`: "WAL is single-writer, RAFT is single-leader"):
 
-- **F's `WAL_WRITE_LOCK`** — serializes F's local writers, pins the base,
+- **F's `WAL_WRITE_LOCK`**: serializes F's local writers, pins the base,
   and (held across the forward RTT) delays F's own follower-apply of
-  *competing* entries; see §liveness for why that stall is bounded and
-  acceptable.
-- **L's `WAL_WRITE_LOCK`** — serializes *all* proposals cluster-wide
+  *competing* entries; see §liveness for why that stall is bounded.
+- **L's `WAL_WRITE_LOCK`**: serializes *all* proposals cluster-wide
   (local writers natively, forwarded ones via the handler).
-- **RAFT's total order** — as ever.
+- **RAFT's total order**: unchanged.
 
-### The OFD-lock trap and the loan lifecycle
+### OFD-lock semantics and the loan lifecycle
 
 The shm write lock is an **OFD (open-file-description) lock**, and
 `walappender` takes it through its *single* shm file handle
@@ -339,7 +340,7 @@ The shm write lock is an **OFD (open-file-description) lock**, and
 everything here (verified against `shm/lock_darwin.go`/`lock_linux.go` and
 ncruces' conn-side equivalents):
 
-- Lock requests on the **same OFD never conflict** — they convert. Cross-OFD
+- Lock requests on the **same OFD never conflict**; they convert. Cross-OFD
   requests (e.g. against SQLite connections' own handles) conflict normally.
 - An unlock on the same OFD **releases the byte range for the whole OFD**,
   no matter which goroutine "acquired" it.
@@ -348,36 +349,36 @@ Today that's harmless: hraft's single FSM goroutine is the only acquirer on
 walappender's handle. The forward handler is the *second* in-process
 acquirer, so the naive implementation is silently wrong twice over (it
 neither excludes the FSM goroutine nor survives `AppendFrames`'
-unconditional deferred unlock). The rules, in full — these came out of the
-adversarial review and are the difference between "design" and "footgun":
+unconditional deferred unlock). The rules, in full (these came out of the
+adversarial review and are required for correctness):
 
 1. **An in-process mutex fronts the OS lock** for all acquisitions through
    the walappender handle. Lock order: mutex, then OS lock (the OS lock
    still does the real cross-OFD exclusion against SQLite's connections and
    external processes).
 2. **The loan registry (id → held lock) has its own short-critical-section
-   lock** — *never* the mutex the handler holds across the round-trip.
+   lock**, *never* the mutex the handler holds across the round-trip.
    Otherwise: handler waits on the `ApplyFuture`, which resolves only after
    `FSM.Apply(E)`, which must consult the registry, which blocks on the
-   handler's mutex — deadlock.
+   handler's mutex, a deadlock.
 3. **A loaned append suppresses both the lock *and* the unlock.**
    `AppendFrames` today unconditionally defers its unlock; run under a loan,
-   that would release the handler's OS lock mid-protocol (same-OFD unlock —
+   that would release the handler's OS lock mid-protocol (same-OFD unlock,
    see above) and let a local writer interleave before the handler finished.
 4. **Loan reclamation is CAS'd against use.** The handler must not release
    the OS lock while the FSM goroutine could still pick the loan up: an
    apply that believes it holds a loaned lock while nobody holds the OS lock
-   appends concurrently with a local writer — torn WAL, torn wal-index.
-   Simplest sufficient rule, adopted here: **the handler never abandons the
-   wait before its `ApplyFuture` resolves.** That wait is bounded — hraft
+   appends concurrently with a local writer, producing torn WAL and torn
+   wal-index. The rule adopted here: **the handler never abandons the
+   wait before its `ApplyFuture` resolves.** That wait is bounded: hraft
    resolves every in-flight future with `ErrLeadershipLost` during
    step-down, so the future can't hang past a leadership change.
 5. **A loaned append defers its threshold checkpoint to lock release.** Run
    inline under the loan, that checkpoint would extend the handler's lock hold
    (which local writers are queued on) by a full passive checkpoint across the
-   round trip. So it runs when the loaned lock is released instead — on the
-   handler's goroutine, after the OS lock is dropped, off the critical section
-   — giving a forwarded-write burst the same threshold backpressure a
+   round trip. So it runs when the loaned lock is released instead (on the
+   handler's goroutine, after the OS lock is dropped, off the critical
+   section), giving a forwarded-write burst the same threshold backpressure a
    self-locked append has rather than growing the `-wal` up to a full ticker
    interval. The ticker remains the backstop for sub-threshold trickle.
 
@@ -387,25 +388,25 @@ Cycles examined across {F's write lock, L's write lock, handler mutex, loan
 registry lock, `skipEntriesMu`, `checkpointMu`, hraft's FSM goroutine}:
 
 - *Handler ↔ FSM goroutine on L*: broken by the loan (rules 2–4). Without a
-  loan this is a hard deadlock — the handler holds the lock waiting for the
+  loan this is a hard deadlock: the handler holds the lock waiting for the
   future; the future needs `FSM.Apply(E)`; the apply needs the lock.
 - *Proposer ↔ FSM goroutine on F*: the proposer holds F's write lock waiting
   for consumption; consumption takes **no** lock (skip = no walappender) and
   nothing can precede E in the apply queue *if the leader accepted* (accept
   ⟺ no data entries in (base, M); non-data entries never reach the FSM).
   If the leader instead rejects, F's FSM may be blocked on the lock behind
-  the proposer, but the rejection response doesn't depend on F's FSM — the
+  the proposer, but the rejection response doesn't depend on F's FSM: the
   proposer errors out, SQLite rolls back, the lock releases. Bounded stall,
   no cycle (§liveness).
 - *Restore vs proposer on F*: `Restore` (on the FSM goroutine) appends via a
   walappender and blocks on the write lock behind an in-flight forward whose
   marker may never be consumed (its entry got compacted *into* the incoming
-  snapshot). The dual-wait timeout is what breaks this — it is therefore
+  snapshot). The dual-wait timeout is what breaks this; it is therefore
   **mandatory, not optional**. Timeout → abandoned → gate error → SQLite
   rollback (the commit frame never reached disk, so the rolled-back frames
   are recovery-inert) → lock free → Restore appends over the abandoned
   frames (appends are positioned by `mxFrame`, not file end, so junk beyond
-  `mxFrame` is overwritten — same argument as `DESIGN.md §write path` step
+  `mxFrame` is overwritten, same argument as `DESIGN.md §write path` step
   5) and TRUNCATE-checkpoints. The app saw an error for a transaction whose
   effects then arrive via the snapshot: the pre-existing ambiguous-commit
   contract, not a new anomaly.
@@ -420,23 +421,23 @@ registry lock, `skipEntriesMu`, `checkpointMu`, hraft's FSM goroutine}:
 Two pieces of groundwork this design depends on, both independently
 worthwhile:
 
-1. **Fatal publish-after-commit failures —
+1. **Fatal publish-after-commit failures,
    [issue #60](https://github.com/fuchstim/literaft/issues/60).** If the
    commit-frame flush (or SQLite's subsequent wal-index publish) fails
    *after* the gate returned nil, the entry is committed cluster-wide but
-   rolled back locally, and the skip marker was already consumed — the node
+   rolled back locally, and the skip marker was already consumed: the node
    permanently lacks its own committed entry. **This is a live bug today on
    the leader path, with no forwarding involved**; it was found by this
    design's review. Forwarding amplifies it from local divergence to
    cluster-wide lost update: the diverged node's next proposal stamps a
-   `base` that *includes* the missing entry, and the leader — whose check
-   trusts `lastApplied` — accepts images computed on state the proposer
+   `base` that *includes* the missing entry, and the leader, whose check
+   trusts `lastApplied`, accepts images computed on state the proposer
    doesn't have. The rule this design assumes: **any local-publish failure
    after commitment is fatal** (panic, like `FSM.Apply`'s existing
    contract); recovery is restart + hraft's snapshot-restore + replay, which
    converges because entries are full page images. That in turn requires
-   restart to actually work from a non-empty `-wal` with an uninitialized
-   wal-index — `walappender.Open` currently refuses ("recovery from an
+   restart to work from a non-empty `-wal` with an uninitialized
+   wal-index: `walappender.Open` currently refuses ("recovery from an
    existing WAL isn't implemented yet"); see #60 for both halves.
 2. **The snapshot-stream index header** (§lastapplied). Without it,
    forwarding from any restored-then-quiet follower livelocks on
@@ -446,14 +447,13 @@ worthwhile:
 
 ## API surface
 
-Everything below is design-level shape; names may be bikeshed at
-implementation time. The load-bearing properties: the gate, the `vfs`
+Everything below is design-level shape; names may change at
+implementation time. The following are **unchanged**: the gate, the `vfs`
 protocol path, `raftgate.LogAdapter` (`Apply(entry []byte) error`), and
-`driver.New` are **unchanged** (an embedder opts in by constructing a
-`ForwardingLog` and handing it to `driver.New` — which is the whole
-"alternative LogAdapter" contract); the replicated entry format is
-**unchanged** (the base index travels in the transport envelope, never in
-the log).
+`driver.New` (an embedder opts in by constructing a `ForwardingLog` and
+handing it to `driver.New`, which is the whole "alternative LogAdapter"
+contract); the replicated entry format is **unchanged** (the base index
+travels in the transport envelope, never in the log).
 
 ```go
 // package log
@@ -491,14 +491,14 @@ func NewForwardingLog(inner *SingleWriterLog, transport LeaderTransport,
 
 Required arguments positional, optional ones as functional options
 (`CLAUDE.md §public API style`): `WithForwardTimeout(d)` (the whole
-propose+dual-wait budget on the follower — see §liveness for why its default
+propose+dual-wait budget on the follower; see §liveness for why its default
 must be small), `WithHandlerLockTimeout(d)` (the leader-side write-lock
 acquisition deadline behind `BUSY`).
 
-`SingleWriterLog` grows two small things: a leader-address accessor (for
+`SingleWriterLog` grows two things: a leader-address accessor (for
 `transport.Propose` targeting; it already knows `LeaderWithID`), and typed
 classification of its non-`NotLeaderError` failures through the shared
-`rafterrors` taxonomy — an `ErrEnqueueTimeout` (definitively **not** proposed)
+`rafterrors` taxonomy: an `ErrEnqueueTimeout` (definitively **not** proposed)
 becomes a `*rafterrors.NotAppliedError` and an `ErrLeadershipLost` (ambiguous)
 becomes a `*rafterrors.AmbiguousError`; the handler and the forward path need
 to tell "safe to report definitively-rejected" from "ambiguous," which the
@@ -537,7 +537,7 @@ Error mapping on the follower (all through the shared `rafterrors` taxonomy,
 whose category fixes the surfaced `sqlite3` result code):
 `STALE_BASE`/`BUSY` → a retryable `*rafterrors.NotAppliedError` and
 `CATCHING_UP` → a retryable `*rafterrors.CatchingUpError`, both surfaced as
-`sqlite3.BUSY` — the app re-runs the transaction and recomputes on fresher
+`sqlite3.BUSY`, so the app re-runs the transaction and recomputes on fresher
 state. `NOT_LEADER` with a usable hint → `ForwardingLog` may re-resolve and
 re-send **the same request once** (safe: nothing was proposed, and the base
 check re-validates staleness at the new leader); if it still can't place the
@@ -546,7 +546,7 @@ carrying the best-known hint), which is also `SafeToRetry`.
 `AMBIGUOUS`/transport-error-after-send → resolve via the marker CAS
 (§marker); if it lands on the error side, surface a **non-retryable-as-is**
 `*rafterrors.AmbiguousError`: the write may still commit and then materializes locally via
-`walappender` — the application must treat it exactly like today's
+`walappender`, and the application must treat it exactly like today's
 ambiguous-commit on the leader (re-run only logic that is safe under
 at-least-once, or check state first).
 
@@ -558,8 +558,8 @@ only if someone later adds blind re-propose of ambiguous outcomes).
 
 Reference transport: an implementation ticket under M9 will add a minimal
 TCP/HTTP transport for `cmd/literaft` and `internal/testutils` (the raft
-transport itself isn't reusable for custom RPCs); the design deliberately
-keeps it out of the core packages.
+transport itself isn't reusable for custom RPCs); the design keeps it
+out of the core packages.
 
 ---
 
@@ -570,29 +570,29 @@ every subsequent read on any of that node's connections (and any external
 reader of its files) sees the write.** Mechanism: the dual-wait means the
 gate doesn't release the commit frame until E is committed cluster-wide
 *and* locally recognized; the commit frame then flushes and SQLite publishes
-`mxFrame` before `COMMIT` returns — and the publish happens under the same
+`mxFrame` before `COMMIT` returns, and the publish happens under the same
 write lock the txn has held all along, so no other local writer observed any
 intermediate state. Other followers see E when their own apply reaches it
 (ordinary follower staleness, unchanged); linearizable cross-node reads
 remain #35.
 
-### The stale-read no-op sharp edge
+### Stale reads that produce no frames
 
-What read-your-writes does **not** give you: a follower write whose *effect*
+What read-your-writes does **not** provide: a follower write whose *effect*
 depends on reading state written elsewhere. A read-modify-write on a follower
 (an `UPDATE`/`DELETE` with a `WHERE` clause, an `INSERT ... SELECT`) evaluates
-that read against the follower's **local, stale-able** snapshot — not the
-leader's. The base-index check keeps every write that *produces frames* honest:
+that read against the follower's **local, stale-able** snapshot, not the
+leader's. The base-index check validates every write that *produces frames*:
 computed on a stale base, it is rejected (`STALE_BASE`) and the application
 recomputes on fresher state. But a statement whose stale read matches nothing
-produces **no commit frame at all**, so it never reaches the gate — and so the
+produces **no commit frame at all**, so it never reaches the gate, and the
 base check never runs. It returns success as a local no-op, even though the
 same statement against the up-to-date state would have changed rows.
 
 Concretely: node A commits a write that makes row *r* eligible for deletion;
 a client on follower B, not yet caught up to A's write, runs
 `DELETE ... WHERE <r is eligible>`. B's snapshot doesn't show *r* as eligible,
-so the `DELETE` matches nothing, writes nothing, and succeeds — *r* is never
+so the `DELETE` matches nothing, writes nothing, and succeeds: *r* is never
 deleted cluster-wide, and B silently diverges from what a linearizable
 execution would produce. This is not a bug in the forwarding/apply path (an
 accepted forwarded entry is still provably computed on exactly the state it
@@ -621,7 +621,7 @@ converges.
 | 5 | Transport dies **after** send, E did **not** commit | Marker still pending at timeout → abandoned → error | E never in log (or truncated) | Ambiguous surfaced as failure; nothing to materialize |
 | 6 | Transport dies after send, E **did** commit; E replicates to F in time | Marker consumed → `Apply` returns nil → **txn succeeds** | E at M | Consumption proves commitment; the lost response is irrelevant |
 | 7 | Leader `OK` but E's replication to F outruns the timeout (partition, F snapshotting) | Timeout → abandoned → error; E materializes later via `walappender` (or arrives inside a snapshot) | E at M | Ambiguous-commit contract: error surfaced, write appears later; abandoned frames get overwritten at `mxFrame` |
-| 8 | L loses leadership after `raft.Apply` | hraft fails the future (`ErrLeadershipLost`) → `AMBIGUOUS` to F → case 5/6/7 by whether E ultimately commits | Either | Figure-8 retroactive commit lands on F with **no live marker** only if F abandoned — then it materializes normally (ADR-011's exact requirement) |
+| 8 | L loses leadership after `raft.Apply` | hraft fails the future (`ErrLeadershipLost`) → `AMBIGUOUS` to F → case 5/6/7 by whether E ultimately commits | Either | Figure-8 retroactive commit lands on F with **no live marker** only if F abandoned, then it materializes normally (ADR-011's exact requirement) |
 | 9 | L crashes mid-handler | Transport error → case 5/6/7 | Either | Held OS lock dies with the process; L restarts via replay |
 | 10 | F crashes after consumption, before commit-frame flush | Local txn gone; `lastApplied` was in-memory | E at M | Restart replay re-delivers E; no marker → materializes via `walappender` |
 | 11 | Commit-frame flush **fails** (no crash) after consumption / after `OK` | **Fatal by design** (#60) | E at M | Running on would mean `lastApplied` > published state, poisoning every future base; restart + replay converges instead |
@@ -639,37 +639,37 @@ converges.
 - **Throughput.** Unchanged at the cluster level: proposals were already
   serialized (≤1 in flight); forwards enter the same single-file queue at
   L's write lock. Under write contention, follower proposals lose
-  systematically (any interleaved write stales them) — **leader-locality is
-  still the performance model**; forwarding is for occasional or
+  systematically (any interleaved write stales them); **leader-locality is
+  still the performance model**, and forwarding is for occasional or
   low-contention writes, not for spreading a hot write load. This is the
   accepted cost of skipping OCC (ADR-008's "abort rate → ~100% under
-  concurrency" applies to exactly this design, on purpose).
+  concurrency" applies to exactly this design).
 - **The forward timeout is mandatory and must default small** (order
   seconds, not tens). Two independent reasons, both verified: (a) it is the
   only thing breaking the Restore wait-cycle (§locking); (b) while the
   proposer holds F's write lock, F's FSM goroutine can block materializing a
   *competing* entry, hraft's bounded FSM dispatch channel then fills, and
-  F's **main raft goroutine** blocks — F stops acking `AppendEntries`.
+  F's **main raft goroutine** blocks, so F stops acking `AppendEntries`.
   If F is quorum-critical, cluster commit progress stalls until the timeout
   fires. A rejected forward therefore delays F's own catch-up (and possibly
   the cluster) by up to the timeout; keep it well under raft's
   election/stall tolerances and make it configurable
   (`WithForwardTimeout`).
 - **Leader-side lock holds.** The handler holds L's write lock for the raft
-  round-trip — the same duration a leader-local writer holds it — plus E's
+  round-trip (the same duration a leader-local writer holds it) plus E's
   local materialization. Local writers experience forwards as ordinary
   write-lock contention (honoring `busy_timeout`), never as gate rejections.
 - **Deployment.** The transport must be wired on every node (any follower
   can originate; any node can become leader). A node without a transport
-  simply degrades to today's ADR-007 rejection. Heterogeneous clusters
-  (some nodes forwarding-enabled) are safe but confusing — the capability is
+  degrades to today's ADR-007 rejection. Heterogeneous clusters
+  (some nodes forwarding-enabled) are safe; the capability is
   effectively cluster-wide config.
 
 ---
 
 ## Testing plan
 
-- **Unit, `fsm/`:** the marker CAS — concurrent consume vs abandon from two
+- **Unit, `fsm/`:** the marker CAS: concurrent consume vs abandon from two
   goroutines lands in exactly one terminal state, consumed always publishes,
   abandoned always materializes; `lastApplied` advance points (inside the
   locked section; skip path; `Restore` sets it downward).
@@ -683,17 +683,17 @@ converges.
   and `InstallSnapshot` catch-up of a far-behind node while forwarding
   continues (case 12), both asserting cluster-wide byte-identical convergence
   + `integrity_check` with no lost or duplicated write. These drive
-  idempotent, always-frame-producing writes retried through every transient/
-  ambiguous outcome, so the final state is deterministic despite the churn.
-  (The narrower, fully-deterministic slices — `CATCHING_UP` in the drain
-  window, the response/consumption race, the never-re-propose rule — stay in
-  the `log/` handler+follower unit matrix against fakes.)
+  idempotent, always-frame-producing writes retried through every transient/ambiguous
+  outcome, so the final state is deterministic despite the churn.
+  (The narrower, fully-deterministic slices stay in the `log/`
+  handler+follower unit matrix against fakes: `CATCHING_UP` in the drain
+  window, the response/consumption race, the never-re-propose rule.)
 - **`internal/testutils` / `integration/`:**
   `integration/correctness_test.go`'s trigger-heavy workload runs a share of
-  writes through follower connections via a real (test) transport — the
+  writes through follower connections via a real (test) transport; the
   byte-identical-to-plain-SQLite bar plus `PRAGMA integrity_check` and the
   external unmodified-VFS reader hold unchanged. Because follower reads are
-  stale-able (§read-your-writes' stale-read no-op edge), the spec re-runs a
+  stale-able (§read-your-writes' stale-read no-op case), the spec re-runs a
   zero-row `UPDATE`/`DELETE` only after the originating follower has caught up;
   read-your-writes on the originating node holds after every frame-producing
   `COMMIT`.
@@ -706,18 +706,18 @@ converges.
 
 ## Deferred follow-ups
 
-- **Page-level OCC** (ADR-008 steps 2–4): unchanged trigger — leader
+- **Page-level OCC** (ADR-008 steps 2–4): unchanged trigger (leader
   SQL-exec CPU proven to be the bottleneck *and* local reads inside
-  interactive txns required. This design neither needs it nor precludes it;
+  interactive txns required). This design neither needs it nor precludes it;
   the `ForwardRequest` envelope is where per-page tokens would ride.
 - **Client-request-ID dedup** (#34): only if blind re-propose of ambiguous
   outcomes is ever added; the no-blind-retry rule makes it unnecessary here.
 - **Auto-retry with recompute** (driver-level re-run of the SQL on
-  `STALE_BASE`): impossible below `database/sql` — the driver sees pages,
+  `STALE_BASE`): impossible below `database/sql`, since the driver sees pages,
   not statements. An app-level helper is the most that fits.
 - **Linearizable reads** (#35): unrelated mechanism (read-index/lease), but
-  note forwarding does *not* provide it — a follower's reads outside its own
+  forwarding does *not* provide it: a follower's reads outside its own
   just-committed writes remain stale-able. This is what makes a follower
   read-modify-write able to silently no-op against stale state (see §read-
-  your-writes' "stale-read no-op sharp edge"); linearizable reads would close
+  your-writes' stale-read no-op case); linearizable reads would close
   it, but nothing in this design does.

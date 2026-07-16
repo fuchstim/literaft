@@ -313,10 +313,24 @@ haven't been migrated.
 
 ## Code comments
 
-Keep comments brief and factual — state what's non-obvious, not a
-mini-essay. Don't reference other functions, files, issues, or PRs by name;
-a pointer like that goes stale the moment the referenced thing is renamed or
-moved, and the comment silently becomes wrong. Say what's true right here.
+Keep comments brief, factual, and technical: state what's non-obvious, not a
+mini-essay. No fluff, no filler, no em-dashes, no narrative framing. Don't
+reference other functions, files, issues, or PRs by name; such a pointer
+goes stale the moment the referenced thing is renamed or moved, and the
+comment becomes wrong. Say what's true right here.
+
+---
+
+## Documentation style
+
+Everything in `docs/` is a neutral technical reference: factual, technical,
+and informational. No fluff, no filler, no em-dashes, no narrative framing
+(no dramatized section titles, rhetorical questions, storytelling asides, or
+emphasis-for-drama). Use plain declarative statements, and prefer commas,
+colons, semicolons, or parentheses over dashes. Preserve technical precision:
+keep exact file paths, package and symbol names, cross-references, tables,
+and code blocks intact. Numeric-range en-dashes (e.g. "bytes 4–7") are
+acceptable.
 
 ---
 
