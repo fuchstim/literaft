@@ -149,8 +149,8 @@ this file's context — update it *from* GitHub, not the other way around.
 **Implementing a ticket**
 
 - Check out a new branch before starting work on an issue — never commit
-  straight to `master`. Branch names are prefixed `tfuchs/` per the global git
-  convention (e.g. `tfuchs/m7-fault-injection`).
+  straight to `master`. Branch names are prefixed with the local user's handle or GitHub username
+  (e.g. `tfuchs/m7-fault-injection`).
 - Open a PR against `master` that links back to the issue (e.g. `Closes #<n>`
   in the PR body) so merging it auto-closes the issue.
 - Exception: if the user explicitly asks in the current turn to commit/push

@@ -2,39 +2,61 @@
 
 ![literaft interactive TUI](res/screenshot.png)
 
-A `database/sql` driver that turns a single-node SQLite database into a
-RAFT-replicated one — without patching SQLite and without giving up
-on-disk file compatibility. Pure Go (no cgo), built on
-[`github.com/ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
-[`github.com/hashicorp/raft`](https://github.com/hashicorp/raft).
+literaft is a pure-Go (no cgo) `database/sql` driver that replicates a single
+SQLite database across a cluster using RAFT. It is built on
+[`ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
+[`hashicorp/raft`](https://github.com/hashicorp/raft).
 
-- **WAL mode**, gated at the WAL commit frame: a write becomes visible only
-  after it reaches RAFT quorum.
-- **Multiple read-write connections from the same process**, with the same
-  concurrency as stock SQLite in WAL mode. The only added cost is that each
-  commit blocks for one RAFT round-trip.
-- **Read-only connections from other processes.** The `.db`, `-wal`, and
-  `-shm` files stay byte-for-byte SQLite-compatible, so an *unmodified*
-  SQLite process (e.g. the `sqlite3` CLI) can open the database read-only
-  while a node is running.
+Each node embeds the driver and opens the database in-process. The nodes form a
+RAFT cluster among themselves; every committed write is replicated so all
+replicas hold byte-for-byte identical `.db`/`-wal`/`-shm` files. No external
+database or separate server process is required. The intended deployment is a
+set of application instances that need shared, strongly-consistent state without
+additional infrastructure, for example the pods of one Kubernetes deployment.
 
-Writes are **leader-only**, and there is no conflict merging anywhere: a write
-on a follower is either rejected with a leader hint, or — with the opt-in
-forwarding transport — sent to the leader and accepted only if it was computed
-on the leader's current state. See [Consistency
-guarantees](#consistency-guarantees) below for the full picture,
-[`docs/DESIGN.md`](docs/DESIGN.md) for the design, and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) for why alternatives were rejected.
+## How it works
+
+literaft runs SQLite in WAL mode and intercepts writes at the VFS layer. In WAL
+mode a transaction becomes visible when the wal-index header's `mxFrame` is
+advanced, not when frames land in the `-wal` file. literaft withholds a
+transaction's commit frame from the `-wal` file until its page images reach a
+RAFT quorum, then lets SQLite publish the transaction normally. Two consequences:
+
+- Readers (local and external) never observe an un-replicated transaction,
+  because visibility is gated on quorum.
+- A rejected transaction is not crash-recoverable: its commit frame never
+  reaches disk, and WAL recovery replays only up to the last valid commit frame.
+
+RAFT log entries are physical redo: an ordered list of `(pgno, page_image)`
+plus the post-commit database size. Followers apply entries in strict total
+order into their local `-wal` and wal-index. SQLite is not patched and the
+on-disk format is unchanged.
+
+## Properties
+
+- **`database/sql` driver.** Standard driver interface; no custom query API.
+- **Strong consistency.** Writes are serialized through the RAFT leader and
+  become visible only after quorum. There is no page-level conflict resolution;
+  conflicts are prevented by RAFT's total order.
+- **Writes on any node.** Writes execute on the leader. Followers reject writes
+  by default, or forward them to the leader when the log adapter is wrapped in
+  `log.ForwardingLog`.
+- **Concurrent connections.** Multiple read-write connections per process, with
+  stock SQLite WAL concurrency (single writer, concurrent readers). Reads never
+  block on replication; each commit blocks for one RAFT round-trip.
+- **External read-only access.** The `.db`, `-wal`, and `-shm` files stay
+  byte-for-byte SQLite-compatible, so an unmodified SQLite process (e.g. the
+  `sqlite3` CLI) can open the database read-only while a node is running.
+- **Pure Go.** No cgo; the SQLite engine runs on wazero.
+
+See [Consistency guarantees](#consistency-guarantees) for the full semantics.
 
 ## Status
 
-M0–M6 are done: wrapper VFS, external-reader compatibility, the commit-frame
-gate, follower apply, real `hashicorp/raft` integration, leadership-churn
-correctness, and snapshot-based catch-up for far-behind followers. Opt-in
-follower write-forwarding (M9) is also built, and `cmd/literaft` turns it on by
-default. The current milestone is M7 hardening — fault injection, fuzzing, and
-a few known flakes. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
-up-to-date, per-issue status.
+Experimental (pre-1.0). A multi-node cluster replicates writes, followers serve
+reads, nodes can be added and removed while the cluster is live, and a node that
+falls too far behind catches up automatically via snapshots. See
+[the milestones](https://github.com/fuchstim/literaft/milestones) for status.
 
 ## Install
 
@@ -44,12 +66,15 @@ go get github.com/fuchstim/literaft
 
 ## Quickstart
 
-The pieces: an `*hraft.Raft` (transport + log/stable/snapshot stores, all
-standard `hashicorp/raft` types), a [`fsm.FSM`](fsm/fsm.go) (owns the
-replicated SQLite database), a [`log.SingleWriterLog`](log/singlewriter.go)
-(adapts `*hraft.Raft` to the interface the gate needs), and
-[`driver.New`](driver/driver.go) (wires the two into a `database/sql`
-driver).
+The example runs a single-node cluster in one process, a minimal version of
+[`cmd/literaft`](cmd/literaft). It wires the components a node needs: a gRPC
+server hosting the raft transport and the write-forwarding service, a
+[`fsm.FSM`](fsm/fsm.go) (owns the replicated SQLite database), an `*hraft.Raft`
+(standard `hashicorp/raft`, here with in-memory stores), a
+[`log.ForwardingLog`](log/forward.go) wrapping a
+[`log.SingleWriterLog`](log/singlewriter.go) (adapts raft to the gate and
+forwards follower writes to the leader), and [`driver.New`](driver/driver.go)
+(wires it into a `database/sql` driver).
 
 ```go
 package main
@@ -58,58 +83,97 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
+	"net"
 	"time"
 
+	grpctransport "github.com/Jille/raft-grpc-transport"
+	"github.com/hashicorp/go-hclog"
 	hraft "github.com/hashicorp/raft"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
 	"github.com/fuchstim/literaft/log"
 )
 
 func main() {
-	// fsm.New enables WAL mode on dbPath and takes ownership of the
-	// database's lifecycle (checkpointing, follower-apply, snapshots).
-	f, err := fsm.New("node.db")
+	const (
+		nodeID   = "node-1"
+		bindAddr = "127.0.0.1:9001"
+	)
+
+	logger := hclog.New(&hclog.LoggerOptions{Level: hclog.Info})
+
+	// fsm.New enables WAL mode on the database file and takes ownership of its
+	// lifecycle (checkpointing, follower-apply, snapshots).
+	f, err := fsm.New("node.db", fsm.WithLogger(logger))
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
 
-	// Standard hraft wiring. A real deployment uses a network transport and
-	// a persistent LogStore/StableStore (this repo's own raftsqlite package,
-	// or raft-boltdb) instead of the in-memory ones below -- see
-	// cmd/literaft/main.go, which runs raft over a gRPC transport.
-	addr, transport := hraft.NewInmemTransport("")
-	config := hraft.DefaultConfig()
-	config.LocalID = hraft.ServerID("node-1")
-
-	stableLog := hraft.NewInmemStore()
-	snaps := hraft.NewInmemSnapshotStore()
-
-	r, err := hraft.NewRaft(config, f, stableLog, stableLog, snaps, transport)
+	// One gRPC server per node hosts both the raft transport and the
+	// write-forwarding service, so bindAddr is the only address a node exposes.
+	lis, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		panic(err)
 	}
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
+	tm := grpctransport.New(hraft.ServerAddress(bindAddr), dialOptions)
+	grpcServer := grpc.NewServer()
+	tm.Register(grpcServer)
+
+	// The forwarding transport shares that same server, so the leader's forward
+	// address is just its raft address -- an identity resolver.
+	fwd := forward.New(func(a hraft.ServerAddress) string { return string(a) }, dialOptions)
+	fwd.Register(grpcServer)
+
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil {
+			logger.Error("gRPC server stopped", "error", err)
+		}
+	}()
+	defer grpcServer.Stop()
+
+	// In-memory stores keep the example self-contained. A real deployment uses
+	// a persistent LogStore/StableStore (this repo's raftsqlite package) and an
+	// on-disk snapshot store instead -- see cmd/literaft.
+	store := hraft.NewInmemStore()
+	snaps := hraft.NewInmemSnapshotStore()
+
+	config := hraft.DefaultConfig()
+	config.LocalID = hraft.ServerID(nodeID)
+	config.Logger = logger.Named("raft")
+
+	r, err := hraft.NewRaft(config, f, store, store, snaps, tm.Transport())
+	if err != nil {
+		panic(err)
+	}
+	defer r.Shutdown()
+
+	// Bootstrap a new single-node cluster. Additional nodes would join through
+	// an existing member instead (see "Running a real cluster" below).
 	err = r.BootstrapCluster(hraft.Configuration{
-		Servers: []hraft.Server{{ID: config.LocalID, Address: addr}},
+		Servers: []hraft.Server{{ID: config.LocalID, Address: hraft.ServerAddress(bindAddr)}},
 	}).Error()
 	if err != nil && !errors.Is(err, hraft.ErrCantBootstrap) {
 		panic(err)
 	}
 
-	// log.SingleWriterLog owns leader/ready/drain state and translates
-	// hraft's failure modes into *log.NotLeaderError / log.CatchingUpError.
-	singleWriterLog := log.NewSingleWriterLog(r)
-	defer singleWriterLog.Close()
+	// log.SingleWriterLog owns leader/ready/drain state; wrapping it in a
+	// log.ForwardingLog lets follower connections forward writes to the leader
+	// (under a base-index check) rather than rejecting them.
+	l := log.NewSingleWriterLog(r, log.WithLogger(logger))
+	defer l.Close()
+	adapter := log.NewForwardingLog(l, fwd, f, log.WithLogger(logger))
 
 	// driver.New registers a process-unique gated VFS and returns a
-	// database/sql-compatible driver.Driver. journal_mode=WAL is already
-	// set by fsm.New; driver.Driver applies synchronous=NORMAL to every
-	// pooled connection it opens.
-	d := driver.New(f, singleWriterLog)
+	// database/sql-compatible driver. journal_mode=WAL is already set by
+	// fsm.New; the driver applies synchronous=NORMAL to every connection.
+	d := driver.New(f, adapter, driver.WithLogger(logger))
 	defer d.Close()
 
 	sql.Register("literaft", d)
@@ -119,71 +183,43 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := writeWithRetry(db, d, `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`); err != nil {
+	// A freshly bootstrapped node needs a moment to elect itself leader before
+	// it can accept writes.
+	for r.State() != hraft.Leader {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// A committed write has been replicated to a RAFT quorum; the commit blocks
+	// for exactly that one round-trip. Reads never do.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`); err != nil {
 		panic(err)
 	}
-}
-
-// writeWithRetry demonstrates the leader-only write contract: a write on a
-// follower, or on a leader still draining its apply backlog after just
-// winning an election, fails fast rather than blocking or resolving via
-// conflict merging (there is no conflict merging anywhere in this system).
-// d.LastRejection() recovers the concrete rejection reason, since it doesn't
-// reliably survive the round trip back through database/sql.
-func writeWithRetry(db *sql.DB, d *driver.Driver, query string) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, err := db.Exec(query)
-		if err == nil {
-			return nil
-		}
-
-		var notLeader *log.NotLeaderError
-		var catchingUp log.CatchingUpError // returned by value, not by pointer
-		rejection := d.LastRejection()
-		switch {
-		case errors.As(rejection, &notLeader):
-			// Not the leader. In a real cluster, redirect the client to
-			// notLeader.Leader instead of retrying here.
-		case errors.As(rejection, &catchingUp):
-			// Elected leader, still draining a backlog from before this
-			// term. Safe to retry shortly.
-		default:
-			return err
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for a leader: %w", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	fmt.Println("committed and replicated")
 }
 ```
 
-Every other connection this process opens against the same registered VFS
-name — more `*sql.DB` handles, or another goroutine's `db.Conn()` — gets the
-same concurrent read-write semantics as stock SQLite in WAL mode. Reads never
-block on the RAFT round-trip; only commits do.
+Every other connection this process opens against the same registered VFS name
+(more `*sql.DB` handles, or another goroutine's `db.Conn()`) gets the same
+concurrent read-write semantics as stock SQLite in WAL mode.
 
-### Accepting writes on followers
+### Rejecting writes on followers
 
-The quickstart above wires the leader-only contract: a `log.SingleWriterLog`
-handed straight to `driver.New`, so a write on a follower fails fast. To let
-follower connections accept writes instead, wrap that log in a
-[`log.ForwardingLog`](log/forward.go) with a `log.LeaderTransport` and pass
-*that* to `driver.New`. A follower then forwards its captured write to the
-leader, which accepts it only if it was computed on the leader's current
-applied state (otherwise the client re-runs it against fresher state).
-`cmd/literaft` sets this up by default; see
+The example enables write forwarding by wrapping the `log.SingleWriterLog` in a
+`log.ForwardingLog`: a write on a follower connection is shipped to the leader
+and accepted only if it was computed on the leader's current applied state
+(otherwise it is rejected as stale and the client re-runs it against fresher
+state). To reject follower writes outright instead (returning a leader hint the
+client redirects on), pass the plain `log.SingleWriterLog` to `driver.New` and
+drop the forwarding transport. `cmd/literaft` forwards by default and switches
+to rejection with `-forward-writes=false`. See
 [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
 
 ## Running a real cluster
 
 [`cmd/literaft`](cmd/literaft) is a complete node process built on the same
-four pieces above, with a gRPC transport
-([`raft-grpc-transport`](https://github.com/Jille/raft-grpc-transport)), an
-on-disk [`raftsqlite`](raftsqlite) log/stable store, file-based snapshots, and
-an interactive SQL REPL for exercising a running node by hand:
+components as the example, adding an on-disk [`raftsqlite`](raftsqlite)
+log/stable store, file-based snapshots, a cluster join/leave control plane, and
+an interactive SQL REPL.
 
 ```sh
 go build -o literaft ./cmd/literaft
@@ -196,87 +232,127 @@ go build -o literaft ./cmd/literaft
 ./literaft -id node2 -bind 127.0.0.1:9002 -data-dir ./data/node2 -db ./data/node2/db.sqlite \
   -join 127.0.0.1:9001
 
-# Decommission a node for good (removes it from the configuration via any
-# member, forwarded to the leader). This is separate from stopping a node.
+# Decommission a node (removes it from the configuration via any member,
+# forwarded to the leader). This is separate from stopping a node.
 ./literaft -leave -id node2 -join 127.0.0.1:9001
 ```
 
 The raft transport and the membership control plane share one gRPC server per
-node, so `-bind` is the only address a node exposes. Membership is **durable**:
-an ordinary shutdown leaves the configuration untouched, so restarting a node
-(a new binary, a crash) brings it back automatically — it's still a voter, and
-the leader resumes replicating to it. If a node comes back at a *different*
-address, it re-announces itself on startup — through any reachable member, or
-the `-join` hint if given — so the leader learns the new address and
-reconnects. Removing a node is therefore an explicit act (`-leave`, or
-`RemoveVoter` over gRPC), not a side effect of stopping the process. The
-leader's REPL also has `.addvoter <id> <address>` for adding a member by hand.
+node, so `-bind` is the only address a node exposes. Membership is durable: an
+ordinary shutdown leaves the configuration untouched, so restarting a node (a
+new binary, a crash) brings it back automatically as a voter, and the leader
+resumes replicating to it. A node that restarts at a different address
+re-announces itself on startup (through any reachable member, or the `-join`
+hint if given) so the leader learns the new address. Removing a node is
+therefore explicit (`-leave`, or `RemoveVoter` over gRPC), not a side effect of
+stopping the process. The leader's REPL also has `.addvoter <id> <address>`.
 
-Follower connections accept writes by default, forwarded to the leader under
-the base-index check; pass `-forward-writes=false` to reject them with a leader
-hint instead.
+Follower connections accept writes by default, forwarded to the leader under the
+base-index check; pass `-forward-writes=false` to reject them with a leader hint.
 
 ## Consistency guarantees
 
-literaft replicates **physical page images** through RAFT, applied in the same
-total order on every node, so all replicas converge to byte-for-byte identical
-`.db`/`-wal`/`-shm` files. What that does and does not guarantee:
+literaft replicates physical page images through RAFT, applied in the same total
+order on every node, so all replicas converge to byte-for-byte identical
+`.db`/`-wal`/`-shm` files.
 
 - **Totally-ordered writes, no merges.** Every committed write is serialized
-  through RAFT's single-leader log. There is no page-level conflict resolution
-  anywhere — conflicts are *prevented* by that total order, never merged.
+  through RAFT's single-leader log. There is no page-level conflict resolution;
+  conflicts are prevented by that total order.
 - **Quorum-gated visibility and durability.** A write becomes visible (to local
   readers and to external SQLite processes) only after it reaches RAFT quorum:
   the commit-frame gate withholds the transaction's commit frame until RAFT
-  commits. A rejected write's commit frame never reaches disk, so it isn't even
+  commits. A rejected write's commit frame never reaches disk, so it is not
   crash-recoverable. Durability comes from the quorum, not from local `fsync`
   (`synchronous=NORMAL` is expected).
 - **Read-your-writes on the node that wrote.** Once `COMMIT` returns, every
-  subsequent read on that node — including an external, unmodified SQLite
-  process reading its files — observes the write.
+  subsequent read on that node (including an external, unmodified SQLite process
+  reading its files) observes the write.
 - **Follower reads can be stale.** A follower serves reads from its own
-  most-recently-applied state, which may lag the leader. literaft does **not**
+  most-recently-applied state, which may lag the leader. literaft does not
   provide linearizable cross-node reads: a read on one node is not guaranteed to
   see a write another node's `COMMIT` just returned.
 - **Writes are leader-only.** A write attempted on a follower is rejected with a
-  leader hint (the client redirects), *unless* the node is configured with the
-  opt-in write-forwarding transport (`cmd/literaft` enables it by default). A
-  forwarded write is accepted only if its page images were computed on exactly
-  the leader's current applied state; otherwise it is rejected as stale and the
-  client re-runs it against fresher state.
+  leader hint (the client redirects), unless the node is configured with the
+  write-forwarding transport (`cmd/literaft` enables it by default). A forwarded
+  write is accepted only if its page images were computed on exactly the leader's
+  current applied state; otherwise it is rejected as stale and re-run against
+  fresher state.
 
-### The stale-read no-op caveat
+### Stale-read no-op caveat
 
-Follower reads being stale-able has one sharp edge worth calling out. A
-*read-modify-write* issued on a follower — an `UPDATE`/`DELETE` with a `WHERE`
-clause, or an `INSERT ... SELECT` — evaluates its condition against the
+A read-modify-write issued on a follower (an `UPDATE`/`DELETE` with a `WHERE`
+clause, or an `INSERT ... SELECT`) evaluates its condition against the
 follower's local, possibly-stale snapshot.
 
-- If the statement **changes rows**, its page images are validated against the
-  leader's current state before being accepted; if the follower was stale, the
-  write is rejected and re-run against fresher state, so correctness holds.
-- But if the stale read makes the statement **match nothing**, it produces no
-  changes at all — so it never enters the RAFT log, is never validated, and
-  returns success as a local no-op. Against the up-to-date cluster state the
-  same statement might have modified rows.
+- If the statement changes rows, its page images are validated against the
+  leader's current state before being accepted; a stale follower's write is
+  rejected and re-run against fresher state, so correctness holds.
+- If the stale read makes the statement match nothing, it produces no changes,
+  so it never enters the RAFT log, is never validated, and returns success as a
+  local no-op. Against up-to-date cluster state the same statement might have
+  modified rows.
 
-So a conditional write on a follower can silently do nothing based on a stale
-view. An application that needs a read-modify-write evaluated against the latest
-committed cluster state should issue it on the leader (or ensure the follower
-has caught up first). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md)
-for the full treatment.
+A read-modify-write that must be evaluated against the latest committed cluster
+state should be issued on the leader (or after ensuring the follower has caught
+up). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+
+## Comparison
+
+|                             | **literaft**                      | [Litestream](https://litestream.io) | [dqlite](https://dqlite.io)  | [rqlite](https://rqlite.io)  |
+| --------------------------- | --------------------------------- | ------------------------------------ | ---------------------------- | ---------------------------- |
+| **What it is**              | Embedded replicated SQLite        | Streaming backup / disaster recovery | Embedded replicated SQL engine | Standalone replicated SQL database |
+| **How you use it**          | `database/sql` driver, in-process | Sidecar process beside your DB       | C library (Go via cgo)       | Separate server, HTTP/JSON API |
+| **Consensus**               | Raft (synchronous quorum)         | None (async ship to object storage)  | Raft (synchronous quorum)    | Raft (synchronous quorum)    |
+| **Replicates**              | Physical page images              | WAL pages → S3/Azure/etc.            | WAL frames                   | SQL statements               |
+| **Data storage**            | On disk                           | On disk                              | In memory (Raft log on disk) | On disk                      |
+| **Interactive transactions**| Yes                               | Yes (plain SQLite)                   | Yes                          | No (batched statements only) |
+| **HA / automatic failover** | Yes (multi-node)                  | No (restore from a backup)           | Yes                          | Yes                          |
+| **External SQLite readers** | Yes (files stay stock-compatible) | Yes (it's your normal file)          | No (patched SQLite + custom storage) | No (the server owns the file) |
+| **Runtime**                 | Pure Go, no cgo                   | Go                                   | C                            | Go                           |
+
+- **[Litestream](https://litestream.io)** is asynchronous backup of a single
+  SQLite database to object storage for point-in-time recovery. It is not a
+  consensus system: no quorum, no live multi-node failover, and writes not yet
+  shipped are lost on a crash.
+- **[dqlite](https://dqlite.io)** also replicates at the WAL/page level over
+  Raft, but is a C library built on a patched SQLite with its own storage format
+  and wire protocol, used from Go via cgo. It holds the entire database in
+  memory and persists only the Raft log, so the dataset must fit in RAM.
+- **[rqlite](https://rqlite.io)** is a standalone server accessed over HTTP/JSON
+  that replicates SQL statements over Raft. It has no interactive transactions;
+  statements are batched into a single request.
+
+Litestream, dqlite, and rqlite are mature, widely deployed projects; literaft is
+pre-1.0.
 
 ## Further reading
 
-- [`docs/DESIGN.md`](docs/DESIGN.md) — the complete design: write/read/
-  checkpoint/follower-apply paths, external-reader safety, conflict handling.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — ADR log of what was rejected and
-  why.
-- [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md) — the write-forwarding
-  protocol: base-index check, the skip-marker state machine, and the failure
-  matrix.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone status, mirrored from
-  GitHub issues.
-- [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md) — on-disk byte layout reference.
-- [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md) — notes specific to
-  building on `ncruces/go-sqlite3`.
+- [`docs/DESIGN.md`](docs/DESIGN.md): full design (write/read/checkpoint/
+  follower-apply paths, external-reader safety, conflict handling).
+- [`docs/DECISIONS.md`](docs/DECISIONS.md): ADR log of rejected alternatives.
+- [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md): the write-forwarding
+  protocol (base-index check, skip-marker state machine, failure matrix).
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): milestone status, mirrored from GitHub.
+- [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md): on-disk byte layout reference.
+- [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md): notes on building on
+  `ncruces/go-sqlite3`.
+
+## Contributing
+
+The engine is pure Go (wazero); a plain checkout builds without extra toolchain
+setup:
+
+```sh
+go build ./...
+```
+
+The test suites are [Ginkgo](https://onsi.github.io/ginkgo/)/Gomega; run them
+with the `ginkgo` CLI:
+
+```sh
+ginkgo -r --procs=20 ./...
+```
+
+See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
+[`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind it.
