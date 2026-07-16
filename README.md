@@ -2,39 +2,62 @@
 
 ![literaft interactive TUI](res/screenshot.png)
 
-A `database/sql` driver that turns a single-node SQLite database into a
-RAFT-replicated one — without patching SQLite and without giving up
-on-disk file compatibility. Pure Go (no cgo), built on
-[`github.com/ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
-[`github.com/hashicorp/raft`](https://github.com/hashicorp/raft).
+**Replicate a SQLite database across a cluster — without patching SQLite and
+without giving up on-disk file compatibility.**
 
-- **WAL mode**, gated at the WAL commit frame: a write becomes visible only
-  after it reaches RAFT quorum.
-- **Multiple read-write connections from the same process**, with the same
-  concurrency as stock SQLite in WAL mode. The only added cost is that each
-  commit blocks for one RAFT round-trip.
-- **Read-only connections from other processes.** The `.db`, `-wal`, and
-  `-shm` files stay byte-for-byte SQLite-compatible, so an *unmodified*
-  SQLite process (e.g. the `sqlite3` CLI) can open the database read-only
-  while a node is running.
+literaft is a pure-Go (no cgo) `database/sql` driver that turns an ordinary
+single-node SQLite database into a RAFT-replicated one. Your application keeps
+talking to `database/sql` exactly as before; literaft replicates every
+committed write across the cluster and keeps each replica byte-for-byte
+identical. It's built on
+[`ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
+[`hashicorp/raft`](https://github.com/hashicorp/raft).
 
-Writes are **leader-only**, and there is no conflict merging anywhere: a write
-on a follower is either rejected with a leader hint, or — with the opt-in
-forwarding transport — sent to the leader and accepted only if it was computed
-on the leader's current state. See [Consistency
-guarantees](#consistency-guarantees) below for the full picture,
-[`docs/DESIGN.md`](docs/DESIGN.md) for the design, and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) for why alternatives were rejected.
+- **Drop-in `database/sql` driver.** No custom query API — use it like any
+  other SQL driver.
+- **Strongly consistent writes.** Every write is serialized through a single
+  RAFT leader and becomes visible only after it reaches quorum, so replicas
+  never diverge and there are no conflicts to merge.
+- **Writes on any node.** The leader handles writes, but followers can accept
+  them too and forward them to the leader using the provided `log.ForwardingLog`.
+- **Concurrent connections.** Open as many read-write connections as you like
+  from a process, with the same concurrency as stock SQLite in WAL mode — reads
+  never block on replication, only commits do.
+- **External read-only access.** The `.db`, `-wal`, and `-shm` files stay
+  byte-for-byte SQLite-compatible, so an *unmodified* SQLite process (e.g. the
+  `sqlite3` CLI) can open the database read-only while a node is running.
 
-## Status
+See [Consistency guarantees](#consistency-guarantees) below for exactly what
+literaft does and does not promise.
 
-M0–M6 are done: wrapper VFS, external-reader compatibility, the commit-frame
-gate, follower apply, real `hashicorp/raft` integration, leadership-churn
-correctness, and snapshot-based catch-up for far-behind followers. Opt-in
-follower write-forwarding (M9) is also built, and `cmd/literaft` turns it on by
-default. The current milestone is M7 hardening — fault injection, fuzzing, and
-a few known flakes. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
-up-to-date, per-issue status.
+## Why literaft
+
+literaft grew out of a specific frustration: wanting a small, strongly-consistent
+database shared across the pods of a single Kubernetes deployment, without
+standing up any additional infrastructure to get it. The usual answer — run (or
+pay for) an external Postgres/MySQL, or a separate database cluster — is a lot
+of moving parts and operational surface for what is often a modest amount of
+shared state.
+
+SQLite is the obvious fit for "modest amount of state," but it's single-node: a
+file on one pod isn't reachable by the others, and there's no failover if that
+pod dies. literaft closes that gap. Each pod embeds the library and opens the
+database in-process; the pods form a Raft cluster among *themselves* over the
+cluster network, replicating every write so all of them converge on identical
+data and any of them can take over if the leader's pod is rescheduled. There's
+no separate database process to deploy, no external service to depend on, and
+nothing on the network but the pods talking directly to one another — the
+database *is* the application, replicated. It stays plain SQLite on disk, so a
+sidecar or debug shell can still open the file read-only with the stock
+`sqlite3` tooling.
+
+## Project status
+
+literaft already replicates writes across a real multi-node cluster: followers
+serve reads, nodes can be added and removed while the cluster is live, and a
+node that falls too far behind catches up automatically via snapshots. It's
+still in early development and should be treated as experimental.
+See [`the roadmap`]([docs/ROADMAP.md](https://github.com/fuchstim/literaft/milestones)) for more details.
 
 ## Install
 
@@ -44,12 +67,15 @@ go get github.com/fuchstim/literaft
 
 ## Quickstart
 
-The pieces: an `*hraft.Raft` (transport + log/stable/snapshot stores, all
-standard `hashicorp/raft` types), a [`fsm.FSM`](fsm/fsm.go) (owns the
-replicated SQLite database), a [`log.SingleWriterLog`](log/singlewriter.go)
-(adapts `*hraft.Raft` to the interface the gate needs), and
-[`driver.New`](driver/driver.go) (wires the two into a `database/sql`
-driver).
+The example below runs a single-node cluster in one process — a minimal
+version of [`cmd/literaft`](cmd/literaft). It wires the pieces a node needs: a
+gRPC server hosting the raft transport and the write-forwarding service, a
+[`fsm.FSM`](fsm/fsm.go) (owns the replicated SQLite database), an `*hraft.Raft`
+(standard `hashicorp/raft`, here with in-memory stores), a
+[`log.ForwardingLog`](log/forward.go) wrapping a
+[`log.SingleWriterLog`](log/singlewriter.go) (adapts raft to the gate and
+forwards follower writes to the leader), and
+[`driver.New`](driver/driver.go) (wires it all into a `database/sql` driver).
 
 ```go
 package main
@@ -58,58 +84,97 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
+	"net"
 	"time"
 
+	grpctransport "github.com/Jille/raft-grpc-transport"
+	"github.com/hashicorp/go-hclog"
 	hraft "github.com/hashicorp/raft"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
 	"github.com/fuchstim/literaft/log"
 )
 
 func main() {
-	// fsm.New enables WAL mode on dbPath and takes ownership of the
-	// database's lifecycle (checkpointing, follower-apply, snapshots).
-	f, err := fsm.New("node.db")
+	const (
+		nodeID   = "node-1"
+		bindAddr = "127.0.0.1:9001"
+	)
+
+	logger := hclog.New(&hclog.LoggerOptions{Level: hclog.Info})
+
+	// fsm.New enables WAL mode on the database file and takes ownership of its
+	// lifecycle (checkpointing, follower-apply, snapshots).
+	f, err := fsm.New("node.db", fsm.WithLogger(logger))
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
 
-	// Standard hraft wiring. A real deployment uses a network transport and
-	// a persistent LogStore/StableStore (this repo's own raftsqlite package,
-	// or raft-boltdb) instead of the in-memory ones below -- see
-	// cmd/literaft/main.go, which runs raft over a gRPC transport.
-	addr, transport := hraft.NewInmemTransport("")
-	config := hraft.DefaultConfig()
-	config.LocalID = hraft.ServerID("node-1")
-
-	stableLog := hraft.NewInmemStore()
-	snaps := hraft.NewInmemSnapshotStore()
-
-	r, err := hraft.NewRaft(config, f, stableLog, stableLog, snaps, transport)
+	// One gRPC server per node hosts both the raft transport and the
+	// write-forwarding service, so bindAddr is the only address a node exposes.
+	lis, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		panic(err)
 	}
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
+	tm := grpctransport.New(hraft.ServerAddress(bindAddr), dialOptions)
+	grpcServer := grpc.NewServer()
+	tm.Register(grpcServer)
+
+	// The forwarding transport shares that same server, so the leader's forward
+	// address is just its raft address -- an identity resolver.
+	fwd := forward.New(func(a hraft.ServerAddress) string { return string(a) }, dialOptions)
+	fwd.Register(grpcServer)
+
+	go func() {
+		if err := grpcServer.Serve(lis); err != nil {
+			logger.Error("gRPC server stopped", "error", err)
+		}
+	}()
+	defer grpcServer.Stop()
+
+	// In-memory stores keep the example self-contained. A real deployment uses
+	// a persistent LogStore/StableStore (this repo's raftsqlite package) and an
+	// on-disk snapshot store instead -- see cmd/literaft.
+	store := hraft.NewInmemStore()
+	snaps := hraft.NewInmemSnapshotStore()
+
+	config := hraft.DefaultConfig()
+	config.LocalID = hraft.ServerID(nodeID)
+	config.Logger = logger.Named("raft")
+
+	r, err := hraft.NewRaft(config, f, store, store, snaps, tm.Transport())
+	if err != nil {
+		panic(err)
+	}
+	defer r.Shutdown()
+
+	// Bootstrap a new single-node cluster. Additional nodes would join through
+	// an existing member instead (see "Running a real cluster" below).
 	err = r.BootstrapCluster(hraft.Configuration{
-		Servers: []hraft.Server{{ID: config.LocalID, Address: addr}},
+		Servers: []hraft.Server{{ID: config.LocalID, Address: hraft.ServerAddress(bindAddr)}},
 	}).Error()
 	if err != nil && !errors.Is(err, hraft.ErrCantBootstrap) {
 		panic(err)
 	}
 
-	// log.SingleWriterLog owns leader/ready/drain state and translates
-	// hraft's failure modes into *log.NotLeaderError / log.CatchingUpError.
-	singleWriterLog := log.NewSingleWriterLog(r)
-	defer singleWriterLog.Close()
+	// log.SingleWriterLog owns leader/ready/drain state; wrapping it in a
+	// log.ForwardingLog lets follower connections forward writes to the leader
+	// (under a base-index check) rather than rejecting them.
+	l := log.NewSingleWriterLog(r, log.WithLogger(logger))
+	defer l.Close()
+	adapter := log.NewForwardingLog(l, fwd, f, log.WithLogger(logger))
 
 	// driver.New registers a process-unique gated VFS and returns a
-	// database/sql-compatible driver.Driver. journal_mode=WAL is already
-	// set by fsm.New; driver.Driver applies synchronous=NORMAL to every
-	// pooled connection it opens.
-	d := driver.New(f, singleWriterLog)
+	// database/sql-compatible driver. journal_mode=WAL is already set by
+	// fsm.New; the driver applies synchronous=NORMAL to every connection.
+	d := driver.New(f, adapter, driver.WithLogger(logger))
 	defer d.Close()
 
 	sql.Register("literaft", d)
@@ -119,44 +184,18 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := writeWithRetry(db, d, `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`); err != nil {
+	// A freshly bootstrapped node needs a moment to elect itself leader before
+	// it can accept writes.
+	for r.State() != hraft.Leader {
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// A committed write has been replicated to a RAFT quorum; the commit blocks
+	// for exactly that one round-trip. Reads never do.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)`); err != nil {
 		panic(err)
 	}
-}
-
-// writeWithRetry demonstrates the leader-only write contract: a write on a
-// follower, or on a leader still draining its apply backlog after just
-// winning an election, fails fast rather than blocking or resolving via
-// conflict merging (there is no conflict merging anywhere in this system).
-// d.LastRejection() recovers the concrete rejection reason, since it doesn't
-// reliably survive the round trip back through database/sql.
-func writeWithRetry(db *sql.DB, d *driver.Driver, query string) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, err := db.Exec(query)
-		if err == nil {
-			return nil
-		}
-
-		var notLeader *log.NotLeaderError
-		var catchingUp log.CatchingUpError // returned by value, not by pointer
-		rejection := d.LastRejection()
-		switch {
-		case errors.As(rejection, &notLeader):
-			// Not the leader. In a real cluster, redirect the client to
-			// notLeader.Leader instead of retrying here.
-		case errors.As(rejection, &catchingUp):
-			// Elected leader, still draining a backlog from before this
-			// term. Safe to retry shortly.
-		default:
-			return err
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for a leader: %w", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	fmt.Println("committed and replicated")
 }
 ```
 
@@ -165,25 +204,25 @@ name — more `*sql.DB` handles, or another goroutine's `db.Conn()` — gets the
 same concurrent read-write semantics as stock SQLite in WAL mode. Reads never
 block on the RAFT round-trip; only commits do.
 
-### Accepting writes on followers
+### Rejecting writes on followers
 
-The quickstart above wires the leader-only contract: a `log.SingleWriterLog`
-handed straight to `driver.New`, so a write on a follower fails fast. To let
-follower connections accept writes instead, wrap that log in a
-[`log.ForwardingLog`](log/forward.go) with a `log.LeaderTransport` and pass
-*that* to `driver.New`. A follower then forwards its captured write to the
-leader, which accepts it only if it was computed on the leader's current
-applied state (otherwise the client re-runs it against fresher state).
-`cmd/literaft` sets this up by default; see
+The example above enables write forwarding by wrapping the
+`log.SingleWriterLog` in a `log.ForwardingLog`: a write on a follower
+connection is shipped to the leader and accepted only if it was computed on the
+leader's current applied state (otherwise the client re-runs it against fresher
+state). To reject follower writes outright instead — returning a leader hint
+the client redirects on — hand the plain `log.SingleWriterLog` straight to
+`driver.New` and drop the forwarding transport. `cmd/literaft` forwards by
+default and switches to rejection with `-forward-writes=false`; see
 [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
 
 ## Running a real cluster
 
 [`cmd/literaft`](cmd/literaft) is a complete node process built on the same
-four pieces above, with a gRPC transport
-([`raft-grpc-transport`](https://github.com/Jille/raft-grpc-transport)), an
-on-disk [`raftsqlite`](raftsqlite) log/stable store, file-based snapshots, and
-an interactive SQL REPL for exercising a running node by hand:
+pieces as the example above, adding what a real deployment needs: an on-disk
+[`raftsqlite`](raftsqlite) log/stable store, file-based snapshots, a cluster
+join/leave control plane, and an interactive SQL REPL for exercising a running
+node by hand:
 
 ```sh
 go build -o literaft ./cmd/literaft
@@ -266,6 +305,53 @@ committed cluster state should issue it on the leader (or ensure the follower
 has caught up first). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md)
 for the full treatment.
 
+## How literaft compares
+
+Several projects add replication to SQLite; they make different trade-offs.
+The short version: literaft is an *embedded* library (a `database/sql` driver,
+no separate server or sidecar) that replicates *physical page images* through
+Raft and keeps the on-disk files byte-for-byte stock-SQLite-compatible, all in
+pure Go.
+
+|                            | **literaft**                          | [Litestream](https://litestream.io) | [dqlite](https://dqlite.io) | [rqlite](https://rqlite.io) |
+| -------------------------- | ------------------------------------- | ------------------------------------ | --------------------------- | --------------------------- |
+| **What it is**             | Embedded replicated SQLite            | Streaming backup / disaster recovery | Embedded replicated SQL engine | Standalone replicated SQL database |
+| **How you use it**         | `database/sql` driver, in-process     | Sidecar process beside your DB       | C library (Go via cgo)      | Separate server, HTTP/JSON API |
+| **Consensus**              | Raft (synchronous quorum)             | None — async ship to object storage  | Raft (synchronous quorum)   | Raft (synchronous quorum)   |
+| **Replicates**             | Physical page images                  | WAL pages → S3/Azure/etc.            | WAL frames                  | SQL statements              |
+| **Data storage**           | On disk                               | On disk                              | In memory (Raft log on disk) | On disk                    |
+| **Interactive transactions**| Yes                                  | Yes (plain SQLite)                   | Yes                         | No — batched statements only |
+| **HA / automatic failover**| Yes (multi-node)                      | No — restore from a backup           | Yes                         | Yes                         |
+| **External SQLite readers**| Yes — files stay stock-compatible     | Yes — it's your normal file          | No — patched SQLite + custom storage | No — the server owns the file |
+| **Runtime**                | Pure Go, no cgo                       | Go                                   | C                           | Go                          |
+
+- **[Litestream](https://litestream.io)** solves a different problem:
+  continuous, asynchronous backup of a single SQLite database to object storage
+  for point-in-time recovery. It isn't a consensus system — there's no quorum
+  and no live multi-node failover, so a crash can lose the writes not yet
+  shipped. literaft instead gates each commit on a synchronous Raft quorum.
+- **[dqlite](https://dqlite.io)** is architecturally the closest — it also
+  replicates at the WAL/page level over Raft — but it's a C library built on a
+  *patched* SQLite with its own storage format and wire protocol, reached from
+  Go through cgo. It also keeps the *entire database in memory*, persisting only
+  the Raft log, so the dataset has to fit in RAM. literaft is pure Go on stock
+  SQLite and keeps the database on disk, so the `.db`/`-wal`/`-shm` files stay
+  readable by any unmodified SQLite process and the working set isn't bounded by
+  memory.
+- **[rqlite](https://rqlite.io)** is a standalone server you talk to over
+  HTTP/JSON, replicating SQL *statements* through Raft. It has no interactive
+  transactions — statements are batched into a single request, so you can't
+  `BEGIN`, read a result, and then decide whether to `COMMIT` or `ROLLBACK`.
+  literaft is an embedded driver your process links directly (no network hop, no
+  separate service) and, being a real `database/sql` driver over on-disk SQLite,
+  supports interactive transactions and replicates page images (so
+  non-deterministic SQL replicates correctly).
+
+Litestream, dqlite, and rqlite are all mature, widely deployed projects;
+literaft is younger (pre-1.0). Pick the one whose model fits — literaft's niche
+is *strongly-consistent, embedded, stock-compatible* replication in a pure-Go
+process.
+
 ## Further reading
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the complete design: write/read/
@@ -280,3 +366,22 @@ for the full treatment.
 - [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md) — on-disk byte layout reference.
 - [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md) — notes specific to
   building on `ncruces/go-sqlite3`.
+
+## Contributing
+
+The engine is pure Go (wazero) — no cgo, so a plain checkout builds and tests
+without extra toolchain setup:
+
+```sh
+go build ./...
+```
+
+The test suites are [Ginkgo](https://onsi.github.io/ginkgo/)/Gomega; run them
+with the `ginkgo` CLI:
+
+```sh
+ginkgo -r --procs=20 ./...
+```
+
+Start with [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture, and
+[`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind the design.
