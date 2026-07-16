@@ -308,7 +308,7 @@ up). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
 | **Data storage**            | On disk                           | On disk                              | In memory (Raft log on disk) | On disk                      |
 | **Interactive transactions**| Yes                               | Yes (plain SQLite)                   | Yes                          | No (batched statements only) |
 | **HA / automatic failover** | Yes (multi-node)                  | No (restore from a backup)           | Yes                          | Yes                          |
-| **External SQLite readers** | Yes (files stay stock-compatible) | Yes (it's your normal file)          | No (patched SQLite + custom storage) | No (the server owns the file) |
+| **External SQLite readers** | Yes (files stay stock-compatible) | Yes (it's your normal file)          | No (patched SQLite + custom storage) | Yes ([Reads are supported](https://rqlite.io/docs/guides/direct-access/)) |
 | **Runtime**                 | Pure Go, no cgo                   | Go                                   | C                            | Go                           |
 
 - **[Litestream](https://litestream.io)** is asynchronous backup of a single
