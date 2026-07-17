@@ -6,3 +6,5 @@ cpuprofile
 vendor
 *.test
 .DS_Store
+data.sql
+coverage.out*

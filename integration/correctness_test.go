@@ -54,7 +54,7 @@ func correctnessDuration() time.Duration {
 			return d
 		}
 	}
-	return 30 * time.Second
+	return time.Minute
 }
 
 func correctnessIterations() int {

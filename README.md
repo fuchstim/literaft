@@ -350,10 +350,11 @@ go build ./...
 ```
 
 The test suites are [Ginkgo](https://onsi.github.io/ginkgo/)/Gomega; run them
-with the `ginkgo` CLI:
+using:
 
 ```sh
-ginkgo -r --procs=20 ./...
+make test/unit          # Run unit tests (fast)
+make test/correctness   # Run correctness tests (slow)
 ```
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
