@@ -8,3 +8,5 @@ vendor
 .DS_Store
 data.sql
 coverage.out*
+# Added by goreleaser init:
+dist/

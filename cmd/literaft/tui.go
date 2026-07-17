@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fuchstim/literaft/cmd/literaft/commands"
+	"github.com/fuchstim/literaft/internal/version"
 	"github.com/hashicorp/raft"
 	zone "github.com/lrstanley/bubblezone"
 )
@@ -531,7 +532,7 @@ func (m tuiModel) renderHeader() string {
 	snapshotTerm := stats["last_snapshot_term"]
 	snapshotIndex := stats["last_snapshot_index"]
 
-	name := headerNameStyle.Render(" literaft ")
+	name := headerNameStyle.Render(fmt.Sprintf(" literaft %s ", version.Version))
 	info := fmt.Sprintf(" Node: %s  •  State: %s  •  Leader: %s  •  Term: %s  •  Log Index (committed/applied/pending): %s/%s/%s  •  Snapshot (term/index): %s/%s ", m.nodeID, stateStyle.Render(state.String()), leader, term, commitIndex, appliedIdx, fsmPending, snapshotTerm, snapshotIndex)
 	return headerBarStyle.Width(m.width).Render(name + info)
 }
