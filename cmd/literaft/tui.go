@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fuchstim/literaft/cmd/literaft/commands"
 	"github.com/hashicorp/raft"
 	zone "github.com/lrstanley/bubblezone"
 )
@@ -65,23 +66,6 @@ const (
 	minPaneHeight = 3
 )
 
-// tuiHelp is printed by the ".help" REPL meta-command.
-const tuiHelp = `commands:
-  <sql>;                 run a SQL statement (may span multiple lines)
-  .servers               show the cluster servers and their roles
-  .addvoter <id> <addr>  add a voter to the cluster
-  .removevoter <id>      remove a voter from the cluster
-  .help                  show this help
-  .clear 			     clear the REPL transcript
-  .exit / .quit          shut this node down and exit
-
-keys:
-  tab / shift+tab        move focus between the input and the two panes
-  up / down              scroll command history (input focused)
-  up/down/pgup/pgdn      scroll the focused pane
-  mouse wheel / click    scroll or focus a pane
-  ctrl+c                 shut this node down and exit`
-
 var (
 	focusColor = lipgloss.Color("205") // active border / accents
 	blurColor  = lipgloss.Color("240") // inactive border
@@ -134,10 +118,10 @@ type statusTickMsg struct{}
 // terminal. SQL and cluster commands run off this goroutine so a blocking
 // commit round-trip never freezes the UI.
 type tuiModel struct {
-	nodeID string
-	raft   *raft.Raft
-	db     *sql.DB
-	sink   *logSink
+	nodeID     string
+	raft       *raft.Raft
+	sink       *logSink
+	cmdHandler *commands.CommandHandler
 
 	input      textinput.Model
 	logs, repl viewport.Model
@@ -170,7 +154,7 @@ func newTUIModel(id string, r *raft.Raft, db *sql.DB, sink *logSink) tuiModel {
 	return tuiModel{
 		nodeID:     id,
 		raft:       r,
-		db:         db,
+		cmdHandler: commands.NewCommandHandler(r, db),
 		sink:       sink,
 		input:      ti,
 		repl:       viewport.New(0, 0),
@@ -326,37 +310,18 @@ func (m *tuiModel) submit() tea.Cmd {
 // when no statement is being accumulated, and a statement is complete once
 // its trimmed text ends in ";".
 func (m *tuiModel) processLine(line string) tea.Cmd {
+	firstLine := m.stmtBuf == ""
 	trimmed := strings.TrimSpace(line)
+
 	m.appendTranscript(m.prompt() + line)
 
-	if m.stmtBuf == "" {
-		switch {
-		case trimmed == "":
-			return nil
-		case trimmed == ".exit" || trimmed == ".quit":
-			m.quitting = true
-			return tea.Quit
-		case trimmed == ".clear":
-			m.transcript = nil
-			m.syncViewport(&m.repl, m.transcript)
-			return nil
-		case trimmed == ".help":
-			m.appendTranscript(tuiHelp)
-			return nil
-		case trimmed == ".servers":
-			m.running = true
-			return tea.Batch(runServersCmd(m.raft), m.spinner.Tick)
-		case trimmed == ".addvoter" || strings.HasPrefix(trimmed, ".addvoter "):
-			m.running = true
-			return tea.Batch(runAddVoterCmd(m.raft, trimmed), m.spinner.Tick)
-		case trimmed == ".removevoter" || strings.HasPrefix(trimmed, ".removevoter "):
-			m.running = true
-			return tea.Batch(runRemoveVoterCmd(m.raft, trimmed), m.spinner.Tick)
-		}
+	if firstLine && trimmed == "" {
+		return nil
 	}
 
 	m.stmtBuf += line + "\n"
-	if !strings.HasSuffix(trimmed, ";") {
+
+	if !(firstLine && strings.HasPrefix(trimmed, ".")) && !strings.HasSuffix(trimmed, ";") {
 		m.updatePrompt()
 		return nil
 	}
@@ -365,7 +330,17 @@ func (m *tuiModel) processLine(line string) tea.Cmd {
 	m.stmtBuf = ""
 	m.updatePrompt()
 	m.running = true
-	return tea.Batch(runStmtCmd(m.db, stmt), m.spinner.Tick)
+
+	cmd := func() tea.Msg {
+		var b strings.Builder
+		if m.cmdHandler.Handle(stmt, &b) {
+			m.quitting = true
+			return tea.Quit()
+		}
+		return stmtResultMsg(b.String())
+	}
+
+	return tea.Batch(cmd, m.spinner.Tick)
 }
 
 func (m *tuiModel) pushHistory(line string) {
@@ -615,38 +590,6 @@ func waitForLog(ch <-chan string) tea.Cmd {
 				return logBatchMsg{lines: batch}
 			}
 		}
-	}
-}
-
-func runStmtCmd(db *sql.DB, stmt string) tea.Cmd {
-	return func() tea.Msg {
-		var b strings.Builder
-		runStatement(db, stmt, &b)
-		return stmtResultMsg(b.String())
-	}
-}
-
-func runServersCmd(r *raft.Raft) tea.Cmd {
-	return func() tea.Msg {
-		var b strings.Builder
-		runServers(r, &b)
-		return stmtResultMsg(b.String())
-	}
-}
-
-func runAddVoterCmd(r *raft.Raft, line string) tea.Cmd {
-	return func() tea.Msg {
-		var b strings.Builder
-		runAddVoter(r, line, &b)
-		return stmtResultMsg(b.String())
-	}
-}
-
-func runRemoveVoterCmd(r *raft.Raft, line string) tea.Cmd {
-	return func() tea.Msg {
-		var b strings.Builder
-		runRemoveVoter(r, line, &b)
-		return stmtResultMsg(b.String())
 	}
 }
 

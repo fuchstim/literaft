@@ -2,14 +2,19 @@ package main
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/fuchstim/literaft/internal/testutils"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// newTestModel builds a model with no live node behind it. Every path
-// exercised here stops before the tea.Cmd that would touch the db or raft,
-// so nil dependencies are fine.
+func startSoloNode() (*testutils.TCPCluster, *testutils.Node) {
+	GinkgoHelper()
+	c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), 1)
+	n := c.ReadyLeader()
+	return c, n
+}
+
 func newTestModel() *tuiModel {
 	GinkgoHelper()
 	m := newTUIModel("n1", nil, nil, newLogSink())
@@ -95,12 +100,16 @@ var _ = Describe("tuiModel line processing", func() {
 		Expect(joined).To(ContainSubstring("id INTEGER);"))
 	})
 
-	It("quits on .exit and marks the model quitting", func() {
+	It("quits on .exit, marking the model quitting once the command runs", func() {
 		m := newTestModel()
 		cmd := m.processLine(".exit")
-		Expect(m.quitting).To(BeTrue())
 		Expect(cmd).NotTo(BeNil())
-		Expect(cmd()).To(BeAssignableToTypeOf(tea.QuitMsg{}))
+		Expect(m.running).To(BeTrue())
+
+		// The handler resolves .exit off-goroutine; running it returns a quit
+		// message and marks the model quitting.
+		Expect(drainBatch(cmd)).To(BeAssignableToTypeOf(tea.QuitMsg{}))
+		Expect(m.quitting).To(BeTrue())
 	})
 
 	It("treats a meta-command as text mid-statement, not as a command", func() {
@@ -186,7 +195,7 @@ var _ = Describe("tuiModel against a live node", func() {
 		// drive it the way Bubble Tea would and feed the result back in.
 		var result tea.Msg
 		Eventually(func() tea.Msg {
-			result = drainForResult(cmd)
+			result = drainBatch(cmd)
 			return result
 		}).ShouldNot(BeNil())
 
@@ -199,14 +208,16 @@ var _ = Describe("tuiModel against a live node", func() {
 	})
 })
 
-// drainForResult runs cmd (a tea.Batch of the statement runner and a spinner
-// tick) and returns the stmtResultMsg it produces, mirroring how Bubble Tea
-// executes batched commands.
-func drainForResult(cmd tea.Cmd) tea.Msg {
+// drainBatch runs cmd (a tea.Batch of the statement/command runner and a
+// spinner tick) and returns the first stmtResultMsg or tea.QuitMsg it
+// produces, mirroring how Bubble Tea executes batched commands. Spinner ticks
+// and nil commands are skipped.
+func drainBatch(cmd tea.Cmd) tea.Msg {
 	msg := cmd()
 	batch, ok := msg.(tea.BatchMsg)
 	if !ok {
-		if _, isResult := msg.(stmtResultMsg); isResult {
+		switch msg.(type) {
+		case stmtResultMsg, tea.QuitMsg:
 			return msg
 		}
 		return nil
@@ -215,8 +226,11 @@ func drainForResult(cmd tea.Cmd) tea.Msg {
 		if c == nil {
 			continue
 		}
-		if r, isResult := c().(stmtResultMsg); isResult {
-			return r
+		switch m := c().(type) {
+		case stmtResultMsg:
+			return m
+		case tea.QuitMsg:
+			return m
 		}
 	}
 	return nil
