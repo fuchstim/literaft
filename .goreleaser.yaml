@@ -8,6 +8,7 @@ before:
     - go mod tidy
     - go mod vendor
     - make generate
+    - make test/unit test/correctness
 
 builds:
   - id: literaft
