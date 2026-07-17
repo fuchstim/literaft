@@ -19,10 +19,6 @@ func TestCommands(t *testing.T) {
 	RunSpecs(t, "cmd/literaft/commands Suite")
 }
 
-// startSoloNode brings up a one-node, self-bootstrapped cluster -- real
-// enough (the same production wiring testutils.NewTCPCluster mirrors) to run
-// the command handler against a live commit-frame gate, without a multi-node
-// cluster's complexity.
 func startSoloNode() (*testutils.TCPCluster, *testutils.Node) {
 	GinkgoHelper()
 	c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), 1)

@@ -8,10 +8,6 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// startSoloNode brings up a one-node, self-bootstrapped cluster -- real
-// enough (the same production wiring testutils.NewTCPCluster mirrors) to run
-// the TUI against a live commit-frame gate, without a multi-node cluster's
-// complexity.
 func startSoloNode() (*testutils.TCPCluster, *testutils.Node) {
 	GinkgoHelper()
 	c := testutils.NewTCPCluster(GinkgoT(), GinkgoT().TempDir(), 1)
@@ -19,10 +15,6 @@ func startSoloNode() (*testutils.TCPCluster, *testutils.Node) {
 	return c, n
 }
 
-// newTestModel builds a model with no live node behind it. Every path
-// exercised here either stops before the tea.Cmd that would touch the db or
-// raft, or drives a meta-command (.exit) that the handler resolves without
-// touching either, so nil dependencies are fine.
 func newTestModel() *tuiModel {
 	GinkgoHelper()
 	m := newTUIModel("n1", nil, nil, newLogSink())
