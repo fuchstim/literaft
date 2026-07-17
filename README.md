@@ -138,9 +138,11 @@ func main() {
 	}()
 	defer grpcServer.Stop()
 
-	// In-memory stores keep the example self-contained. A real deployment uses
-	// a persistent LogStore/StableStore (this repo's raftsqlite package) and an
-	// on-disk snapshot store instead -- see cmd/literaft.
+	// In-memory stores keep the example self-contained. Any compatible
+	// stores can be used, though some stores may have a bigger performance
+	// impact than others (ex. boltdb is rather slow as it fsyncs on every write).
+	// cmd/literaft uses this package's raftsqlite which implements a SQLite-backed
+	// RAFT log/stable store with WAL mode enabled.
 	store := hraft.NewInmemStore()
 	snaps := hraft.NewInmemSnapshotStore()
 
