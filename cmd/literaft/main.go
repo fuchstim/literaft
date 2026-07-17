@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/fuchstim/literaft/cmd/literaft/commands"
 	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/cmd/literaft/membership"
 	"github.com/fuchstim/literaft/driver"
@@ -271,7 +272,8 @@ func run() error {
 		// with the process, same as any other in-flight work at signal time.
 		replDone := make(chan bool, 1)
 		go func() {
-			replDone <- runREPL(r, db, os.Stdin, os.Stdout)
+			h := commands.NewCommandHandler(r, db)
+			replDone <- h.RunREPL(os.Stdin, os.Stdout)
 		}()
 
 		// Only an explicit .exit/.quit means "shut this node down now". A bare
