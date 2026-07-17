@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod vendor
+    - make generate
+
+builds:
+  - id: literaft
+    main: ./cmd/literaft
+    binary: literaft
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    ldflags:
+      - -s -w -X github.com/fuchstim/literaft/internal/version.Version={{.Version}} -X github.com/fuchstim/literaft/internal/version.Commit={{.Commit}} -X github.com/fuchstim/literaft/internal/version.Date={{.Date}}
+
+archives:
+  - id: literaft
+    ids:
+      - literaft
+    formats: [binary]
+
+git:
+  tag_sort: -version:creatordate
+  prerelease_suffix: "-"
+  ignore_tags:
+    - nightly
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: fuchstim
+    name: literaft
