@@ -4,9 +4,7 @@
 
 literaft is a RAFT-based SQLite driver. It is built on
 [`ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
-[`hashicorp/raft`](https://github.com/hashicorp/raft). 
-
-It
+[`hashicorp/raft`](https://github.com/hashicorp/raft). It:
 * replicates a database across members using the RAFT protocol
 * supports follower-computed writes 
 * maintains SQLite file compatibility for (readonly) out-of-process connections
