@@ -2,17 +2,24 @@
 
 ![literaft interactive TUI](res/screenshot.png)
 
-literaft is a pure-Go (no cgo) `database/sql` driver that replicates a single
-SQLite database across a cluster using RAFT. It is built on
+literaft is a RAFT-based SQLite driver. It is built on
 [`ncruces/go-sqlite3`](https://github.com/ncruces/go-sqlite3) and
-[`hashicorp/raft`](https://github.com/hashicorp/raft).
+[`hashicorp/raft`](https://github.com/hashicorp/raft). 
+
+It
+* replicates a database across members using the RAFT protocol
+* supports follower-computed writes 
+* maintains SQLite file compatibility for (readonly) out-of-process connections
+* supports fully interactive local transactions
+* is entirely Cgo-free
+* implements a `database/sql` driver to be a drop-in replacement for other SQLite drivers
 
 Each node embeds the driver and opens the database in-process. The nodes form a
 RAFT cluster among themselves; every committed write is replicated so all
 replicas hold byte-for-byte identical `.db`/`-wal`/`-shm` files. No external
 database or separate server process is required. The intended deployment is a
 set of application instances that need shared, strongly-consistent state without
-additional infrastructure, for example the pods of one Kubernetes deployment.
+additional infrastructure, for example the pods of a Kubernetes deployment.
 
 ## How it works
 
