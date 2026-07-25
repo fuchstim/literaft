@@ -4,25 +4,18 @@ import (
 	"errors"
 	"path/filepath"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
-	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
-	"github.com/fuchstim/literaft/internal/vfs"
+	"github.com/fuchstim/literaft/internal/wal"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// codeGate is a stub vfs.Gate that always rejects a proposal with err,
-// letting these tests control exactly what internal/vfs.File's abort path
-// sees.
 type codeGate struct{ err error }
 
-func (g codeGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error { return g.err }
+func (g codeGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error { return g.err }
 
-// codedErr is a minimal vfs.CodedError, standing in for a taxonomy error so
-// this test stays raft-agnostic (it only exercises the vfs code-extraction).
 type codedErr struct {
 	error
 	code sqlite3.ExtendedErrorCode
@@ -36,14 +29,9 @@ var _ = Describe("rejected-write error code mapping", func() {
 		path := filepath.Join(dir, "busy.db")
 
 		gate := codeGate{err: codedErr{errors.New("catching up"), sqlite3.ExtendedErrorCode(sqlite3.BUSY)}}
-		name := "literaft-errcode-test-busy"
-		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
+		vfsName := registerVFSWithGate(gate)
 
-		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		defer c.Close()
-		Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(c.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		c := openDB(path, vfsName)
 
 		writeErr := c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 		Expect(writeErr).To(HaveOccurred())
@@ -56,14 +44,9 @@ var _ = Describe("rejected-write error code mapping", func() {
 		path := filepath.Join(dir, "plain-reject.db")
 
 		gate := codeGate{err: errors.New("rejected for test")}
-		name := "literaft-errcode-test-plain"
-		vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
+		vfsName := registerVFSWithGate(gate)
 
-		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		defer c.Close()
-		Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(c.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		c := openDB(path, vfsName)
 
 		writeErr := c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 		Expect(writeErr).To(HaveOccurred())

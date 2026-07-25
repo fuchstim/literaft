@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ncruces/go-sqlite3"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -32,23 +30,17 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 		const rows = 500
 		var setupSQL strings.Builder
 		setupSQL.WriteString("BEGIN;\nCREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);\n")
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			fmt.Fprintf(&setupSQL, "INSERT INTO t (v) VALUES ('%040d');\n", i)
 		}
 		setupSQL.WriteString("COMMIT;\n")
 
-		// Spills at least one frame (tiny cache_size, full-table update)
-		// and then throws the transaction away. Never proposed to the
-		// gate, but its frame(s) stay physically in the WAL, inert, until
-		// overwritten -- exactly like the gate-rejection path.
 		const spillAndRollbackSQL = `
 			BEGIN;
 			UPDATE t SET v = v || 'r';
 			ROLLBACK;
 		`
 
-		// A small, unrelated write whose first frame lands on the offset
-		// the rolled-back transaction's first frame used.
 		const markerSQL = `
 			BEGIN;
 			UPDATE t SET v = 'MARKER' WHERE id = 1;
@@ -58,11 +50,7 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 		// Reference run: identical statements through the plain,
 		// unintercepted default VFS.
 		plainPath := filepath.Join(dir, "plain.db")
-		plain, err := sqlite3.Open("file:" + plainPath)
-		Expect(err).NotTo(HaveOccurred())
-		defer plain.Close()
-		Expect(plain.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(plain.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		plain := openDB(plainPath, "")
 		Expect(plain.Exec(setupSQL.String())).To(Succeed())
 		Expect(plain.Exec("PRAGMA cache_size=3")).To(Succeed())
 		Expect(plain.Exec(spillAndRollbackSQL)).To(Succeed())
@@ -78,7 +66,8 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 		// every proposal but never rejects one.
 		gate := &spyGate{}
 		gatedPath := filepath.Join(dir, "gated.db")
-		gated := openGated(gatedPath, gate)
+		gatedVFSName := registerVFSWithGate(gate)
+		gated := openDB(gatedPath, gatedVFSName)
 		Expect(gated.Exec(setupSQL.String())).To(Succeed())
 		before := len(gate.snapshot())
 
@@ -95,19 +84,16 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 				"mistaken for a checksum-only rewrite of the rolled-back transaction's frame")
 
 		last := entries[len(entries)-1]
-		Expect(last.pages).NotTo(BeEmpty())
-		for _, page := range last.pages {
-			Expect(int64(len(page.Page))).To(Equal(pageSize))
-			offset := (int64(page.Pgno) - 1) * pageSize
-			Expect(page.Page).To(Equal(referenceDB[offset:offset+pageSize]),
-				"captured page %d must match its final on-disk content", page.Pgno)
+		Expect(last.frames).NotTo(BeEmpty())
+		for _, frame := range last.frames {
+			Expect(int64(len(frame.Data))).To(Equal(pageSize))
+			offset := (int64(frame.Header.PgNo) - 1) * pageSize
+			Expect(frame.Data).To(Equal(referenceDB[offset:offset+pageSize]),
+				"captured page %d must match its final on-disk content", frame.Header.PgNo)
 		}
 
 		Expect(gated.Close()).To(Succeed())
-		name := "literaft-gate-test-" + filepath.Base(gatedPath)
-		reopened, err := sqlite3.Open("file:" + gatedPath + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { reopened.Close() })
+		reopened := openDB(gatedPath, gatedVFSName)
 		Expect(queryText(reopened, "PRAGMA integrity_check")).To(Equal("ok"))
 		Expect(queryInt(reopened, "SELECT count(*) FROM t")).To(Equal(int64(rows)))
 		Expect(queryText(reopened, "SELECT v FROM t WHERE id = 1")).To(Equal("MARKER"))

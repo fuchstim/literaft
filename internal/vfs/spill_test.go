@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ncruces/go-sqlite3"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -32,7 +30,7 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 		const rows = 2000
 		var insertSQL strings.Builder
 		insertSQL.WriteString("BEGIN;\nCREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);\n")
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			fmt.Fprintf(&insertSQL, "INSERT INTO t (v) VALUES ('%040d');\n", i)
 		}
 		insertSQL.WriteString("COMMIT;\n")
@@ -49,11 +47,8 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 		// unintercepted default VFS, checkpointed so every committed page
 		// lands in the .db file where it's easy to read back.
 		plainPath := filepath.Join(dir, "plain.db")
-		plain, err := sqlite3.Open("file:" + plainPath)
-		Expect(err).NotTo(HaveOccurred())
-		defer plain.Close()
-		Expect(plain.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(plain.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		plain := openDB(plainPath, "")
+
 		Expect(plain.Exec(insertSQL.String())).To(Succeed())
 		Expect(plain.Exec("PRAGMA cache_size=3")).To(Succeed())
 		Expect(plain.Exec(updateSQL)).To(Succeed())
@@ -69,8 +64,9 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 		// transaction, through a gate that records every proposal but
 		// never rejects one.
 		gate := &spyGate{}
+		gatedVFSName := registerVFSWithGate(gate)
 		gatedPath := filepath.Join(dir, "gated.db")
-		gated := openGated(gatedPath, gate)
+		gated := openDB(gatedPath, gatedVFSName)
 		Expect(gated.Exec(insertSQL.String())).To(Succeed())
 		Expect(gated.Exec("PRAGMA cache_size=3")).To(Succeed())
 		Expect(gated.Exec(updateSQL)).To(Succeed())
@@ -83,8 +79,8 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 			"the update proposal's nTruncate must be the post-commit database size")
 
 		pages := map[uint32][]byte{}
-		for _, p := range last.pages {
-			pages[p.Pgno] = p.Page
+		for _, p := range last.frames {
+			pages[p.Header.PgNo] = p.Data
 		}
 		Expect(pages).NotTo(BeEmpty())
 		for pgno, data := range pages {
@@ -98,10 +94,7 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 		// recovery to actually validate the checksums that
 		// walRewriteChecksums fixed up in place.
 		Expect(gated.Close()).To(Succeed())
-		name := "literaft-gate-test-" + filepath.Base(gatedPath)
-		reopened, err := sqlite3.Open("file:" + gatedPath + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { reopened.Close() })
+		reopened := openDB(gatedPath, gatedVFSName)
 		Expect(queryText(reopened, "PRAGMA integrity_check")).To(Equal("ok"))
 		Expect(queryInt(reopened, "SELECT count(*) FROM t")).To(Equal(int64(rows)))
 		Expect(queryText(reopened, "SELECT v FROM t WHERE id = 1")).To(HaveSuffix("xyz"))
