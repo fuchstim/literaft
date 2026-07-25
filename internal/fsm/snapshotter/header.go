@@ -6,46 +6,56 @@ import (
 	"io"
 )
 
-// The snapshot stream carries a small fixed header ahead of the raw database
-// bytes so a restoring node can recover the snapshot's raft index (raft does
-// not otherwise pass it to a restore). snapshotMagic is deliberately not a
-// valid page-1 prefix -- a SQLite page 1 always begins with the 16 bytes
-// "SQLite format 3\0" -- so an old, headerless snapshot is rejected rather
-// than misread as a page.
 const (
-	snapshotMagicSize = 16
-	snapshotVersion   = uint32(1)
-	// headerSize is magic(16) + version(4) + raft index(8).
-	headerSize = snapshotMagicSize + 4 + 8
+	SnapshotHeaderSize = 16 // magic(4) + version(4) + last applied index(8)
+
+	currentMagic   = 0x4C524654 // "LRFT"
+	currentVersion = 1
 )
 
-var snapshotMagic = [snapshotMagicSize]byte{'L', 'I', 'T', 'E', 'R', 'A', 'F', 'T', '-', 'S', 'N', 'A', 'P', 0, 0, 0}
-
-// encodeHeader builds the fixed snapshot-stream header for a snapshot taken at
-// raft index.
-func encodeHeader(index uint64) [headerSize]byte {
-	var b [headerSize]byte
-	copy(b[0:snapshotMagicSize], snapshotMagic[:])
-	binary.BigEndian.PutUint32(b[snapshotMagicSize:snapshotMagicSize+4], snapshotVersion)
-	binary.BigEndian.PutUint64(b[snapshotMagicSize+4:headerSize], index)
-	return b
+type SnapshotHeader struct {
+	Magic            uint32
+	Version          uint32
+	LastAppliedIndex uint64
 }
 
-// decodeHeader reads and validates the fixed header from the front of r,
-// returning the snapshot's raft index. A missing/short header, a wrong magic
-// (including an old headerless snapshot starting with a page-1 prefix), or an
-// unrecognized version are all rejected.
-func decodeHeader(r io.Reader) (uint64, error) {
-	var b [headerSize]byte
-	if _, err := io.ReadFull(r, b[:]); err != nil {
-		return 0, fmt.Errorf("failed to read snapshot header: %w", err)
+func NewSnapshotHeader(lastAppliedIndex uint64) *SnapshotHeader {
+	return &SnapshotHeader{
+		Magic:            currentMagic,
+		Version:          currentVersion,
+		LastAppliedIndex: lastAppliedIndex,
 	}
-	if [snapshotMagicSize]byte(b[0:snapshotMagicSize]) != snapshotMagic {
-		return 0, fmt.Errorf("snapshot is missing the literaft header (old headerless snapshots are not supported)")
+}
+
+func DecodeHeader(b []byte) (*SnapshotHeader, error) {
+	if len(b) < SnapshotHeaderSize {
+		return nil, fmt.Errorf("%w: snapshot header too short: got %d bytes, want %d", io.ErrUnexpectedEOF, len(b), SnapshotHeaderSize)
 	}
-	version := binary.BigEndian.Uint32(b[snapshotMagicSize : snapshotMagicSize+4])
-	if version != snapshotVersion {
-		return 0, fmt.Errorf("unsupported snapshot header version %d (this build writes version %d)", version, snapshotVersion)
+
+	magic := binary.BigEndian.Uint32(b[0:4])
+	if magic != currentMagic {
+		return nil, fmt.Errorf("invalid snapshot magic: got 0x%X, want 0x%X", magic, currentMagic)
 	}
-	return binary.BigEndian.Uint64(b[snapshotMagicSize+4 : headerSize]), nil
+
+	version := binary.BigEndian.Uint32(b[4:8])
+	if version != currentVersion {
+		return nil, fmt.Errorf("unsupported snapshot version: got %d, want %d", version, currentVersion)
+	}
+
+	lastAppliedIndex := binary.BigEndian.Uint64(b[8:16])
+
+	return &SnapshotHeader{
+		Magic:            magic,
+		Version:          version,
+		LastAppliedIndex: lastAppliedIndex,
+	}, nil
+}
+
+func (h *SnapshotHeader) Bytes() []byte {
+	b := make([]byte, SnapshotHeaderSize)
+	binary.BigEndian.PutUint32(b[0:4], h.Magic)
+	binary.BigEndian.PutUint32(b[4:8], h.Version)
+	binary.BigEndian.PutUint64(b[8:16], h.LastAppliedIndex)
+
+	return b
 }
