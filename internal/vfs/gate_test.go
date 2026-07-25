@@ -4,41 +4,27 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
-	"github.com/hashicorp/go-hclog"
-	"github.com/ncruces/go-sqlite3"
-	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
-
-	"github.com/fuchstim/literaft/internal/vfs"
+	"github.com/fuchstim/literaft/internal/wal"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// Commit-frame interception with a stub gate. These tests register the
-// wrapper VFS with a custom (non-always-commit) Gate so they can observe
-// exactly what the interception captured, and force the abort branch on
-// demand -- neither is possible through vfsName's shared always-commit
-// registration used by the other test files.
-
-// capturedEntry is one call to spyGate.ProposeTransaction, recorded
-// verbatim.
 type capturedEntry struct {
-	pages     []*vfs.Frame
+	frames    []*wal.Frame
 	nTruncate uint32
 }
 
-// spyGate records every proposal it sees (whether or not it's told to
-// reject it), so tests can inspect the captured pages independently of
-// whatever data ended up on disk.
 type spyGate struct {
 	mu      sync.Mutex
 	entries []capturedEntry
 	reject  bool
 }
 
-func (g *spyGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
+func (g *spyGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.entries = append(g.entries, capturedEntry{frames, nTruncate})
@@ -57,24 +43,7 @@ func (g *spyGate) setReject(v bool) {
 func (g *spyGate) snapshot() []capturedEntry {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return append([]capturedEntry(nil), g.entries...)
-}
-
-// openGated registers a fresh literaft VFS instance backed by gate under a
-// unique name and opens path through it. Each test needs its own
-// registration since the gate (and, for the page-size test, the page size)
-// is fixed at Register time.
-func openGated(path string, gate vfs.Gate) *sqlite3.Conn {
-	GinkgoHelper()
-	name := "literaft-gate-test-" + filepath.Base(path)
-	vfs.Register(name, sqlite3vfs.Find(""), gate, probePageSize(), hclog.NewNullLogger())
-
-	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(func() { c.Close() })
-	Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-	Expect(c.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
-	return c
+	return slices.Clone(g.entries)
 }
 
 var _ = Describe("commit-frame interception", func() {
@@ -89,11 +58,7 @@ var _ = Describe("commit-frame interception", func() {
 		// unintercepted default VFS, checkpointed so every committed page
 		// lands in the .db file where it's easy to read back.
 		plainPath := filepath.Join(dir, "plain.db")
-		plain, err := sqlite3.Open("file:" + plainPath)
-		Expect(err).NotTo(HaveOccurred())
-		defer plain.Close()
-		Expect(plain.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(plain.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
+		plain := openDB(plainPath, "")
 		Expect(plain.Exec(ddl)).To(Succeed())
 		Expect(plain.Exec("PRAGMA wal_checkpoint(TRUNCATE)")).To(Succeed())
 
@@ -105,7 +70,9 @@ var _ = Describe("commit-frame interception", func() {
 		// Intercepted run: same statements through a gate that records
 		// every proposal but never rejects one.
 		gate := &spyGate{}
-		gated := openGated(filepath.Join(dir, "gated.db"), gate)
+		gatedVFSName := registerVFSWithGate(gate)
+		gatedPath := filepath.Join(dir, "gated.db")
+		gated := openDB(gatedPath, gatedVFSName)
 		Expect(gated.Exec(ddl)).To(Succeed())
 
 		entries := gate.snapshot()
@@ -115,13 +82,10 @@ var _ = Describe("commit-frame interception", func() {
 		Expect(int64(last.nTruncate)).To(Equal(pageCount),
 			"the final proposal's nTruncate must be the post-commit database size")
 
-		// Union all captured pages -- later frames for a page win -- and
-		// confirm every page named matches what the reference run actually
-		// persisted at that page number.
 		pages := map[uint32][]byte{}
 		for _, e := range entries {
-			for _, p := range e.pages {
-				pages[p.Pgno] = p.Page
+			for _, f := range e.frames {
+				pages[f.Header.PgNo] = f.Data
 			}
 		}
 		Expect(pages).NotTo(BeEmpty())
@@ -138,7 +102,9 @@ var _ = Describe("commit-frame interception", func() {
 		path := filepath.Join(dir, "abort.db")
 
 		gate := &spyGate{}
-		c := openGated(path, gate)
+		gatedVFSName := registerVFSWithGate(gate)
+		c := openDB(path, gatedVFSName)
+
 		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 		Expect(c.Exec("INSERT INTO t (id, v) VALUES (1, 'first')")).To(Succeed())
 
@@ -153,7 +119,7 @@ var _ = Describe("commit-frame interception", func() {
 
 		snapshot := gate.snapshot()
 		rejected := snapshot[len(snapshot)-1]
-		Expect(len(rejected.pages)).To(BeNumerically(">", 1),
+		Expect(len(rejected.frames)).To(BeNumerically(">", 1),
 			"test setup should exercise a multi-frame transaction, not just the commit frame")
 
 		// mxFrame never advanced: the rejected row must not be visible.
@@ -170,15 +136,12 @@ var _ = Describe("commit-frame interception", func() {
 		// consistent state -- the aborted transaction was never replayed.
 		Expect(c.Close()).To(Succeed())
 
-		name := "literaft-gate-test-" + filepath.Base(path)
-		reopened, err := sqlite3.Open("file:" + path + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { reopened.Close() })
+		reopened := openDB(path, gatedVFSName)
 		Expect(queryInt(reopened, "SELECT count(*) FROM t")).To(Equal(int64(2)))
 		Expect(queryText(reopened, "PRAGMA integrity_check")).To(Equal("ok"))
 	})
 
-	// Regression test: a rejected commit leaves mxFrame unmoved, so a
+	// A rejected commit leaves mxFrame unmoved, so a
 	// same-shape retry lands on the exact same WAL offset(s) and pgno(s) as
 	// the failed attempt. That retry must still be captured and proposed to
 	// the gate, not mistaken for a checksum-only rewrite of an
@@ -188,7 +151,8 @@ var _ = Describe("commit-frame interception", func() {
 		path := filepath.Join(dir, "retry.db")
 
 		gate := &spyGate{}
-		c := openGated(path, gate)
+		gatedVFSName := registerVFSWithGate(gate)
+		c := openDB(path, gatedVFSName)
 		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 
 		const stmt = "INSERT INTO t (id, v) VALUES (1, 'a')"
@@ -221,7 +185,8 @@ var _ = Describe("commit-frame interception", func() {
 		path := filepath.Join(dir, "follower-retry.db")
 
 		gate := &spyGate{}
-		c := openGated(path, gate)
+		gatedVFSName := registerVFSWithGate(gate)
+		c := openDB(path, gatedVFSName)
 		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
 
 		const stmt = "INSERT INTO t (id, v) VALUES (1, 'a')"
@@ -234,28 +199,5 @@ var _ = Describe("commit-frame interception", func() {
 			"a same-shape retry must still be proposed (and rejected) rather than bypassing the gate")
 		Expect(len(gate.snapshot())).To(Equal(beforeRetry + 1))
 		Expect(queryInt(c, "SELECT count(*) FROM t")).To(Equal(int64(0)))
-	})
-
-	// Page size enforcement lives on the leader write path so a mismatch is
-	// rejected before ever reaching the gate/RAFT.
-	It("rejects a captured frame whose page size doesn't match the configured cluster page size", func() {
-		dir := GinkgoT().TempDir()
-		path := filepath.Join(dir, "pagesize.db")
-
-		gate := &spyGate{}
-		name := "literaft-pagesize-test"
-		// Registering with any value other than SQLite's actual page size
-		// guarantees a mismatch on the very first captured frame.
-		actual := probePageSize()
-		vfs.Register(name, sqlite3vfs.Find(""), gate, actual+1, hclog.NewNullLogger())
-
-		c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
-		Expect(err).NotTo(HaveOccurred())
-		defer c.Close()
-		Expect(c.Exec("PRAGMA journal_mode=WAL")).To(Succeed())
-		Expect(c.Exec("PRAGMA synchronous=NORMAL")).To(Succeed())
-
-		Expect(c.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(HaveOccurred())
-		Expect(gate.snapshot()).To(BeEmpty(), "a page-size mismatch must never reach the gate")
 	})
 })

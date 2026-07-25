@@ -1,9 +1,9 @@
 package vfs
 
 import (
-	"encoding/binary"
 	"errors"
 
+	"github.com/fuchstim/literaft/internal/wal"
 	"github.com/hashicorp/go-hclog"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
@@ -11,31 +11,26 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// White-box tests for the fatal publish-after-commit contract in
-// writeFrameData. Once the gate approves a commit frame the transaction is
-// committed cluster-wide; any failure to then flush the withheld frame to
-// the local -wal must panic rather than return an I/O error, because the
-// entry will never be redelivered to this node and a silent local rollback
-// would permanently diverge it. Driving this needs a base File whose WriteAt
-// fails on demand, which the black-box vfs_test package can't inject.
-
-// nilCommitGate is a Gate that always approves, so the commit frame reaches
-// the post-gate flush branch under test.
-type nilCommitGate struct{}
-
-func (nilCommitGate) ProposeTransaction(frames []*Frame, nTruncate uint32) error { return nil }
-
 // faultyFile is a minimal sqlite3vfs.File whose WriteAt fails once the
-// configured number of successful writes has elapsed. Every other method is
-// unused on the path under test; leaving the embedded interface nil makes an
-// unexpected call panic loudly rather than silently misbehave.
+// configured number of successful writes has elapsed.
 type faultyFile struct {
 	sqlite3vfs.File
+	pageSize        uint32
 	writesUntilFail int
 	writes          int
 }
 
 var errInjectedWrite = errors.New("injected write failure")
+
+func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
+	if off != 0 {
+		return 0, errors.New("faultyFile only supports ReadAt(0)")
+	}
+
+	header := &wal.WALHeader{PageSize: f.pageSize}
+	copy(p, header.Bytes())
+	return len(p), nil
+}
 
 func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	f.writes++
@@ -45,16 +40,11 @@ func (f *faultyFile) WriteAt(p []byte, off int64) (int, error) {
 	return len(p), nil
 }
 
-// commitFrameHeader builds a 24-byte WAL frame header for a commit frame:
-// pgno in bytes 0-3, a non-zero post-commit db size in bytes 4-7 (which is
-// what marks it a commit frame). Salt/checksum bytes are irrelevant to the
-// gate, which only ever replays the exact bytes SQLite wrote.
-func commitFrameHeader(pgno, dbSize uint32) []byte {
-	b := make([]byte, frameHeaderSize)
-	binary.BigEndian.PutUint32(b[0:4], pgno)
-	binary.BigEndian.PutUint32(b[4:8], dbSize)
-	return b
-}
+type alwaysCommitGate struct{}
+
+var _ Gate = alwaysCommitGate{}
+
+func (alwaysCommitGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error { return nil }
 
 // driveToCommitFlush feeds a single-frame commit transaction through a WAL
 // File wrapping base, stopping just before the post-gate flush: it writes
@@ -62,18 +52,16 @@ func commitFrameHeader(pgno, dbSize uint32) []byte {
 // then returns the closure that writes the paired page image -- the call
 // that runs the fatal flush branch.
 func driveToCommitFlush(base sqlite3vfs.File, pageSize uint32) func() {
-	f := wrapFile(base, FileTypeWAL, nilCommitGate{}, pageSize, hclog.NewNullLogger())
-
-	hdr := commitFrameHeader(1, 1)
-	headerOff := int64(walHeaderSize)
-	n, err := f.WriteAt(hdr, headerOff)
+	f, err := newGatedWALFile(base, alwaysCommitGate{}, hclog.NewNullLogger())
 	Expect(err).NotTo(HaveOccurred())
-	Expect(n).To(Equal(frameHeaderSize))
-	Expect(f.pending).NotTo(BeNil(), "commit-frame header must be held pending")
 
-	page := make([]byte, pageSize)
-	dataOff := headerOff + frameHeaderSize
-	return func() { f.WriteAt(page, dataOff) }
+	hdr := &wal.FrameHeader{PgNo: 1, NTruncate: 1}
+	n, err := f.WriteAt(hdr.Bytes(), wal.WALHeaderSize)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(n).To(Equal(wal.FrameHeaderSize))
+	Expect(f.pendingFrameHeader).NotTo(BeNil(), "commit-frame header must be held pending")
+
+	return func() { f.WriteAt(make([]byte, pageSize), wal.WALHeaderSize+wal.FrameHeaderSize) }
 }
 
 var _ = Describe("fatal publish-after-commit", func() {
@@ -82,19 +70,19 @@ var _ = Describe("fatal publish-after-commit", func() {
 	It("panics when the committed commit-frame header fails to flush", func() {
 		// writesUntilFail 0: the very first real disk write (the withheld
 		// header being flushed after gate success) fails.
-		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 0}, pageSize)
+		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 0, pageSize: pageSize}, pageSize)
 		Expect(flush).To(PanicWith(ContainSubstring("commit-frame header")))
 	})
 
 	It("panics when the committed commit-frame page image fails to flush", func() {
 		// writesUntilFail 1: the header flush succeeds, the paired page-image
 		// flush is the one that fails.
-		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 1}, pageSize)
-		Expect(flush).To(PanicWith(ContainSubstring("commit-frame page image")))
+		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 1, pageSize: pageSize}, pageSize)
+		Expect(flush).To(PanicWith(ContainSubstring("commit-frame data")))
 	})
 
 	It("does not panic when both flushes succeed", func() {
-		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 2}, pageSize)
+		flush := driveToCommitFlush(&faultyFile{writesUntilFail: 2, pageSize: pageSize}, pageSize)
 		Expect(flush).NotTo(Panic())
 	})
 })
