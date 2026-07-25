@@ -14,20 +14,17 @@ var (
 	_ driver.Connector     = (*connector)(nil)
 )
 
-// dsn builds the DSN this Driver always opens, regardless of whatever name
-// database/sql passes to Open/OpenConnector -- see the package doc comment
-// on sql.Open's reserved dbName argument.
 func (d *Driver) dsn() string {
 	return "file:" + d.dbPath + "?vfs=" + d.vfsName
 }
 
-// Open implements driver.Driver. name is ignored -- see dsn.
-func (d *Driver) Open(name string) (driver.Conn, error) {
+// Open implements driver.Driver. name is ignored.
+func (d *Driver) Open(string) (driver.Conn, error) {
 	c, err := (&ncrdriver.SQLite{}).Open(d.dsn())
 	if err != nil {
 		return nil, err
 	}
-	if err := applyRequiredPragmas(c); err != nil {
+	if err := applyPragmas(c); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -44,9 +41,6 @@ func (d *Driver) OpenConnector(name string) (driver.Connector, error) {
 	return &connector{owner: d, inner: inner}, nil
 }
 
-// connector wraps ncruces/go-sqlite3/driver's own connector so every
-// physical connection database/sql's pool opens over this Driver's
-// lifetime -- not just the first -- gets applyRequiredPragmas applied.
 type connector struct {
 	owner *Driver
 	inner driver.Connector
@@ -57,7 +51,7 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := applyRequiredPragmas(conn); err != nil {
+	if err := applyPragmas(conn); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -66,10 +60,7 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 func (c *connector) Driver() driver.Driver { return c.owner }
 
-// applyRequiredPragmas sets synchronous=NORMAL (durability comes from the
-// RAFT quorum, not local fsync) on a freshly opened
-// connection.
-func applyRequiredPragmas(c driver.Conn) error {
+func applyPragmas(c driver.Conn) error {
 	raw, ok := c.(ncrdriver.Conn)
 	if !ok {
 		return fmt.Errorf("driver: opened connection doesn't implement ncrdriver.Conn (got %T)", c)
