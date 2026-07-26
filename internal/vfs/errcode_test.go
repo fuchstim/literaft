@@ -14,7 +14,7 @@ import (
 
 type codeGate struct{ err error }
 
-func (g codeGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error { return g.err }
+func (g codeGate) ProposeTransaction(frames []*wal.Frame) error { return g.err }
 
 type codedErr struct {
 	error

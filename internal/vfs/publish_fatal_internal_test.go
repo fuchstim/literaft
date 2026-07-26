@@ -45,7 +45,7 @@ type alwaysCommitGate struct{}
 
 var _ Gate = alwaysCommitGate{}
 
-func (alwaysCommitGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error { return nil }
+func (alwaysCommitGate) ProposeTransaction(frames []*wal.Frame) error { return nil }
 
 // driveToCommitFlush feeds a single-frame commit transaction through a WAL
 // File wrapping base, stopping just before the post-gate flush: it writes

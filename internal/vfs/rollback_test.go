@@ -84,8 +84,8 @@ var _ = Describe("commit-frame interception across a rolled-back transaction", f
 				"mistaken for a checksum-only rewrite of the rolled-back transaction's frame")
 
 		last := entries[len(entries)-1]
-		Expect(last.frames).NotTo(BeEmpty())
-		for _, frame := range last.frames {
+		Expect(last).NotTo(BeEmpty())
+		for _, frame := range last {
 			Expect(int64(len(frame.Data))).To(Equal(pageSize))
 			offset := (int64(frame.Header.PgNo()) - 1) * pageSize
 			Expect(frame.Data).To(Equal(referenceDB[offset:offset+pageSize]),

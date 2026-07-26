@@ -146,7 +146,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 	frames, nTruncate := f.currentTxFrames, frame.Header.NTruncate()
 	f.currentTxFrames = nil
 
-	if err := f.gate.ProposeTransaction(frames, nTruncate); err != nil {
+	if err := f.gate.ProposeTransaction(frames); err != nil {
 		f.logger.Info("gate rejected transaction; discarding withheld commit frame",
 			"offset", off-wal.FrameHeaderSize, "frames", len(frames), "nTruncate", nTruncate, "error", err)
 

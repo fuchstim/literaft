@@ -13,21 +13,16 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-type capturedEntry struct {
-	frames    []*wal.Frame
-	nTruncate uint32
-}
-
 type spyGate struct {
 	mu      sync.Mutex
-	entries []capturedEntry
+	entries [][]*wal.Frame
 	reject  bool
 }
 
-func (g *spyGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error {
+func (g *spyGate) ProposeTransaction(frames []*wal.Frame) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.entries = append(g.entries, capturedEntry{frames, nTruncate})
+	g.entries = append(g.entries, frames)
 	if g.reject {
 		return errors.New("spyGate: rejected for test")
 	}
@@ -40,7 +35,7 @@ func (g *spyGate) setReject(v bool) {
 	g.reject = v
 }
 
-func (g *spyGate) snapshot() []capturedEntry {
+func (g *spyGate) snapshot() [][]*wal.Frame {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return slices.Clone(g.entries)
@@ -79,12 +74,12 @@ var _ = Describe("commit-frame interception", func() {
 		Expect(entries).NotTo(BeEmpty(), "gate must see at least one proposal for a committed write")
 
 		last := entries[len(entries)-1]
-		Expect(int64(last.nTruncate)).To(Equal(pageCount),
+		Expect(int64(last[len(last)-1].Header.NTruncate())).To(Equal(pageCount),
 			"the final proposal's nTruncate must be the post-commit database size")
 
 		pages := map[uint32][]byte{}
-		for _, e := range entries {
-			for _, f := range e.frames {
+		for _, frames := range entries {
+			for _, f := range frames {
 				pages[f.Header.PgNo()] = f.Data
 			}
 		}
@@ -119,7 +114,7 @@ var _ = Describe("commit-frame interception", func() {
 
 		snapshot := gate.snapshot()
 		rejected := snapshot[len(snapshot)-1]
-		Expect(len(rejected.frames)).To(BeNumerically(">", 1),
+		Expect(len(rejected)).To(BeNumerically(">", 1),
 			"test setup should exercise a multi-frame transaction, not just the commit frame")
 
 		// mxFrame never advanced: the rejected row must not be visible.
