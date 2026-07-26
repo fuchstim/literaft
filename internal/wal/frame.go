@@ -1,12 +1,33 @@
 package wal
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 const FrameHeaderSize = 24
 
 type Frame struct {
 	Header FrameHeader
 	Data   []byte
+}
+
+func (f *Frame) UpdateChecksums(enc binary.ByteOrder, prevChecksum1, prevChecksum2 uint32) error {
+	data := make([]byte, 0, 8+len(f.Data))
+	data = binary.BigEndian.AppendUint32(data, f.Header.PgNo())
+	data = binary.BigEndian.AppendUint32(data, f.Header.NTruncate())
+	data = append(data, f.Data...)
+
+	if len(data)%8 != 0 {
+		return fmt.Errorf("data length must be a multiple of 8 bytes")
+	}
+
+	checksum1, checksum2 := ComputeChecksums(enc, data, prevChecksum1, prevChecksum2)
+
+	f.Header.SetChecksum1(checksum1)
+	f.Header.SetChecksum2(checksum2)
+
+	return nil
 }
 
 type FrameHeader [FrameHeaderSize]byte
