@@ -1,164 +1,154 @@
-package shm_test
+package shm
 
 import (
 	"encoding/binary"
+
+	"github.com/fuchstim/literaft/internal/wal"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("wal-index header encode/decode", func() {
-	sample := func() walIndexHeader {
-		return walIndexHeader{
-			version:     walMaxVersion,
-			change:      3,
-			init:        true,
-			bigEndCksum: false,
-			pageSize:    4096,
-			maxFrame:    12,
-			nPage:       12,
-			frameCksum:  [2]uint32{111, 222},
-			salt:        [saltSize]byte{1, 2, 3, 4, 5, 6, 7, 8},
-		}
+var _ = Describe("Header", func() {
+	sample := func() Header {
+		h := InitHeader(4096, 111, 222, 1, 2)
+		h.SetChangeCounter(3)
+		h.SetMaxFrame(12)
+		h.SetPageCount(12)
+		return h
 	}
 
-	It("round-trips every field through encode/decode", func() {
+	It("round-trips every field through its accessors", func() {
 		h := sample()
-		encoded := h.encode()
-		got := decodeWALIndexHeader(encoded[:])
-		Expect(got).To(Equal(h))
+		Expect(h.Version()).To(Equal(wal.WALHeaderVersion))
+		Expect(h.ChangeCounter()).To(Equal(uint32(3)))
+		Expect(h.IsInit()).To(BeTrue())
+		Expect(h.BigEndianChecksum()).To(BeFalse())
+		Expect(h.PageSize()).To(Equal(uint32(4096)))
+		Expect(h.MaxFrame()).To(Equal(uint32(12)))
+		Expect(h.PageCount()).To(Equal(uint32(12)))
+		Expect(h.LastFrameChecksum1()).To(Equal(uint32(111)))
+		Expect(h.LastFrameChecksum2()).To(Equal(uint32(222)))
+		Expect(h.Salt1()).To(Equal(uint32(1)))
+		Expect(h.Salt2()).To(Equal(uint32(2)))
+	})
+
+	It("round-trips the 65536 page size sentinel (encoded on disk as 1)", func() {
+		var h Header
+		h.SetPageSize(65536)
+		Expect(h.PageSize()).To(Equal(uint32(65536)))
 	})
 
 	It("self-checksums so a bit flip in the payload is detectable", func() {
-		b := sample().encode()
-		corrupt := b
+		h := sample()
+		h.UpdateChecksums()
+
+		corrupt := h
 		corrupt[0] ^= 0xFF
 
-		s0, s1 := checksum(0, 0, corrupt[:40])
-		Expect(s0 == binary.LittleEndian.Uint32(corrupt[40:44]) &&
-			s1 == binary.LittleEndian.Uint32(corrupt[44:48])).To(BeFalse(),
+		checksum1, checksum2 := wal.ComputeChecksums(binary.LittleEndian, corrupt[:40], 0, 0)
+		Expect(checksum1 == corrupt.Checksum1() && checksum2 == corrupt.Checksum2()).To(BeFalse(),
 			"a corrupted copy must fail its own self-checksum")
 	})
 })
 
-var _ = Describe("readWALIndexHeader/writeWALIndexHeader", func() {
-	It("returns false, not a zero-value header mistaken for real, on a freshly zeroed region", func() {
-		region0 := make([]byte, indexHdrSize)
-		_, ok := readWALIndexHeader(region0)
-		Expect(ok).To(BeFalse())
+var _ = Describe("CheckpointInfo", func() {
+	It("round-trips NBackfill, per-reader read marks, and NBackfillAttempted", func() {
+		var c CheckpointInfo
+		c.SetNBackfill(7)
+		c.SetReadMark(0, 0)
+		c.SetReadMark(1, 42)
+		c.SetNBackfillAttempted(9)
+
+		Expect(c.NBackfill()).To(Equal(uint32(7)))
+		Expect(c.ReadMark(0)).To(Equal(uint32(0)))
+		Expect(c.ReadMark(1)).To(Equal(uint32(42)))
+		Expect(c.NBackfillAttempted()).To(Equal(uint32(9)))
 	})
 
-	It("writes both copies so a plain read of copy 0 sees what was written", func() {
-		region0 := make([]byte, indexHdrSize)
-		h := walIndexHeader{version: walMaxVersion, init: true, pageSize: 4096, maxFrame: 5, nPage: 5}
-		writeWALIndexHeader(region0, h)
-
-		got, ok := readWALIndexHeader(region0)
-		Expect(ok).To(BeTrue())
-		Expect(got).To(Equal(h))
+	It("panics on an out-of-range reader index", func() {
+		var c CheckpointInfo
+		Expect(func() { c.ReadMark(checkpointInfoNReaders) }).To(Panic())
+		Expect(func() { c.SetReadMark(checkpointInfoNReaders, 0) }).To(Panic())
 	})
 
-	It("falls back to copy 1 when copy 0's self-checksum doesn't verify", func() {
-		region0 := make([]byte, indexHdrSize)
-		h := walIndexHeader{version: walMaxVersion, init: true, pageSize: 4096, maxFrame: 7, nPage: 7}
-		writeWALIndexHeader(region0, h)
+	It("resets to the post-rewind state: nBackfill 0, reader 1 at mark 0, every other reader unused", func() {
+		var c CheckpointInfo
+		for i := range c {
+			c[i] = 0xAA
+		}
 
-		// Corrupt copy 0 only; copy 1 (written first by writeWALIndexHeader,
-		// per SQLite's own tear-safe ordering) must still be intact.
-		region0[0] ^= 0xFF
+		c.ResetForRewind()
 
-		got, ok := readWALIndexHeader(region0)
-		Expect(ok).To(BeTrue())
-		Expect(got).To(Equal(h))
-	})
-
-	It("returns false when neither copy verifies", func() {
-		region0 := make([]byte, indexHdrSize)
-		h := walIndexHeader{version: walMaxVersion, init: true, pageSize: 4096, maxFrame: 1, nPage: 1}
-		writeWALIndexHeader(region0, h)
-		region0[0] ^= 0xFF
-		region0[hdrCopySize] ^= 0xFF
-
-		_, ok := readWALIndexHeader(region0)
-		Expect(ok).To(BeFalse())
+		Expect(c.NBackfill()).To(Equal(uint32(0)))
+		Expect(c.ReadMark(1)).To(Equal(uint32(0)))
+		for i := 2; i < checkpointInfoNReaders; i++ {
+			Expect(c.ReadMark(uint8(i))).To(Equal(uint32(readMarkNotUsed)))
+		}
+		Expect(c.NBackfillAttempted()).To(Equal(uint32(0)))
 	})
 })
 
-var _ = Describe("framePage/frameZero at the page 0 -> page 1 boundary", func() {
-	It("keeps the last frame page 0 can hold on page 0", func() {
-		Expect(framePage(hashtableNPageOne)).To(Equal(0))
+var _ = Describe("readCheckpointInfo/writeCheckpointInfo", func() {
+	It("round-trips through a region0-shaped byte slice at the checkpoint-info offset", func() {
+		region0 := make([]byte, headerSize)
+		var info CheckpointInfo
+		info.SetNBackfill(3)
+		info.SetReadMark(0, 5)
+
+		writeCheckpointInfo(info, region0)
+		Expect(readCheckpointInfo(region0)).To(Equal(info))
+	})
+})
+
+var _ = Describe("regionForFrame/frameZeroForRegion at the region 0 -> region 1 boundary", func() {
+	It("keeps the last frame region 0 can hold in region 0", func() {
+		Expect(regionForFrame(hashtableRegion0PageCount)).To(Equal(0))
 	})
 
-	It("puts the first frame past page 0's capacity on page 1", func() {
-		Expect(framePage(hashtableNPageOne + 1)).To(Equal(1))
+	It("puts the first frame past region 0's capacity in region 1", func() {
+		Expect(regionForFrame(hashtableRegion0PageCount + 1)).To(Equal(1))
 	})
 
-	It("puts the last frame page 1 can hold on page 1", func() {
-		Expect(framePage(hashtableNPageOne + hashtableNPage)).To(Equal(1))
+	It("puts the last frame region 1 can hold in region 1", func() {
+		Expect(regionForFrame(hashtableRegion0PageCount + hashtablePageCount)).To(Equal(1))
 	})
 
-	It("puts the first frame past page 1's capacity on page 2", func() {
-		Expect(framePage(hashtableNPageOne + hashtableNPage + 1)).To(Equal(2))
+	It("puts the first frame past region 1's capacity in region 2", func() {
+		Expect(regionForFrame(hashtableRegion0PageCount + hashtablePageCount + 1)).To(Equal(2))
 	})
 
-	It("frameZero(0) is 0 and frameZero(N) is the last frame index the previous page held", func() {
-		Expect(frameZero(0)).To(Equal(uint32(0)))
-		Expect(frameZero(1)).To(Equal(uint32(hashtableNPageOne)))
-		Expect(frameZero(2)).To(Equal(uint32(hashtableNPageOne + hashtableNPage)))
+	It("frameZeroForRegion(0) is 0, and frameZeroForRegion(N) is the last frame index the previous region held", func() {
+		Expect(frameZeroForRegion(0)).To(Equal(uint32(0)))
+		Expect(frameZeroForRegion(1)).To(Equal(uint32(hashtableRegion0PageCount)))
+		Expect(frameZeroForRegion(2)).To(Equal(uint32(hashtableRegion0PageCount + hashtablePageCount)))
 	})
 })
 
 var _ = Describe("hashTableOffsets", func() {
-	It("shifts page 0's aPgno array past the wal-index header", func() {
-		pgnoOff, hashOff := hashTableOffsets(0)
-		Expect(pgnoOff).To(Equal(indexHdrSize))
-		Expect(hashOff).To(Equal(hashtableNPage * 4))
+	It("shifts region 0's aPgno array past the wal-index header", func() {
+		pgNoOff, hashOff := hashTableOffsets(0)
+		Expect(pgNoOff).To(Equal(headerSize))
+		Expect(hashOff).To(Equal(hashtablePageCount * 4))
 	})
 
-	It("gives every later page the full region for aPgno", func() {
-		pgnoOff, hashOff := hashTableOffsets(1)
-		Expect(pgnoOff).To(Equal(0))
-		Expect(hashOff).To(Equal(hashtableNPage * 4))
+	It("gives every later region the full region for aPgno", func() {
+		pgNoOff, hashOff := hashTableOffsets(1)
+		Expect(pgNoOff).To(Equal(0))
+		Expect(hashOff).To(Equal(hashtablePageCount * 4))
 	})
 })
 
-var _ = Describe("addFrameToWALIndex", func() {
-	It("records pgno at the frame's slot and makes it findable via the hash chain", func() {
-		region := make([]byte, hashtableNPage*4+hashtableNSlot*2)
-		const frame, pgno = 3, uint32(42)
-		addFrameToWALIndex(region, frame, pgno)
-
-		pgnoOff, hashOff := hashTableOffsets(framePage(frame))
-		idx := int(frame - frameZero(framePage(frame)))
-		Expect(binary.LittleEndian.Uint32(region[pgnoOff+(idx-1)*4:])).To(Equal(pgno))
-
-		found := false
-		for k := walHash(pgno); ; k = walNextHash(k) {
-			slot := binary.LittleEndian.Uint16(region[hashOff+k*2:])
-			if slot == 0 {
-				break
-			}
-			if int(slot) == idx {
-				found = true
-				break
-			}
-		}
-		Expect(found).To(BeTrue(), "pgno's slot must be reachable by walking its hash chain")
+var _ = Describe("hashSlotForPage/nextHashSlot", func() {
+	It("wraps back to slot 0 past the last slot", func() {
+		Expect(nextHashSlot(hashtableSlotCount - 1)).To(Equal(0))
 	})
 
-	It("wipes stale data from a reused segment on that segment's first entry", func() {
-		region := make([]byte, hashtableNPage*4+hashtableNSlot*2)
-		pgnoOff, _ := hashTableOffsets(0)
-		// Simulate leftover bytes from a prior WAL epoch that reused this
-		// mapped region.
-		for i := range region {
-			region[i] = 0xAA
+	It("stays within the hash table bounds for a range of page numbers", func() {
+		for pgno := uint32(1); pgno < 5000; pgno++ {
+			slot := hashSlotForPage(pgno)
+			Expect(slot).To(BeNumerically(">=", 0))
+			Expect(slot).To(BeNumerically("<", hashtableSlotCount))
 		}
-
-		addFrameToWALIndex(region, 1, 99)
-
-		// Every other pgno slot in the segment must have been cleared, not
-		// left as stale 0xAA bytes.
-		Expect(binary.LittleEndian.Uint32(region[pgnoOff+4:])).To(Equal(uint32(0)))
 	})
 })
