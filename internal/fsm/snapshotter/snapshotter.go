@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
+	"github.com/fuchstim/literaft/internal/wal"
 	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 )
@@ -100,7 +101,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		return SnapshotHeader{}, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
 	}
 
-	var frames []*walappender.Frame
+	var frames []*wal.Frame
 	for {
 		nTruncate := uint32(0)
 		if _, err := io.ReadFull(r, nextPage); err != nil {
@@ -112,7 +113,10 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 			nTruncate = nPages
 		}
 
-		frame := walappender.NewFrame(nPages, nTruncate, curPage)
+		frame := &wal.Frame{}
+		frame.Header.SetPgNo(nPages)
+		frame.Header.SetNTruncate(nTruncate)
+		frame.Data = curPage
 		frames = append(frames, frame)
 
 		if nTruncate > 0 {
@@ -126,7 +130,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 
 	// TODO: Stream frames to WAL appender instead of buffering them all in memory first.
 	// Requires WAL appender to support streaming frames
-	if err := w.AppendFrames(frames); err != nil {
+	if err := w.AppendFrames(frames, nil); err != nil {
 		return SnapshotHeader{}, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
 	}
 

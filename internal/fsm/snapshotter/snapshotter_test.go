@@ -69,7 +69,7 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 
 		header, err := snapshotter.New(dstPath, uint32(pageSize), hclog.NewNullLogger()).Restore(rc)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(header.LastAppliedIndex).To(Equal(uint64(42)), "Restore must recover the snapshot's raft index from the stream header")
+		Expect(header.LastAppliedIndex()).To(Equal(uint64(42)), "Restore must recover the snapshot's raft index from the stream header")
 		Expect(rc.Close()).To(Succeed())
 
 		Expect(queryText(dst, "PRAGMA integrity_check")).To(Equal("ok"))
