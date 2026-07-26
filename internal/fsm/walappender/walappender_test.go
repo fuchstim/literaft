@@ -391,14 +391,10 @@ var _ = Describe("WALAppender log rewind", func() {
 		followerPath := filepath.Join(dir, "follower-bounded.db")
 		primeFollowerWALMode(followerPath)
 
-		loggerOpts := hclog.DefaultOptions
-		loggerOpts.Level = hclog.Debug
-		logger := hclog.New(loggerOpts)
-
 		// Threshold of 1: every applied transaction is immediately
 		// followed by a PASSIVE checkpoint attempt, giving the very next
 		// apply the best possible chance to rewind.
-		appender, err := walappender.Open(followerPath, pageSize, 1, 0, logger)
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0, hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 

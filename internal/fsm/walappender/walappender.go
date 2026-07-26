@@ -319,13 +319,13 @@ func (a *WALAppender) maybeBootstrap() error {
 	return nil
 }
 
-func (a *WALAppender) writeWALFileHeader() (wal.WALHeader, error) {
+func (a *WALAppender) writeWALFileHeader() (*wal.WALHeader, error) {
 	hdr, err := wal.InitHeader(a.pageSize)
 	if err != nil {
-		return wal.WALHeader{}, fmt.Errorf("failed to initialize -wal file header: %w", err)
+		return nil, fmt.Errorf("failed to initialize -wal file header: %w", err)
 	}
 	if _, err := a.f.WriteAt(hdr[:], 0); err != nil {
-		return wal.WALHeader{}, fmt.Errorf("failed to write -wal file header: %w", err)
+		return nil, fmt.Errorf("failed to write -wal file header: %w", err)
 	}
 
 	return hdr, nil

@@ -57,7 +57,6 @@ var _ = Describe("Open first-opener/joiner semantics", func() {
 
 		h := InitHeader(4096, 1, 2, 3, 4)
 		h.SetMaxFrame(5)
-		h.UpdateChecksums()
 		Expect(s1.WriteHeader(h)).To(Succeed())
 
 		s2, err := Open(path, hclog.NewNullLogger())

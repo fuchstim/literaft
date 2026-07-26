@@ -36,7 +36,8 @@ func newGatedWALFile(base sqlite3vfs.File, gate Gate, logger hclog.Logger) (*gat
 	if n, err := base.ReadAt(headerBytes, 0); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("failed to read WAL header: %w", err)
 	} else if n == len(headerBytes) {
-		pageSize = wal.WALHeader(headerBytes).PageSize()
+		h := wal.WALHeader(headerBytes)
+		pageSize = h.PageSize()
 	} // If n<headerBytes the WAL file might not be initialized yet. In that case we intercept the header write to parse the frame size
 
 	return &gatedWALFile{
@@ -52,7 +53,8 @@ func newGatedWALFile(base sqlite3vfs.File, gate Gate, logger hclog.Logger) (*gat
 func (f *gatedWALFile) WriteAt(p []byte, off int64) (int, error) {
 	if off == 0 {
 		if f.pageSize == 0 && len(p) == wal.WALHeaderSize {
-			f.pageSize = wal.WALHeader(p).PageSize()
+			h := wal.WALHeader(p)
+			f.pageSize = h.PageSize()
 		}
 
 		return f.File.WriteAt(p, off)

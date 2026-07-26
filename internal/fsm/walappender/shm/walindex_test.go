@@ -10,7 +10,7 @@ import (
 )
 
 var _ = Describe("Header", func() {
-	sample := func() Header {
+	sample := func() *Header {
 		h := InitHeader(4096, 111, 222, 1, 2)
 		h.SetChangeCounter(3)
 		h.SetMaxFrame(12)
@@ -43,7 +43,7 @@ var _ = Describe("Header", func() {
 		h := sample()
 		h.UpdateChecksums()
 
-		corrupt := h
+		corrupt := *h
 		corrupt[0] ^= 0xFF
 
 		checksum1, checksum2 := wal.ComputeChecksums(binary.LittleEndian, corrupt[:40], 0, 0)
@@ -86,18 +86,6 @@ var _ = Describe("CheckpointInfo", func() {
 			Expect(c.ReadMark(uint8(i))).To(Equal(uint32(readMarkNotUsed)))
 		}
 		Expect(c.NBackfillAttempted()).To(Equal(uint32(0)))
-	})
-})
-
-var _ = Describe("readCheckpointInfo/writeCheckpointInfo", func() {
-	It("round-trips through a region0-shaped byte slice at the checkpoint-info offset", func() {
-		region0 := make([]byte, headerSize)
-		var info CheckpointInfo
-		info.SetNBackfill(3)
-		info.SetReadMark(0, 5)
-
-		writeCheckpointInfo(info, region0)
-		Expect(readCheckpointInfo(region0)).To(Equal(info))
 	})
 })
 

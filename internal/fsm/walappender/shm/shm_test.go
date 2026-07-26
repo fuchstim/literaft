@@ -19,6 +19,7 @@ var _ = Describe("SharedMemory header IO", func() {
 
 		h, err := s.ReadHeader()
 		Expect(err).NotTo(HaveOccurred())
+		Expect(h).NotTo(BeNil())
 		Expect(h.IsInit()).To(BeFalse())
 	})
 
@@ -30,7 +31,6 @@ var _ = Describe("SharedMemory header IO", func() {
 		h := shm.InitHeader(4096, 111, 222, 1, 2)
 		h.SetMaxFrame(7)
 		h.SetPageCount(7)
-		h.UpdateChecksums()
 		Expect(s.WriteHeader(h)).To(Succeed())
 
 		got, err := s.ReadHeader()
@@ -51,7 +51,6 @@ var _ = Describe("SharedMemory header IO", func() {
 		h := shm.InitHeader(4096, 1, 2, 3, 4)
 		h.SetMaxFrame(5)
 		h.SetPageCount(5)
-		h.UpdateChecksums()
 		Expect(s.WriteHeader(h)).To(Succeed())
 
 		raw, err := os.OpenFile(path, os.O_RDWR, 0666)
@@ -85,7 +84,7 @@ var _ = Describe("SharedMemory header IO", func() {
 
 		got, err := s.ReadHeader()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got.IsInit()).To(BeFalse())
+		Expect(got).To(BeNil(), "neither copy verifying must report as no header at all, not a zero-value one")
 	})
 })
 
@@ -98,11 +97,11 @@ var _ = Describe("SharedMemory checkpoint-info IO", func() {
 		var info shm.CheckpointInfo
 		info.SetNBackfill(3)
 		info.SetReadMark(0, 9)
-		Expect(s.WriteCheckpointInfo(info)).To(Succeed())
+		Expect(s.WriteCheckpointInfo(&info)).To(Succeed())
 
 		got, err := s.ReadCheckpointInfo()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(got).To(Equal(info))
+		Expect(got).To(Equal(&info))
 	})
 })
 
@@ -116,7 +115,6 @@ var _ = Describe("SharedMemory across independent opens (same file, distinct han
 		defer s1.Close()
 
 		h := shm.InitHeader(4096, 1, 2, 3, 4)
-		h.UpdateChecksums()
 		Expect(s1.WriteHeader(h)).To(Succeed())
 
 		s2, err := shm.Open(path, hclog.NewNullLogger())
@@ -144,6 +142,7 @@ var _ = Describe("SharedMemory across independent opens (same file, distinct han
 
 		got, err := s2.ReadHeader()
 		Expect(err).NotTo(HaveOccurred())
+		Expect(got).NotTo(BeNil())
 		Expect(got.IsInit()).To(BeFalse(), "a fresh first opener must not see the previous opener's header")
 	})
 })
