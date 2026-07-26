@@ -3,7 +3,6 @@ package snapshotter
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 )
 
 const (
@@ -13,49 +12,33 @@ const (
 	currentVersion = 1
 )
 
-type SnapshotHeader struct {
-	Magic            uint32
-	Version          uint32
-	LastAppliedIndex uint64
+type SnapshotHeader [SnapshotHeaderSize]byte
+
+func NewSnapshotHeader(lastAppliedIndex uint64) SnapshotHeader {
+	var h SnapshotHeader
+	h.SetMagic(currentMagic)
+	h.SetVersion(currentVersion)
+	h.SetLastAppliedIndex(lastAppliedIndex)
+	return h
 }
 
-func NewSnapshotHeader(lastAppliedIndex uint64) *SnapshotHeader {
-	return &SnapshotHeader{
-		Magic:            currentMagic,
-		Version:          currentVersion,
-		LastAppliedIndex: lastAppliedIndex,
-	}
-}
+func (h SnapshotHeader) Magic() uint32      { return binary.BigEndian.Uint32(h[0:4]) }
+func (h *SnapshotHeader) SetMagic(m uint32) { binary.BigEndian.PutUint32(h[0:4], m) }
 
-func DecodeHeader(b []byte) (*SnapshotHeader, error) {
-	if len(b) < SnapshotHeaderSize {
-		return nil, fmt.Errorf("%w: snapshot header too short: got %d bytes, want %d", io.ErrUnexpectedEOF, len(b), SnapshotHeaderSize)
-	}
+func (h SnapshotHeader) Version() uint32      { return binary.BigEndian.Uint32(h[4:8]) }
+func (h *SnapshotHeader) SetVersion(v uint32) { binary.BigEndian.PutUint32(h[4:8], v) }
 
-	magic := binary.BigEndian.Uint32(b[0:4])
-	if magic != currentMagic {
-		return nil, fmt.Errorf("invalid snapshot magic: got 0x%X, want 0x%X", magic, currentMagic)
+func (h SnapshotHeader) LastAppliedIndex() uint64      { return binary.BigEndian.Uint64(h[8:16]) }
+func (h *SnapshotHeader) SetLastAppliedIndex(i uint64) { binary.BigEndian.PutUint64(h[8:16], i) }
+
+func (h SnapshotHeader) Validate() error {
+	if magic := h.Magic(); magic != currentMagic {
+		return fmt.Errorf("invalid snapshot magic: got 0x%X, want 0x%X", magic, currentMagic)
 	}
 
-	version := binary.BigEndian.Uint32(b[4:8])
-	if version != currentVersion {
-		return nil, fmt.Errorf("unsupported snapshot version: got %d, want %d", version, currentVersion)
+	if version := h.Version(); version != currentVersion {
+		return fmt.Errorf("unsupported snapshot version: got %d, want %d", version, currentVersion)
 	}
 
-	lastAppliedIndex := binary.BigEndian.Uint64(b[8:16])
-
-	return &SnapshotHeader{
-		Magic:            magic,
-		Version:          version,
-		LastAppliedIndex: lastAppliedIndex,
-	}, nil
-}
-
-func (h *SnapshotHeader) Bytes() []byte {
-	b := make([]byte, SnapshotHeaderSize)
-	binary.BigEndian.PutUint32(b[0:4], h.Magic)
-	binary.BigEndian.PutUint32(b[4:8], h.Version)
-	binary.BigEndian.PutUint64(b[8:16], h.LastAppliedIndex)
-
-	return b
+	return nil
 }
