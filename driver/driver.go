@@ -23,7 +23,7 @@ func New(fsm *fsm.FSM, log raftgate.LogAdapter, opts ...Option) *Driver {
 	vfsName := uuid.NewString()
 
 	gate := raftgate.New(fsm, log, o.logger.Named("gate"))
-	vfs.Register(vfsName, sqlite3vfs.Find("os"), gate, fsm.PageSize(), o.logger.Named("vfs"))
+	vfs.Register(vfsName, sqlite3vfs.Find("os"), gate, o.logger.Named("vfs"))
 
 	return &Driver{gate, fsm.DBPath(), vfsName}
 }
