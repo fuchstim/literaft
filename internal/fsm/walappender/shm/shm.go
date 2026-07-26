@@ -83,10 +83,10 @@ func Open(path string, logger hclog.Logger) (*SharedMemory, error) {
 
 // Try copy 0 first and verify its checksum. If its invalid, fallback to copy 1.
 // If both are invalid, an uninitialized header is returned (IsInit() == false)
-func (s *SharedMemory) ReadHeader() (Header, error) {
+func (s *SharedMemory) ReadHeader() (*Header, error) {
 	r0, err := s.getRegion(0)
 	if err != nil {
-		return Header{}, fmt.Errorf("failed to get region 0: %w", err)
+		return nil, fmt.Errorf("failed to get region 0: %w", err)
 	}
 
 	copy0 := slices.Clone(r0[0:headerCopySize])
@@ -97,14 +97,14 @@ func (s *SharedMemory) ReadHeader() (Header, error) {
 		hdr := Header(c)
 
 		if checksum1 == hdr.Checksum1() && checksum2 == hdr.Checksum2() {
-			return hdr, nil
+			return &hdr, nil
 		}
 	}
 
-	return Header{}, nil
+	return nil, nil
 }
 
-func (s *SharedMemory) WriteHeader(h Header) error {
+func (s *SharedMemory) WriteHeader(h *Header) error {
 	r0, err := s.getRegion(0)
 	if err != nil {
 		return fmt.Errorf("failed to get region 0: %w", err)
@@ -119,22 +119,24 @@ func (s *SharedMemory) WriteHeader(h Header) error {
 	return nil
 }
 
-func (s *SharedMemory) ReadCheckpointInfo() (CheckpointInfo, error) {
+func (s *SharedMemory) ReadCheckpointInfo() (*CheckpointInfo, error) {
 	r0, err := s.getRegion(0)
 	if err != nil {
-		return CheckpointInfo{}, fmt.Errorf("failed to get region 0: %w", err)
+		return nil, fmt.Errorf("failed to get region 0: %w", err)
 	}
 
-	return readCheckpointInfo(r0), nil
+	c := CheckpointInfo(slices.Clone(r0[checkpointInfoOffset : checkpointInfoOffset+checkpointInfoSize]))
+	return &c, nil
 }
 
-func (s *SharedMemory) WriteCheckpointInfo(info CheckpointInfo) error {
+func (s *SharedMemory) WriteCheckpointInfo(info *CheckpointInfo) error {
 	r0, err := s.getRegion(0)
 	if err != nil {
 		return fmt.Errorf("failed to get region 0: %w", err)
 	}
 
-	writeCheckpointInfo(info, r0)
+	copy(r0[checkpointInfoOffset:checkpointInfoOffset+checkpointInfoSize], info[:])
+
 	return nil
 }
 

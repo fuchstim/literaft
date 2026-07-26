@@ -3,7 +3,6 @@ package shm
 import (
 	"encoding/binary"
 	"fmt"
-	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -29,7 +28,7 @@ const (
 // literaft uses ncruces/go-sqlite3 which is built on WASM, so 'native' byte order is always little-endian.
 type Header [headerCopySize]byte
 
-func InitHeader(pageSize, lastFrameChecksum1, lastFrameChecksum2, salt1, salt2 uint32) Header {
+func InitHeader(pageSize, lastFrameChecksum1, lastFrameChecksum2, salt1, salt2 uint32) *Header {
 	var h Header
 	h.SetVersion(wal.WALHeaderVersion)
 	h.SetChangeCounter(0)
@@ -43,16 +42,16 @@ func InitHeader(pageSize, lastFrameChecksum1, lastFrameChecksum2, salt1, salt2 u
 	h.SetSalt1(salt1)
 	h.SetSalt2(salt2)
 
-	return h
+	return &h
 }
 
-func (h Header) Version() uint32      { return binary.LittleEndian.Uint32(h[0:4]) }
+func (h *Header) Version() uint32     { return binary.LittleEndian.Uint32(h[0:4]) }
 func (h *Header) SetVersion(v uint32) { binary.LittleEndian.PutUint32(h[0:4], v) }
 
-func (h Header) ChangeCounter() uint32      { return binary.LittleEndian.Uint32(h[8:12]) }
+func (h *Header) ChangeCounter() uint32     { return binary.LittleEndian.Uint32(h[8:12]) }
 func (h *Header) SetChangeCounter(c uint32) { binary.LittleEndian.PutUint32(h[8:12], c) }
 
-func (h Header) IsInit() bool { return h[12] != 0 }
+func (h *Header) IsInit() bool { return h[12] != 0 }
 func (h *Header) SetInit(init bool) {
 	h[12] = 0
 	if init {
@@ -61,7 +60,7 @@ func (h *Header) SetInit(init bool) {
 }
 
 // Only used for WAL checksums, WAL index always uses native order
-func (h Header) BigEndianChecksum() bool { return h[13] != 0 }
+func (h *Header) BigEndianChecksum() bool { return h[13] != 0 }
 func (h *Header) SetBigEndianChecksum(big bool) {
 	h[13] = 0
 	if big {
@@ -69,7 +68,7 @@ func (h *Header) SetBigEndianChecksum(big bool) {
 	}
 }
 
-func (h Header) PageSize() uint32 {
+func (h *Header) PageSize() uint32 {
 	s := binary.LittleEndian.Uint16(h[14:16])
 	if s == 1 {
 		return 65536
@@ -83,29 +82,29 @@ func (h *Header) SetPageSize(size uint32) {
 	binary.LittleEndian.PutUint16(h[14:16], uint16(size))
 }
 
-func (h Header) MaxFrame() uint32        { return binary.LittleEndian.Uint32(h[16:20]) }
+func (h *Header) MaxFrame() uint32       { return binary.LittleEndian.Uint32(h[16:20]) }
 func (h *Header) SetMaxFrame(max uint32) { binary.LittleEndian.PutUint32(h[16:20], max) }
 
-func (h Header) PageCount() uint32      { return binary.LittleEndian.Uint32(h[20:24]) }
+func (h *Header) PageCount() uint32     { return binary.LittleEndian.Uint32(h[20:24]) }
 func (h *Header) SetPageCount(n uint32) { binary.LittleEndian.PutUint32(h[20:24], n) }
 
-func (h Header) LastFrameChecksum1() uint32      { return binary.LittleEndian.Uint32(h[24:28]) }
+func (h *Header) LastFrameChecksum1() uint32     { return binary.LittleEndian.Uint32(h[24:28]) }
 func (h *Header) SetLastFrameChecksum1(c uint32) { binary.LittleEndian.PutUint32(h[24:28], c) }
 
-func (h Header) LastFrameChecksum2() uint32      { return binary.LittleEndian.Uint32(h[28:32]) }
+func (h *Header) LastFrameChecksum2() uint32     { return binary.LittleEndian.Uint32(h[28:32]) }
 func (h *Header) SetLastFrameChecksum2(c uint32) { binary.LittleEndian.PutUint32(h[28:32], c) }
 
-func (h Header) Salt1() uint32      { return binary.LittleEndian.Uint32(h[32:36]) }
+func (h *Header) Salt1() uint32     { return binary.LittleEndian.Uint32(h[32:36]) }
 func (h *Header) SetSalt1(s uint32) { binary.LittleEndian.PutUint32(h[32:36], s) }
 
-func (h Header) Salt2() uint32      { return binary.LittleEndian.Uint32(h[36:40]) }
+func (h *Header) Salt2() uint32     { return binary.LittleEndian.Uint32(h[36:40]) }
 func (h *Header) SetSalt2(s uint32) { binary.LittleEndian.PutUint32(h[36:40], s) }
 
 // WAL index checksums always use native order, regardless of the bigEndCksum flag.
-func (h Header) Checksum1() uint32      { return binary.LittleEndian.Uint32(h[40:44]) }
+func (h *Header) Checksum1() uint32     { return binary.LittleEndian.Uint32(h[40:44]) }
 func (h *Header) SetChecksum1(c uint32) { binary.LittleEndian.PutUint32(h[40:44], c) }
 
-func (h Header) Checksum2() uint32      { return binary.LittleEndian.Uint32(h[44:48]) }
+func (h *Header) Checksum2() uint32     { return binary.LittleEndian.Uint32(h[44:48]) }
 func (h *Header) SetChecksum2(c uint32) { binary.LittleEndian.PutUint32(h[44:48], c) }
 
 func (h *Header) UpdateChecksums() {
@@ -115,7 +114,7 @@ func (h *Header) UpdateChecksums() {
 	h.SetChecksum2(checksum2)
 }
 
-func (h Header) String() string {
+func (h *Header) String() string {
 	sb := &strings.Builder{}
 	fmt.Fprintf(sb, "WAL index header:\n")
 	fmt.Fprintf(sb, "  Version: %d\n", h.Version())
@@ -134,14 +133,6 @@ func (h Header) String() string {
 	return sb.String()
 }
 
-func readCheckpointInfo(region0 []byte) CheckpointInfo {
-	return CheckpointInfo(slices.Clone(region0[checkpointInfoOffset : checkpointInfoOffset+checkpointInfoSize]))
-}
-
-func writeCheckpointInfo(info CheckpointInfo, region0 []byte) {
-	copy(region0[checkpointInfoOffset:checkpointInfoOffset+checkpointInfoSize], info[:])
-}
-
 type CheckpointInfo [checkpointInfoSize]byte
 
 func (c *CheckpointInfo) ResetForRewind() {
@@ -153,10 +144,10 @@ func (c *CheckpointInfo) ResetForRewind() {
 	c.SetNBackfillAttempted(0)
 }
 
-func (c CheckpointInfo) NBackfill() uint32      { return binary.LittleEndian.Uint32(c[0:4]) }
+func (c *CheckpointInfo) NBackfill() uint32     { return binary.LittleEndian.Uint32(c[0:4]) }
 func (c *CheckpointInfo) SetNBackfill(n uint32) { binary.LittleEndian.PutUint32(c[0:4], n) }
 
-func (c CheckpointInfo) ReadMark(i uint8) uint32 {
+func (c *CheckpointInfo) ReadMark(i uint8) uint32 {
 	if i >= checkpointInfoNReaders {
 		panic("reader index out of range")
 	}
@@ -171,14 +162,14 @@ func (c *CheckpointInfo) SetReadMark(i uint8, mark uint32) {
 	binary.LittleEndian.PutUint32(c[4+i*4:8+i*4], mark)
 }
 
-func (c CheckpointInfo) NBackfillAttempted() uint32 {
+func (c *CheckpointInfo) NBackfillAttempted() uint32 {
 	return binary.LittleEndian.Uint32(c[32:36])
 }
 func (c *CheckpointInfo) SetNBackfillAttempted(n uint32) {
 	binary.LittleEndian.PutUint32(c[32:36], n)
 }
 
-func (c CheckpointInfo) String() string {
+func (c *CheckpointInfo) String() string {
 	sb := &strings.Builder{}
 	fmt.Fprintf(sb, "CheckpointInfo:\n")
 	fmt.Fprintf(sb, "  NBackfill: %d\n", c.NBackfill())

@@ -245,7 +245,7 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 // rewindLogIfBackfilled checks if all WAL frames have been copied into the database
 // and if no readers are currently using the WAL. If so, it rewinds the WAL to the beginning.
 // Must be called while holding the WAL write lock.
-func (a *WALAppender) rewindLogIfBackfilled(hdr shm.Header) (shm.Header, error) {
+func (a *WALAppender) rewindLogIfBackfilled(hdr *shm.Header) (*shm.Header, error) {
 	if err := a.shm.TryLockRange(shm.ReadLock(1), shm.NReaders-1); err != nil {
 		return hdr, nil // Some readers are still using the WAL, skip the rewind
 	}
