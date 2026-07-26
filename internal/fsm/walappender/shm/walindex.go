@@ -24,32 +24,6 @@ const (
 	readMarkNotUsed = 0xffffffff // READMARK_NOT_USED
 )
 
-// Try copy 0 first and verify its checksum. If its invalid, fallback to copy 1.
-// If both are invalid, an uninitialized header is returned (IsInit() == false)
-func readHeader(region0 []byte) Header {
-	copy0 := slices.Clone(region0[0:headerCopySize])
-	copy1 := slices.Clone(region0[headerCopySize : 2*headerCopySize])
-
-	for _, c := range [][]byte{copy0, copy1} {
-		checksum1, checksum2 := wal.ComputeChecksums(binary.LittleEndian, c[:40], 0, 0)
-		hdr := Header(c)
-		if checksum1 == hdr.Checksum1() && checksum2 == hdr.Checksum2() {
-			return hdr
-		}
-	}
-
-	return Header{}
-}
-
-// Write copy 1 first, then barrier, then write copy 0.
-func writeHeader(hdr Header, region0 []byte) {
-	hdr.UpdateChecksums()
-
-	copy(region0[headerCopySize:2*headerCopySize], hdr[:])
-	barrier()
-	copy(region0[0:headerCopySize], hdr[:])
-}
-
 // literaft uses ncruces/go-sqlite3 which is built on WASM, so 'native' byte order is always little-endian.
 type Header [headerCopySize]byte
 
@@ -119,15 +93,15 @@ func (h *Header) SetLastFrameChecksum1(c uint32) { binary.LittleEndian.PutUint32
 func (h Header) LastFrameChecksum2() uint32      { return binary.LittleEndian.Uint32(h[28:32]) }
 func (h *Header) SetLastFrameChecksum2(c uint32) { binary.LittleEndian.PutUint32(h[28:32], c) }
 
-func (h Header) Salt1() uint32     { return binary.LittleEndian.Uint32(h[32:36]) }
-func (h Header) SetSalt1(s uint32) { binary.LittleEndian.PutUint32(h[32:36], s) }
+func (h Header) Salt1() uint32      { return binary.LittleEndian.Uint32(h[32:36]) }
+func (h *Header) SetSalt1(s uint32) { binary.LittleEndian.PutUint32(h[32:36], s) }
 
 func (h Header) Salt2() uint32      { return binary.LittleEndian.Uint32(h[36:40]) }
 func (h *Header) SetSalt2(s uint32) { binary.LittleEndian.PutUint32(h[36:40], s) }
 
 // WAL index checksums always use native order, regardless of the bigEndCksum flag.
-func (h Header) Checksum1() uint32     { return binary.LittleEndian.Uint32(h[40:44]) }
-func (h Header) SetChecksum1(c uint32) { binary.LittleEndian.PutUint32(h[40:44], c) }
+func (h Header) Checksum1() uint32      { return binary.LittleEndian.Uint32(h[40:44]) }
+func (h *Header) SetChecksum1(c uint32) { binary.LittleEndian.PutUint32(h[40:44], c) }
 
 func (h Header) Checksum2() uint32      { return binary.LittleEndian.Uint32(h[44:48]) }
 func (h *Header) SetChecksum2(c uint32) { binary.LittleEndian.PutUint32(h[44:48], c) }

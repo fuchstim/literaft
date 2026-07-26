@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/fuchstim/literaft/internal/lock"
+	"github.com/fuchstim/literaft/internal/wal"
 	"github.com/hashicorp/go-hclog"
 	"golang.org/x/sys/unix"
 )
@@ -79,13 +81,27 @@ func Open(path string, logger hclog.Logger) (*SharedMemory, error) {
 	return s, nil
 }
 
+// Try copy 0 first and verify its checksum. If its invalid, fallback to copy 1.
+// If both are invalid, an uninitialized header is returned (IsInit() == false)
 func (s *SharedMemory) ReadHeader() (Header, error) {
 	r0, err := s.getRegion(0)
 	if err != nil {
 		return Header{}, fmt.Errorf("failed to get region 0: %w", err)
 	}
 
-	return readHeader(r0), nil
+	copy0 := slices.Clone(r0[0:headerCopySize])
+	copy1 := slices.Clone(r0[headerCopySize : 2*headerCopySize])
+
+	for _, c := range [][]byte{copy0, copy1} {
+		checksum1, checksum2 := wal.ComputeChecksums(binary.LittleEndian, c[:40], 0, 0)
+		hdr := Header(c)
+
+		if checksum1 == hdr.Checksum1() && checksum2 == hdr.Checksum2() {
+			return hdr, nil
+		}
+	}
+
+	return Header{}, nil
 }
 
 func (s *SharedMemory) WriteHeader(h Header) error {
@@ -94,7 +110,12 @@ func (s *SharedMemory) WriteHeader(h Header) error {
 		return fmt.Errorf("failed to get region 0: %w", err)
 	}
 
-	writeHeader(h, r0)
+	h.UpdateChecksums()
+
+	copy(r0[headerCopySize:2*headerCopySize], h[:])
+	barrier()
+	copy(r0[0:headerCopySize], h[:])
+
 	return nil
 }
 

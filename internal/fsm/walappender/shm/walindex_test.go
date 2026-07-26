@@ -1,4 +1,4 @@
-package walappender
+package shm_test
 
 import (
 	"encoding/binary"

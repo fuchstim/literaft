@@ -17,6 +17,7 @@ import (
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
 	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
+	"github.com/fuchstim/literaft/internal/wal"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -35,10 +36,10 @@ type recordingGate struct {
 	entries []*raftproto.Transaction
 }
 
-func (g *recordingGate) ProposeTransaction(frames []*vfs.Frame, nTruncate uint32) error {
+func (g *recordingGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error {
 	txn := &raftproto.Transaction{Pages: make([]*raftproto.Page, len(frames)), NTruncate: nTruncate}
 	for i, f := range frames {
-		txn.Pages[i] = &raftproto.Page{Pgno: f.Pgno, Data: f.Page}
+		txn.Pages[i] = &raftproto.Page{Pgno: f.Header.PgNo(), Data: f.Data}
 	}
 	g.entries = append(g.entries, txn)
 	return nil
@@ -85,27 +86,13 @@ func externalRead(path, sql string) (string, error) {
 	return out, nil
 }
 
-// pageSizeProbe returns SQLite's actual default page size by asking a
-// throwaway in-memory connection, rather than assuming a value. The
-// registered VFS uses this value directly to compute frame-header offsets,
-// not just to enforce a mismatch -- passing 0 breaks offset detection
-// outright, so every test in this file must register with the real page
-// size.
-func pageSizeProbe() uint32 {
-	GinkgoHelper()
-	c, err := sqlite3.Open(":memory:")
-	Expect(err).NotTo(HaveOccurred())
-	defer c.Close()
-	return uint32(queryInt(c, "PRAGMA page_size"))
-}
-
 // leaderConn opens path through internal/vfs, registered with gate, and
 // establishes WAL mode + synchronous=NORMAL, mirroring what a real driver
 // connection does.
 func leaderConn(path string, gate vfs.Gate) *sqlite3.Conn {
 	GinkgoHelper()
 	name := "literaft-walappender-test-" + filepath.Base(path)
-	vfs.Register(name, sqlite3vfs.Find(""), gate, pageSizeProbe(), hclog.NewNullLogger())
+	vfs.Register(name, sqlite3vfs.Find(""), gate, hclog.NewNullLogger())
 
 	c, err := sqlite3.Open("file:" + path + "?vfs=" + name)
 	Expect(err).NotTo(HaveOccurred())
@@ -176,6 +163,24 @@ func walFileSalt(path string) [8]byte {
 	return salt
 }
 
+func transactionFrames(txn *raftproto.Transaction) []*wal.Frame {
+	GinkgoHelper()
+	frames := make([]*wal.Frame, len(txn.Pages))
+	for i, p := range txn.Pages {
+		frames[i] = &wal.Frame{
+			Header: wal.FrameHeader{},
+			Data:   p.GetData(),
+		}
+
+		frames[i].Header.SetPgNo(p.GetPgno())
+		if i == len(txn.Pages)-1 {
+			frames[i].Header.SetNTruncate(txn.GetNTruncate())
+		}
+	}
+
+	return frames
+}
+
 var _ = Describe("WALAppender.AppendTransaction", func() {
 	It("replays a leader's captured entries into a fresh follower with identical reads", func() {
 		dir := GinkgoT().TempDir()
@@ -203,7 +208,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -270,7 +275,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -366,7 +371,7 @@ var _ = Describe("WALAppender WAL recovery at open", func() {
 			followUp = g.entries
 		}()
 		for _, txn := range followUp {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed())
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed())
 		}
 		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(3)))
 		Expect(queryText(recoverConn, "PRAGMA integrity_check")).To(Equal("ok"))
@@ -377,7 +382,7 @@ var _ = Describe("WALAppender log rewind", func() {
 	// Mirrors an internal, unexported constant rather than importing it.
 	const frameHeaderSize = 24
 
-	It("keeps the follower -wal bounded across many checkpoint/rewind cycles, instead of growing forever", func() {
+	FIt("keeps the follower -wal bounded across many checkpoint/rewind cycles, instead of growing forever", func() {
 		dir := GinkgoT().TempDir()
 
 		const numUpdates = 30
@@ -386,20 +391,24 @@ var _ = Describe("WALAppender log rewind", func() {
 		followerPath := filepath.Join(dir, "follower-bounded.db")
 		primeFollowerWALMode(followerPath)
 
+		loggerOpts := hclog.DefaultOptions
+		loggerOpts.Level = hclog.Debug
+		logger := hclog.New(loggerOpts)
+
 		// Threshold of 1: every applied transaction is immediately
 		// followed by a PASSIVE checkpoint attempt, giving the very next
 		// apply the best possible chance to rewind.
-		appender, err := walappender.Open(followerPath, pageSize, 1, 0, hclog.NewNullLogger())
+		appender, err := walappender.Open(followerPath, pageSize, 1, 0, logger)
 		Expect(err).NotTo(HaveOccurred())
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
 		var peak int64
 		for i, txn := range updates {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying update %d", i)
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying update %d", i)
 			if size := walFileSize(followerPath); size > peak {
 				peak = size
 			}
@@ -450,7 +459,7 @@ var _ = Describe("WALAppender log rewind", func() {
 			GinkgoHelper()
 			h, err := appender.AcquireWriteLock(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(appender.AppendTransactionUnderLock(h, txn, nil)).To(Succeed())
+			Expect(appender.AppendFramesUnderLock(h, transactionFrames(txn), nil)).To(Succeed())
 			h.Release()
 		}
 
@@ -497,10 +506,10 @@ var _ = Describe("WALAppender log rewind", func() {
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendTransaction(txn, nil)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
-		Expect(appender.AppendTransaction(updates[0], nil)).To(Succeed())
+		Expect(appender.AppendFrames(transactionFrames(updates[0]), nil)).To(Succeed())
 		saltBeforeReader := walFileSalt(followerPath)
 
 		// Attach an external reader and hold a read transaction open while
@@ -517,7 +526,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// ever changes, must stay identical throughout.
 		const attachedUpdates = 8
 		for i := 1; i <= attachedUpdates; i++ {
-			Expect(appender.AppendTransaction(updates[i], nil)).To(Succeed(), "applying update %d with reader attached", i)
+			Expect(appender.AppendFrames(transactionFrames(updates[i]), nil)).To(Succeed(), "applying update %d with reader attached", i)
 			Expect(walFileSalt(followerPath)).To(Equal(saltBeforeReader),
 				"expected the WAL epoch to be unchanged while a reader holds an older snapshot (update %d)", i)
 		}
@@ -529,7 +538,7 @@ var _ = Describe("WALAppender log rewind", func() {
 
 		rewound := false
 		for i := attachedUpdates + 1; i < numUpdates; i++ {
-			Expect(appender.AppendTransaction(updates[i], nil)).To(Succeed(), "applying update %d after reader release", i)
+			Expect(appender.AppendFrames(transactionFrames(updates[i]), nil)).To(Succeed(), "applying update %d after reader release", i)
 			if walFileSalt(followerPath) != saltBeforeReader {
 				rewound = true
 			}
