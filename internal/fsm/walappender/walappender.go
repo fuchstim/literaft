@@ -2,6 +2,7 @@ package walappender
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -172,51 +173,65 @@ func (a *WALAppender) AppendFramesUnderLock(h *HeldLock, frames []*wal.Frame, af
 }
 
 func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()) error {
-	hdr, err := a.rewindLogIfBackfilled()
+	hdr, err := a.shm.ReadHeader()
+	if err != nil {
+		return fmt.Errorf("failed to read wal-index header: %w", err)
+	}
+
+	hdr, err = a.rewindLogIfBackfilled(hdr)
 	if err != nil {
 		return fmt.Errorf("failed to rewind WAL log: %w", err)
 	}
 
-	frame := hdr.maxFrame
-	offset := walHeaderSize + int64(frame)*(frameHeaderSize+int64(a.pageSize))
-	cksum := hdr.frameCksum
+	currentFrameIdx := hdr.MaxFrame()
+	currentOffset := wal.WALHeaderSize + int64(currentFrameIdx)*(wal.FrameHeaderSize+int64(a.pageSize))
+	checksumEnc := binary.ByteOrder(binary.LittleEndian)
+	if hdr.BigEndianChecksum() {
+		checksumEnc = binary.BigEndian
+	}
+	lastFrameChecksum1, lastFrameChecksum2 := hdr.LastFrameChecksum1(), hdr.LastFrameChecksum2()
 
-	for _, f := range fs {
-		if len(f.page) != int(a.pageSize) {
+	for _, f := range frames {
+		if len(f.Data) != int(a.pageSize) {
 			return fmt.Errorf("frame for page %d is %d bytes, cluster page size is %d bytes",
-				f.pgNo, len(f.page), a.pageSize)
+				f.Header.PgNo(), len(f.Data), a.pageSize)
 		}
 
-		var fh [frameHeaderSize]byte
-		fh, cksum = f.encodeHeader(hdr.salt, cksum)
+		f.Header.SetSalt1(hdr.Salt1())
+		f.Header.SetSalt2(hdr.Salt2())
+		f.UpdateChecksums(checksumEnc, lastFrameChecksum1, lastFrameChecksum2)
+		lastFrameChecksum1, lastFrameChecksum2 = f.Header.Checksum1(), f.Header.Checksum2()
 
-		frame++
-		if _, err := a.f.WriteAt(fh[:], offset); err != nil {
-			return fmt.Errorf("failed to write header for frame frame %d: %w", frame, err)
+		currentFrameIdx++
+		if _, err := a.f.WriteAt(f.Header[:], currentOffset); err != nil {
+			return fmt.Errorf("failed to write header for frame frame %d: %w", currentFrameIdx, err)
 		}
-		if _, err := a.f.WriteAt(f.page, offset+frameHeaderSize); err != nil {
-			return fmt.Errorf("failed to write data for frame %d: %w", frame, err)
+		if _, err := a.f.WriteAt(f.Data, currentOffset+wal.FrameHeaderSize); err != nil {
+			return fmt.Errorf("failed to write data for frame %d: %w", currentFrameIdx, err)
 		}
-		offset += frameHeaderSize + int64(a.pageSize)
+		currentOffset += wal.FrameHeaderSize + int64(a.pageSize)
 
-		region, err := a.shm.Region(framePage(frame))
-		if err != nil {
-			return fmt.Errorf("failed to map wal-index page for frame %d: %w", frame, err)
+		if err := a.shm.AddFrame(currentFrameIdx, f.Header.PgNo()); err != nil {
+			return fmt.Errorf("failed to add frame %d to wal-index: %w", currentFrameIdx, err)
 		}
-		addFrameToWALIndex(region, frame, f.pgNo)
 
-		a.dirtyMu.Lock()
+		a.dirtyPageCountMu.Lock()
 		a.dirtyPageCount++
-		a.dirtyMu.Unlock()
+		a.dirtyPageCountMu.Unlock()
 
-		if f.nTruncate != 0 {
-			hdr.maxFrame = frame
-			hdr.nPage = f.nTruncate
-			hdr.frameCksum = cksum
-			hdr.change++
-			writeWALIndexHeader(region0, hdr)
+		if f.Header.NTruncate() != 0 {
+			hdr.SetMaxFrame(currentFrameIdx)
+			hdr.SetPageCount(f.Header.NTruncate())
+			hdr.SetLastFrameChecksum1(lastFrameChecksum1)
+			hdr.SetLastFrameChecksum2(lastFrameChecksum2)
+			hdr.SetChangeCounter(hdr.ChangeCounter() + 1)
+
+			if err := a.shm.WriteHeader(hdr); err != nil {
+				return fmt.Errorf("failed to write wal-index header: %w", err)
+			}
+
 			a.logger.Debug("published wal-index header",
-				"mxFrame", frame, "nPage", f.nTruncate, "frames", len(fs))
+				"mxFrame", currentFrameIdx, "nPage", f.Header.NTruncate(), "frames", len(frames))
 		}
 	}
 
@@ -229,15 +244,10 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 
 // rewindLogIfBackfilled checks if all WAL frames have been copied into the database
 // and if no readers are currently using the WAL. If so, it rewinds the WAL to the beginning.
-func (a *WALAppender) rewindLogIfBackfilled() (shm.Header, error) {
-	hdr, err := a.shm.ReadHeader()
-	if err != nil {
-		return shm.Header{}, fmt.Errorf("failed to read wal-index header: %w", err)
-	}
-
+// Must be called while holding the WAL write lock.
+func (a *WALAppender) rewindLogIfBackfilled(hdr shm.Header) (shm.Header, error) {
 	if err := a.shm.TryLockRange(shm.ReadLock(1), shm.NReaders-1); err != nil {
-		// If a reader is currently using the WAL, skip the rewind
-		return hdr, nil
+		return hdr, nil // Some readers are still using the WAL, skip the rewind
 	}
 	defer a.shm.UnlockRange(shm.ReadLock(1), shm.NReaders-1)
 
