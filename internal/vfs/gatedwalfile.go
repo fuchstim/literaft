@@ -36,10 +36,7 @@ func newGatedWALFile(base sqlite3vfs.File, gate Gate, logger hclog.Logger) (*gat
 	if n, err := base.ReadAt(headerBytes, 0); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("failed to read WAL header: %w", err)
 	} else if n == len(headerBytes) {
-		pageSize = wal.ParseWALHeader(headerBytes).PageSize
-		if pageSize == 1 {
-			pageSize = 65536 // SQLite's szPage field encodes 64K pages as 1.
-		}
+		pageSize = wal.WALHeader(headerBytes).PageSize()
 	} // If n<headerBytes the WAL file might not be initialized yet. In that case we intercept the header write to parse the frame size
 
 	return &gatedWALFile{
@@ -55,10 +52,7 @@ func newGatedWALFile(base sqlite3vfs.File, gate Gate, logger hclog.Logger) (*gat
 func (f *gatedWALFile) WriteAt(p []byte, off int64) (int, error) {
 	if off == 0 {
 		if f.pageSize == 0 && len(p) == wal.WALHeaderSize {
-			f.pageSize = wal.ParseWALHeader(p).PageSize
-			if f.pageSize == 1 {
-				f.pageSize = 65536 // SQLite's szPage field encodes 64K pages as 1.
-			}
+			f.pageSize = wal.WALHeader(p).PageSize()
 		}
 
 		return f.File.WriteAt(p, off)
@@ -85,11 +79,11 @@ func (f *gatedWALFile) writeFrameHeader(p []byte, off int64) (int, error) {
 		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
 	}
 
-	h := wal.ParseFrameHeader(p)
+	h := wal.FrameHeader(p)
 	if f.currentTxCommitted {
 		// WAL frame checksums for a committed transaction can be rewritten (same offset, same pgno)
 		// The data stays unchanged, only the checksum bytes change.
-		if pending, seen := f.currentTxFrameOffsets[off]; seen && pending.Header.PgNo == h.PgNo {
+		if pending, seen := f.currentTxFrameOffsets[off]; seen && pending.Header.PgNo() == h.PgNo() {
 			pending.Header = h
 
 			return f.File.WriteAt(p, off)
@@ -102,7 +96,7 @@ func (f *gatedWALFile) writeFrameHeader(p []byte, off int64) (int, error) {
 		f.resetCurrentTx()
 	}
 
-	f.pendingFrameHeader = h
+	f.pendingFrameHeader = &h
 	f.maxOffset = off
 
 	// If this is not a commit frame, don't withhold
@@ -130,7 +124,12 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 		return f.File.WriteAt(p, off)
 	}
 
-	pendingHeader := f.pendingFrameHeader
+	if f.pendingFrameHeader == nil {
+		err := fmt.Errorf("WAL frame data write at offset %d has no pending header", off)
+		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
+	}
+
+	pendingHeader := *f.pendingFrameHeader
 	f.pendingFrameHeader = nil
 
 	frame := &wal.Frame{pendingHeader, slices.Clone(p)}
@@ -142,7 +141,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 		return f.File.WriteAt(p, off)
 	}
 
-	frames, nTruncate := f.currentTxFrames, frame.Header.NTruncate
+	frames, nTruncate := f.currentTxFrames, frame.Header.NTruncate()
 	f.currentTxFrames = nil
 
 	if err := f.gate.ProposeTransaction(frames, nTruncate); err != nil {
@@ -169,7 +168,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 	// withheld commit frame now fails, the transaction is rolled back.
 	// This node will never see the entry again, so it would silently and permanently
 	// lack its own committed write. There is no way to recover from this, so we panic.
-	if _, err := f.File.WriteAt(frame.Header.Bytes(), off-wal.FrameHeaderSize); err != nil {
+	if _, err := f.File.WriteAt(frame.Header[:], off-wal.FrameHeaderSize); err != nil {
 		f.logger.Error("failed to flush committed commit-frame header after RAFT commit",
 			"offset", off-wal.FrameHeaderSize, "error", err)
 		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame header at WAL offset %d after RAFT commit: %v", off-wal.FrameHeaderSize, err))

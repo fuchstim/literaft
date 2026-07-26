@@ -27,8 +27,9 @@ func (f *faultyFile) ReadAt(p []byte, off int64) (int, error) {
 		return 0, errors.New("faultyFile only supports ReadAt(0)")
 	}
 
-	header := &wal.WALHeader{PageSize: f.pageSize}
-	copy(p, header.Bytes())
+	var header wal.WALHeader
+	header.SetPageSize(f.pageSize)
+	copy(p, header[:])
 	return len(p), nil
 }
 
@@ -55,8 +56,10 @@ func driveToCommitFlush(base sqlite3vfs.File, pageSize uint32) func() {
 	f, err := newGatedWALFile(base, alwaysCommitGate{}, hclog.NewNullLogger())
 	Expect(err).NotTo(HaveOccurred())
 
-	hdr := &wal.FrameHeader{PgNo: 1, NTruncate: 1}
-	n, err := f.WriteAt(hdr.Bytes(), wal.WALHeaderSize)
+	var hdr wal.FrameHeader
+	hdr.SetPgNo(1)
+	hdr.SetNTruncate(1)
+	n, err := f.WriteAt(hdr[:], wal.WALHeaderSize)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(n).To(Equal(wal.FrameHeaderSize))
 	Expect(f.pendingFrameHeader).NotTo(BeNil(), "commit-frame header must be held pending")

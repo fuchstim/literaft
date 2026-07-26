@@ -64,32 +64,32 @@ func (s *Snapshotter) Snapshot(index uint64) (io.ReadCloser, error) {
 	header := NewSnapshotHeader(index)
 	tf := &tempFileReader{tmp}
 	return &headeredReader{
-		Reader: io.MultiReader(bytes.NewReader(header.Bytes()), tmp),
+		Reader: io.MultiReader(bytes.NewReader(header[:]), tmp),
 		closer: tf,
 	}, nil
 }
 
-func (b *Snapshotter) Restore(r io.Reader) (*SnapshotHeader, error) {
+func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 	headerBytes := make([]byte, SnapshotHeaderSize)
 	if _, err := io.ReadFull(r, headerBytes); err != nil {
-		return nil, fmt.Errorf("failed to read snapshot header: %w", err)
+		return SnapshotHeader{}, fmt.Errorf("failed to read snapshot header: %w", err)
 	}
 
-	header, err := DecodeHeader(headerBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode snapshot header: %w", err)
+	header := SnapshotHeader(headerBytes)
+	if err := header.Validate(); err != nil {
+		return SnapshotHeader{}, fmt.Errorf("failed to validate snapshot header: %w", err)
 	}
 	b.logger.Info("restoring snapshot", "index", header.LastAppliedIndex)
 
 	w, err := walappender.Open(b.dbPath, b.pageSize, -1, 0, b.logger.Named("walappender"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to open WAL at path `%s`: %w", b.dbPath, err)
+		return SnapshotHeader{}, fmt.Errorf("failed to open WAL at path `%s`: %w", b.dbPath, err)
 	}
 	defer w.Close()
 
 	nPages, curPage, nextPage := uint32(1), make([]byte, b.pageSize), make([]byte, b.pageSize)
 	if _, err := io.ReadFull(r, curPage); err != nil {
-		return nil, fmt.Errorf("failed to first page from snapshot: %w", err)
+		return SnapshotHeader{}, fmt.Errorf("failed to first page from snapshot: %w", err)
 	}
 
 	pageSize := uint32(binary.BigEndian.Uint16(curPage[16:18]))
@@ -97,7 +97,7 @@ func (b *Snapshotter) Restore(r io.Reader) (*SnapshotHeader, error) {
 		pageSize = 65536 // SQLite's szPage field encodes 64K pages as 1.
 	}
 	if pageSize != b.pageSize {
-		return nil, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
+		return SnapshotHeader{}, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
 	}
 
 	var frames []*walappender.Frame
@@ -105,7 +105,7 @@ func (b *Snapshotter) Restore(r io.Reader) (*SnapshotHeader, error) {
 		nTruncate := uint32(0)
 		if _, err := io.ReadFull(r, nextPage); err != nil {
 			if !errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
+				return SnapshotHeader{}, fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
 			}
 
 			// If we hit EOF, `curPage` was the last page in the snapshot.
@@ -127,17 +127,17 @@ func (b *Snapshotter) Restore(r io.Reader) (*SnapshotHeader, error) {
 	// TODO: Stream frames to WAL appender instead of buffering them all in memory first.
 	// Requires WAL appender to support streaming frames
 	if err := w.AppendFrames(frames); err != nil {
-		return nil, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
+		return SnapshotHeader{}, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
 	}
 
 	db, err := sqlite3.Open("file:" + b.dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database at path `%s`: %w", b.dbPath, err)
+		return SnapshotHeader{}, fmt.Errorf("failed to open database at path `%s`: %w", b.dbPath, err)
 	}
 	defer db.Close()
 
 	if _, _, err := db.WALCheckpoint("main", sqlite3.CHECKPOINT_TRUNCATE); err != nil {
-		return nil, fmt.Errorf("failed to checkpoint database at path `%s`: %w", b.dbPath, err)
+		return SnapshotHeader{}, fmt.Errorf("failed to checkpoint database at path `%s`: %w", b.dbPath, err)
 	}
 
 	b.logger.Info("restored snapshot", "index", header.LastAppliedIndex, "pages", nPages)

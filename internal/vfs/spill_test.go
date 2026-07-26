@@ -80,7 +80,7 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 
 		pages := map[uint32][]byte{}
 		for _, p := range last.frames {
-			pages[p.Header.PgNo] = p.Data
+			pages[p.Header.PgNo()] = p.Data
 		}
 		Expect(pages).NotTo(BeEmpty())
 		for pgno, data := range pages {

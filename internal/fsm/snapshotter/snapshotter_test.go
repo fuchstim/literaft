@@ -96,7 +96,8 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		dst := openDB(dstPath)
 		pageSize := queryInt(dst, "PRAGMA page_size")
 
-		_, err := snapshotter.New(dstPath, uint32(pageSize), hclog.NewNullLogger()).Restore(bytes.NewReader(snapshotter.NewSnapshotHeader(0).Bytes()))
+		header := snapshotter.NewSnapshotHeader(0)
+		_, err := snapshotter.New(dstPath, uint32(pageSize), hclog.NewNullLogger()).Restore(bytes.NewReader(header[:]))
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -106,7 +107,8 @@ var _ = Describe("Snapshotter.Snapshot / Restore", func() {
 		dst := openDB(dstPath)
 		pageSize := queryInt(dst, "PRAGMA page_size")
 
-		stream := append(snapshotter.NewSnapshotHeader(0).Bytes(), make([]byte, int(pageSize)+1)...)
+		header := snapshotter.NewSnapshotHeader(0)
+		stream := append(header[:], make([]byte, int(pageSize)+1)...)
 		_, err := snapshotter.New(dstPath, uint32(pageSize), hclog.NewNullLogger()).Restore(bytes.NewReader(stream))
 		Expect(err).To(HaveOccurred())
 	})

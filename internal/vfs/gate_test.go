@@ -85,7 +85,7 @@ var _ = Describe("commit-frame interception", func() {
 		pages := map[uint32][]byte{}
 		for _, e := range entries {
 			for _, f := range e.frames {
-				pages[f.Header.PgNo] = f.Data
+				pages[f.Header.PgNo()] = f.Data
 			}
 		}
 		Expect(pages).NotTo(BeEmpty())
