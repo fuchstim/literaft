@@ -293,7 +293,7 @@ func (a *WALAppender) maybeBootstrap() error {
 		return fmt.Errorf("failed to read wal-index header: %w", err)
 	}
 
-	if hdr.IsInit() { // Already bootstrapped
+	if hdr.IsInit() && hdr.PageSize() > 0 { // Already bootstrapped
 		return nil
 	}
 

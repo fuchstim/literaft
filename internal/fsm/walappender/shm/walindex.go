@@ -2,7 +2,9 @@ package shm
 
 import (
 	"encoding/binary"
+	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 
 	"github.com/fuchstim/literaft/internal/wal"
@@ -113,6 +115,25 @@ func (h *Header) UpdateChecksums() {
 	h.SetChecksum2(checksum2)
 }
 
+func (h Header) String() string {
+	sb := &strings.Builder{}
+	fmt.Fprintf(sb, "WAL index header:\n")
+	fmt.Fprintf(sb, "  Version: %d\n", h.Version())
+	fmt.Fprintf(sb, "  ChangeCounter: %d\n", h.ChangeCounter())
+	fmt.Fprintf(sb, "  Init: %v\n", h.IsInit())
+	fmt.Fprintf(sb, "  BigEndianChecksum: %v\n", h.BigEndianChecksum())
+	fmt.Fprintf(sb, "  PageSize: %d\n", h.PageSize())
+	fmt.Fprintf(sb, "  MaxFrame: %d\n", h.MaxFrame())
+	fmt.Fprintf(sb, "  PageCount: %d\n", h.PageCount())
+	fmt.Fprintf(sb, "  LastFrameChecksum1: %d\n", h.LastFrameChecksum1())
+	fmt.Fprintf(sb, "  LastFrameChecksum2: %d\n", h.LastFrameChecksum2())
+	fmt.Fprintf(sb, "  Salt1: %d\n", h.Salt1())
+	fmt.Fprintf(sb, "  Salt2: %d\n", h.Salt2())
+	fmt.Fprintf(sb, "  Checksum1: %d\n", h.Checksum1())
+	fmt.Fprintf(sb, "  Checksum2: %d\n", h.Checksum2())
+	return sb.String()
+}
+
 func readCheckpointInfo(region0 []byte) CheckpointInfo {
 	return CheckpointInfo(slices.Clone(region0[checkpointInfoOffset : checkpointInfoOffset+checkpointInfoSize]))
 }
@@ -123,7 +144,7 @@ func writeCheckpointInfo(info CheckpointInfo, region0 []byte) {
 
 type CheckpointInfo [checkpointInfoSize]byte
 
-func (c CheckpointInfo) ResetForRewind() {
+func (c *CheckpointInfo) ResetForRewind() {
 	c.SetNBackfill(0)
 	c.SetReadMark(1, 0)
 	for i := 2; i < checkpointInfoNReaders; i++ {
@@ -155,6 +176,17 @@ func (c CheckpointInfo) NBackfillAttempted() uint32 {
 }
 func (c *CheckpointInfo) SetNBackfillAttempted(n uint32) {
 	binary.LittleEndian.PutUint32(c[32:36], n)
+}
+
+func (c CheckpointInfo) String() string {
+	sb := &strings.Builder{}
+	fmt.Fprintf(sb, "CheckpointInfo:\n")
+	fmt.Fprintf(sb, "  NBackfill: %d\n", c.NBackfill())
+	for i := 0; i < checkpointInfoNReaders; i++ {
+		fmt.Fprintf(sb, "  ReadMark[%d]: %d\n", i, c.ReadMark(uint8(i)))
+	}
+	fmt.Fprintf(sb, "  NBackfillAttempted: %d\n", c.NBackfillAttempted())
+	return sb.String()
 }
 
 func barrier() {

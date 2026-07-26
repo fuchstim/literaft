@@ -382,7 +382,7 @@ var _ = Describe("WALAppender log rewind", func() {
 	// Mirrors an internal, unexported constant rather than importing it.
 	const frameHeaderSize = 24
 
-	FIt("keeps the follower -wal bounded across many checkpoint/rewind cycles, instead of growing forever", func() {
+	It("keeps the follower -wal bounded across many checkpoint/rewind cycles, instead of growing forever", func() {
 		dir := GinkgoT().TempDir()
 
 		const numUpdates = 30

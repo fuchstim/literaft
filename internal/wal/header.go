@@ -59,7 +59,12 @@ func (h WALHeader) Checksum2() uint32      { return binary.BigEndian.Uint32(h[28
 func (h *WALHeader) SetChecksum2(c uint32) { binary.BigEndian.PutUint32(h[28:32], c) }
 
 func (h *WALHeader) UpdateChecksums() {
-	checksum1, checksum2 := ComputeChecksums(binary.BigEndian, h[:24], 0, 0)
+	enc := binary.ByteOrder(binary.LittleEndian)
+	if h.Magic() == WALHeaderMagicBE {
+		enc = binary.BigEndian
+	}
+
+	checksum1, checksum2 := ComputeChecksums(enc, h[:24], 0, 0)
 
 	h.SetChecksum1(checksum1)
 	h.SetChecksum2(checksum2)
