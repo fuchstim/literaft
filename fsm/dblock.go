@@ -3,6 +3,8 @@ package fsm
 import (
 	"fmt"
 	"os"
+
+	"github.com/fuchstim/literaft/internal/lock"
 )
 
 const (
@@ -19,7 +21,7 @@ func acquireSharedDBLock(dbPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open `%s`: %w", dbPath, err)
 	}
-	if err := readLock(f, sqliteSharedFirst, sqliteSharedSize, true); err != nil {
+	if err := lock.ReadLock(f, sqliteSharedFirst, sqliteSharedSize, true); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("failed to acquire a shared lock on `%s`: %w", dbPath, err)
 	}
