@@ -86,7 +86,7 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 	}
 
 	g.logger.Debug("forwarding follower write to leader",
-		"id", e.Header.Id, "lastAppliedIndex", req.Header.LastAppliedIndex, "leader", nle.Leader)
+		"id", e.GetHeader().GetId(), "lastAppliedIndex", req.GetHeader().GetLastAppliedIndex(), "leader", nle.Leader)
 
 	ctx, cancel := context.WithTimeout(context.Background(), g.forwardTimeout)
 	defer cancel()
@@ -95,7 +95,7 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 }
 
 func (g *Gate) forwardToLeader(ctx context.Context, req *raftproto.ForwardRequest, leader raft.ServerAddress) error {
-	id := req.Entry.Header.Id
+	id := req.GetEntry().GetHeader().GetId()
 
 	for attempt := 0; ; attempt++ {
 		if leader == "" {
@@ -132,10 +132,10 @@ func (g *Gate) forwardToLeader(ctx context.Context, req *raftproto.ForwardReques
 			return rafterrors.NewNotAppliedError(reason, nil)
 		case raftproto.ForwardResponse_STATUS_NOT_LEADER:
 			if attempt == 0 && res.GetLeaderAddr() != "" {
-				leader = raft.ServerAddress(res.LeaderAddr)
+				leader = raft.ServerAddress(res.GetLeaderAddr())
 				continue
 			}
-			return rafterrors.NewNotLeaderError(raft.ServerAddress(res.LeaderAddr))
+			return rafterrors.NewNotLeaderError(raft.ServerAddress(res.GetLeaderAddr()))
 		case raftproto.ForwardResponse_STATUS_AMBIGUOUS:
 			// Status unknown, wait and see if FSM consumes it.
 			return g.awaitFSMApplied(ctx, id, errors.New(res.GetDetail()))
@@ -160,7 +160,7 @@ func (g *Gate) handleRequest(ctx context.Context, req *raftproto.ForwardRequest)
 		return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STATUS_INVALID, Detail: err.Error()}
 	}
 
-	id := req.Entry.Header.Id
+	id := req.GetEntry().GetHeader().GetId()
 
 	if g.raft.State() == raft.Leader {
 		g.logger.Info("redirecting mis-routed forwarded write", "id", id, "leader", g.raft.Leader())
@@ -182,15 +182,15 @@ func (g *Gate) handleRequest(ctx context.Context, req *raftproto.ForwardRequest)
 	defer release()
 
 	// Base check under the held lock. Nothing has been proposed yet.
-	if la := g.fsm.LastAppliedIndex(); req.Header.LastAppliedIndex != la {
+	if la := g.fsm.LastAppliedIndex(); req.GetHeader().GetLastAppliedIndex() != la {
 		g.logger.Info("rejecting forwarded write: stale base",
-			"id", id, "baseIndex", req.Header.LastAppliedIndex, "lastApplied", la)
+			"id", id, "baseIndex", req.GetHeader().GetLastAppliedIndex(), "lastApplied", la)
 		return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STATUS_STALE_BASE, LastAppliedIndex: la}
 	}
 
-	g.logger.Debug("forwarded write base-index check passed", "id", id, "baseIndex", req.Header.LastAppliedIndex)
+	g.logger.Debug("forwarded write base-index check passed", "id", id, "baseIndex", req.GetHeader().GetLastAppliedIndex())
 
-	if err := g.baseGate.ProposeEntry(req.Entry); err != nil {
+	if err := g.baseGate.ProposeEntry(req.GetEntry()); err != nil {
 		g.logger.Info("forwarded write proposal failed", "id", id, "error", err)
 		return g.classifyApplyErr(err)
 	}

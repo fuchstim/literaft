@@ -84,11 +84,11 @@ func (g *Gate) ProposeEntry(e *raftproto.LogEntry) error {
 	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
 
 	g.logger.Debug("proposing transaction",
-		"id", e.Header.Id, "pages", len(e.GetTransaction().Pages), "nTruncate", e.GetTransaction().NTruncate)
+		"id", e.GetHeader().GetId(), "pages", len(e.GetTransaction().GetPages()), "nTruncate", e.GetTransaction().GetNTruncate())
 
 	future := g.raft.Apply(b, g.timeout)
 	if err := future.Error(); err != nil {
-		g.logger.Debug("transaction proposal rejected", "id", e.Header.Id, "error", err)
+		g.logger.Debug("transaction proposal rejected", "id", e.GetHeader().GetId(), "error", err)
 
 		if errors.Is(err, raft.ErrEnqueueTimeout) {
 			return rafterrors.NewNotAppliedError("proposal not enqueued before timeout", err)
