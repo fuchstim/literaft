@@ -91,6 +91,9 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 	ctx, cancel := context.WithTimeout(context.Background(), g.forwardTimeout)
 	defer cancel()
 
+	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
+	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
+
 	return g.forwardToLeader(ctx, req, nle.Leader)
 }
 
@@ -218,8 +221,8 @@ func (g *Gate) validateRequest(req *raftproto.ForwardRequest) error {
 		if p.GetPgNo() == 0 {
 			return fmt.Errorf("forwarded transaction has a zero page number")
 		}
-		if len(p.GetData()) != 0 {
-			return fmt.Errorf("forwarded transaction has non-empty page data for page %d (only commit frames should be forwarded)", p.GetPgNo())
+		if len(p.GetData()) == 0 {
+			return fmt.Errorf("forwarded transaction has a page with no data")
 		}
 	}
 
