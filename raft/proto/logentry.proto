@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package raftproto;
+
+option go_package = "github.com/fuchstim/literaft/raft/proto;raftproto";
+
+message LogEntry {
+  Header header = 1;
+  oneof payload {
+    Transaction transaction = 2;
+  }
+
+  message Header {
+    string id = 1; // per-proposal unique token
+  }
+
+  message Transaction {
+    repeated Page pages = 1;
+    uint32 n_truncate = 2;
+
+    message Page {
+      uint32 pg_no = 1;
+      bytes data = 2;
+    }
+  }
+}

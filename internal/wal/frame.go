@@ -8,7 +8,7 @@ import (
 const FrameHeaderSize = 24
 
 type Frame struct {
-	Header FrameHeader
+	Header *FrameHeader
 	Data   []byte
 }
 

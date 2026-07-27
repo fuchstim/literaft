@@ -1,5 +1,3 @@
-// Package rafterrors is the single taxonomy for a rejected write proposal.
-//
 // Every rejected write proposal is one of four concrete types, each pinned to a
 // Category that decides both what a caller should do and which sqlite3 result
 // code the VFS surfaces:
@@ -8,24 +6,16 @@
 //	Retryable  CatchingUpError  sqlite3.BUSY         retry; nothing was applied
 //	Retryable  NotAppliedError  sqlite3.BUSY         retry; nothing was applied
 //	Ambiguous  AmbiguousError   sqlite3.IOERR_WRITE  possibly committed; do not blindly retry
-//
-// The Category is the classification; the result code is derived from it
-// (Category.ResultCode), so one place decides how a rejection maps to SQLite's
-// retry semantics -- there is no per-call-site result-code tagging. Callers
-// that hold the error directly should classify via Classify / SafeToRetry
-// rather than matching concrete types; the concrete types stay exported only so
-// a caller can recover extra detail (e.g. NotLeaderError.Leader) via errors.As.
 package rafterrors
 
 import (
 	"errors"
 	"fmt"
 
+	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
 )
 
-// Category classifies a rejected write proposal by the action a caller should
-// take, which in turn fixes the sqlite3 result code the VFS surfaces.
 type Category int
 
 const (
@@ -40,12 +30,6 @@ const (
 	Ambiguous
 )
 
-// ResultCode is the sqlite3 result code the VFS surfaces for a rejection in
-// this category, and the single source of truth for how a category maps to
-// SQLite's retry semantics: Retryable is BUSY (a client retries), Redirect is
-// READONLY (distinct, so a client redirects instead of spinning on the same
-// connection), and Ambiguous is IOERR_WRITE (a hard failure a client must not
-// blindly retry).
 func (c Category) ResultCode() sqlite3.ExtendedErrorCode {
 	switch c {
 	case Redirect:
@@ -57,9 +41,6 @@ func (c Category) ResultCode() sqlite3.ExtendedErrorCode {
 	}
 }
 
-// coded is the common core of every taxonomy error: it fixes the Category and
-// derives the result code from it, giving each concrete type Category and
-// ResultCode methods without repeating the mapping.
 type coded struct{ cat Category }
 
 func (c coded) Category() Category                    { return c.cat }
@@ -69,14 +50,10 @@ func (c coded) ResultCode() sqlite3.ExtendedErrorCode { return c.cat.ResultCode(
 // was rejected before anything was proposed.
 type NotLeaderError struct {
 	coded
-	// Leader is the address the rejecting node believed was the leader (empty
-	// if none was known), so a caller can redirect.
-	Leader string
+	Leader raft.ServerAddress
 }
 
-// NewNotLeaderError returns a NotLeaderError hinting at leader (which may be
-// empty when no leader is known).
-func NewNotLeaderError(leader string) *NotLeaderError {
+func NewNotLeaderError(leader raft.ServerAddress) *NotLeaderError {
 	return &NotLeaderError{coded: coded{Redirect}, Leader: leader}
 }
 
@@ -89,10 +66,9 @@ func (e *NotLeaderError) Error() string {
 
 // CatchingUpError is a Retryable: this node has won an election but hasn't
 // finished draining its apply backlog, so its local state may not yet reflect
-// every committed entry. A caller should retry shortly rather than redirect.
+// every committed entry.
 type CatchingUpError struct{ coded }
 
-// NewCatchingUpError returns a CatchingUpError.
 func NewCatchingUpError() *CatchingUpError {
 	return &CatchingUpError{coded{Retryable}}
 }
@@ -106,13 +82,10 @@ func (e *CatchingUpError) Error() string {
 // non-delivery), so re-running is safe and cleanly recomputes on fresher state.
 type NotAppliedError struct {
 	coded
-	// Reason is a short description of why the write never entered the log.
 	Reason string
 	err    error
 }
 
-// NewNotAppliedError returns a NotAppliedError describing reason, optionally
-// wrapping the underlying cause (which may be nil).
 func NewNotAppliedError(reason string, cause error) *NotAppliedError {
 	return &NotAppliedError{coded: coded{Retryable}, Reason: reason, err: cause}
 }
@@ -135,7 +108,6 @@ type AmbiguousError struct {
 	err error
 }
 
-// NewAmbiguousError returns an AmbiguousError wrapping cause (which may be nil).
 func NewAmbiguousError(cause error) *AmbiguousError {
 	return &AmbiguousError{coded: coded{Ambiguous}, err: cause}
 }
@@ -149,8 +121,6 @@ func (e *AmbiguousError) Error() string {
 
 func (e *AmbiguousError) Unwrap() error { return e.err }
 
-// Classify reports the Category of the first taxonomy error in err's chain, and
-// whether one was found.
 func Classify(err error) (Category, bool) {
 	var c interface{ Category() Category }
 	if errors.As(err, &c) {
@@ -159,9 +129,6 @@ func Classify(err error) (Category, bool) {
 	return 0, false
 }
 
-// SafeToRetry reports whether re-running the statement that produced err is
-// safe: true for Redirect and Retryable rejections (both provably never
-// committed), false for an Ambiguous outcome or any non-taxonomy error.
 func SafeToRetry(err error) bool {
 	cat, ok := Classify(err)
 	return ok && (cat == Redirect || cat == Retryable)

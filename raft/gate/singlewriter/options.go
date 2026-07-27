@@ -1,4 +1,4 @@
-package singlewriter
+package singlewritergate
 
 import (
 	"time"

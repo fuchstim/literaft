@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package raftproto;
+
+import "logentry.proto";
+
+option go_package = "github.com/fuchstim/literaft/raft/proto;raftproto";
+
+message ForwardRequest {
+  Header header = 1;
+  LogEntry entry = 2;
+
+  message Header {
+    uint64 last_applied_index = 1;
+  }
+}
+
+message ForwardResponse {
+  Status status = 1;
+  string leader_addr = 2;
+  uint64 last_applied_index = 3;
+  string detail = 4;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK = 1;
+    STATUS_NOT_LEADER = 2;
+    STATUS_STALE_BASE = 3;
+    STATUS_CATCHING_UP = 4;
+    STATUS_BUSY = 5;
+    STATUS_AMBIGUOUS = 6;
+    STATUS_INVALID = 7;
+  }
+}

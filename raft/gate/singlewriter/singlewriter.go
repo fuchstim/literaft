@@ -1,25 +1,32 @@
-package singlewriter
+package singlewritergate
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
+	"google.golang.org/protobuf/proto"
 
-	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/vfs"
 	"github.com/fuchstim/literaft/internal/wal"
+	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	"github.com/fuchstim/literaft/raft/fsm"
+	raftproto "github.com/fuchstim/literaft/raft/proto"
 )
 
-var _ vfs.Gate = (*SingleWriterGate)(nil)
+var _ vfs.Gate = (*Gate)(nil)
 
 // Gate implements a vfs.Gate that only accepts writes on the current RAFT cluster leader
 type Gate struct {
-	raft    *raft.Raft
+	raft   *raft.Raft
+	fsm    *fsm.FSM
+	logger hclog.Logger
+
 	timeout time.Duration
-	logger  hclog.Logger
 
 	readyMu sync.RWMutex
 	ready   bool
@@ -29,33 +36,60 @@ type Gate struct {
 	closeOnce sync.Once
 }
 
-func NewGate(r *raft.Raft, opts ...Option) *Gate {
+func New(r *raft.Raft, f *fsm.FSM, opts ...Option) *Gate {
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
 	}
 
-	g := &Gate{raft: r, timeout: o.applyTimeout, logger: o.logger.Named("gate"), stop: make(chan struct{})}
+	g := &Gate{
+		raft:    r,
+		fsm:     f,
+		timeout: o.applyTimeout,
+		logger:  o.logger.Named("singlewritergate"),
+		stop:    make(chan struct{}),
+	}
 	g.wg.Go(g.watchLeadership)
 
 	return g
 }
 
 func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
+	e := &raftproto.LogEntry{
+		Header: &raftproto.LogEntry_Header{Id: uuid.NewString()},
+		Payload: &raftproto.LogEntry_Transaction_{
+			Transaction: raftproto.NewLogEntryTransaction(frames),
+		},
+	}
+
+	return g.ProposeEntry(e)
+}
+
+func (g *Gate) ProposeEntry(e *raftproto.LogEntry) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
-		return rafterrors.NewNotLeaderError(string(leader))
+		return rafterrors.NewNotLeaderError(leader)
 	}
 
 	if !g.Ready() {
 		return rafterrors.NewCatchingUpError()
 	}
 
-	future := g.raft.Apply(e, g.timeout)
+	b, err := proto.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entry: %w", err)
+	}
+
+	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
+	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
+
+	g.logger.Debug("proposing transaction",
+		"id", e.Header.Id, "pages", len(e.GetTransaction().Pages), "nTruncate", e.GetTransaction().NTruncate)
+
+	future := g.raft.Apply(b, g.timeout)
 	if err := future.Error(); err != nil {
-		// Classify so callers can tell a definitively-not-proposed failure
-		// from an ambiguous one. An enqueue timeout never entered the log;
-		// any other failure leaves the outcome unknown.
+		g.logger.Debug("transaction proposal rejected", "id", e.Header.Id, "error", err)
+
 		if errors.Is(err, raft.ErrEnqueueTimeout) {
 			return rafterrors.NewNotAppliedError("proposal not enqueued before timeout", err)
 		}
@@ -116,7 +150,7 @@ func (g *Gate) drain(term uint64) {
 		if err := g.raft.Barrier(g.timeout).Error(); err == nil {
 			g.readyMu.Lock()
 			defer g.readyMu.Unlock()
-			if g.raft.State() == raft.Leader && g.raft.CurrentTerm() == term {
+			if g.raft.State() == raft.Leader && g.raft.CurrentTerm() == term && g.fsm.LastAppliedIndex() == g.raft.CommitIndex() {
 				g.ready = true
 				g.logger.Info("drained apply backlog; ready to serve writes", "term", term)
 			}
