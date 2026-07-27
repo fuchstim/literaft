@@ -15,7 +15,6 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
 	"github.com/fuchstim/literaft/internal/vfs"
 	"github.com/fuchstim/literaft/internal/wal"
 
@@ -28,20 +27,12 @@ func TestWalappender(t *testing.T) {
 	RunSpecs(t, "walappender Suite")
 }
 
-// recordingGate implements vfs.Gate, recording every proposal (as the
-// raftproto.Transaction a real Gate would build from it) rather than ever
-// rejecting one, so a follower's AppendTransaction can be driven with
-// exactly what a leader connection actually captured.
 type recordingGate struct {
-	entries []*raftproto.Transaction
+	entries [][]*wal.Frame
 }
 
-func (g *recordingGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error {
-	txn := &raftproto.Transaction{Pages: make([]*raftproto.Page, len(frames)), NTruncate: nTruncate}
-	for i, f := range frames {
-		txn.Pages[i] = &raftproto.Page{Pgno: f.Header.PgNo(), Data: f.Data}
-	}
-	g.entries = append(g.entries, txn)
+func (g *recordingGate) ProposeTransaction(frames []*wal.Frame) error {
+	g.entries = append(g.entries, frames)
 	return nil
 }
 
@@ -118,7 +109,7 @@ func primeFollowerWALMode(path string) {
 // issues n updates to that same row -- each producing its own small,
 // autocommitted transaction -- returning the table-setup transactions and
 // the update transactions separately, plus the page size.
-func singleRowUpdates(dir string, n int) (setup, updates []*raftproto.Transaction, pageSize uint32) {
+func singleRowUpdates(dir string, n int) (setup, updates [][]*wal.Frame, pageSize uint32) {
 	GinkgoHelper()
 
 	gate := &recordingGate{}
@@ -163,24 +154,6 @@ func walFileSalt(path string) [8]byte {
 	return salt
 }
 
-func transactionFrames(txn *raftproto.Transaction) []*wal.Frame {
-	GinkgoHelper()
-	frames := make([]*wal.Frame, len(txn.Pages))
-	for i, p := range txn.Pages {
-		frames[i] = &wal.Frame{
-			Header: wal.FrameHeader{},
-			Data:   p.GetData(),
-		}
-
-		frames[i].Header.SetPgNo(p.GetPgno())
-		if i == len(txn.Pages)-1 {
-			frames[i].Header.SetNTruncate(txn.GetNTruncate())
-		}
-	}
-
-	return frames
-}
-
 var _ = Describe("WALAppender.AppendTransaction", func() {
 	It("replays a leader's captured entries into a fresh follower with identical reads", func() {
 		dir := GinkgoT().TempDir()
@@ -208,7 +181,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -260,7 +233,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 
 		var totalFrames int
 		for _, txn := range gate.entries {
-			totalFrames += len(txn.Pages)
+			totalFrames += len(txn)
 		}
 		Expect(totalFrames).To(BeNumerically(">", 4062),
 			"test setup must produce enough frames to actually exercise wal-index page 1")
@@ -275,7 +248,7 @@ var _ = Describe("WALAppender.AppendTransaction", func() {
 		defer appender.Close()
 
 		for i, txn := range gate.entries {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying entry %d", i)
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed(), "applying entry %d", i)
 		}
 
 		follower, err := sqlite3.Open("file:" + followerPath)
@@ -358,7 +331,7 @@ var _ = Describe("WALAppender WAL recovery at open", func() {
 		// The recovered state is intact and further apply still works.
 		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(2)))
 
-		var followUp []*raftproto.Transaction
+		var followUp [][]*wal.Frame
 		func() {
 			g := &recordingGate{}
 			p := filepath.Join(dir, "src.db")
@@ -371,7 +344,7 @@ var _ = Describe("WALAppender WAL recovery at open", func() {
 			followUp = g.entries
 		}()
 		for _, txn := range followUp {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed())
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed())
 		}
 		Expect(queryInt(recoverConn, "SELECT count(*) FROM t")).To(Equal(int64(3)))
 		Expect(queryText(recoverConn, "PRAGMA integrity_check")).To(Equal("ok"))
@@ -399,12 +372,12 @@ var _ = Describe("WALAppender log rewind", func() {
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
 		var peak int64
 		for i, txn := range updates {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying update %d", i)
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed(), "applying update %d", i)
 			if size := walFileSize(followerPath); size > peak {
 				peak = size
 			}
@@ -451,11 +424,11 @@ var _ = Describe("WALAppender log rewind", func() {
 		// lock acquired up front and released only after the append, so the
 		// threshold checkpoint runs on release rather than under the (would-be
 		// round-trip) hold.
-		applyLoaned := func(txn *raftproto.Transaction) {
+		applyLoaned := func(txn []*wal.Frame) {
 			GinkgoHelper()
 			h, err := appender.AcquireWriteLock(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(appender.AppendFramesUnderLock(h, transactionFrames(txn), nil)).To(Succeed())
+			Expect(appender.AppendFramesUnderLock(h, txn, nil)).To(Succeed())
 			h.Release()
 		}
 
@@ -502,10 +475,10 @@ var _ = Describe("WALAppender log rewind", func() {
 		defer appender.Close()
 
 		for i, txn := range setup {
-			Expect(appender.AppendFrames(transactionFrames(txn), nil)).To(Succeed(), "applying setup entry %d", i)
+			Expect(appender.AppendFrames(txn, nil)).To(Succeed(), "applying setup entry %d", i)
 		}
 
-		Expect(appender.AppendFrames(transactionFrames(updates[0]), nil)).To(Succeed())
+		Expect(appender.AppendFrames(updates[0], nil)).To(Succeed())
 		saltBeforeReader := walFileSalt(followerPath)
 
 		// Attach an external reader and hold a read transaction open while
@@ -522,7 +495,7 @@ var _ = Describe("WALAppender log rewind", func() {
 		// ever changes, must stay identical throughout.
 		const attachedUpdates = 8
 		for i := 1; i <= attachedUpdates; i++ {
-			Expect(appender.AppendFrames(transactionFrames(updates[i]), nil)).To(Succeed(), "applying update %d with reader attached", i)
+			Expect(appender.AppendFrames(updates[i], nil)).To(Succeed(), "applying update %d with reader attached", i)
 			Expect(walFileSalt(followerPath)).To(Equal(saltBeforeReader),
 				"expected the WAL epoch to be unchanged while a reader holds an older snapshot (update %d)", i)
 		}
@@ -534,7 +507,7 @@ var _ = Describe("WALAppender log rewind", func() {
 
 		rewound := false
 		for i := attachedUpdates + 1; i < numUpdates; i++ {
-			Expect(appender.AppendFrames(transactionFrames(updates[i]), nil)).To(Succeed(), "applying update %d after reader release", i)
+			Expect(appender.AppendFrames(updates[i], nil)).To(Succeed(), "applying update %d after reader release", i)
 			if walFileSalt(followerPath) != saltBeforeReader {
 				rewound = true
 			}
