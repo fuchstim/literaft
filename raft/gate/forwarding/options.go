@@ -1,9 +1,9 @@
-package forwardgate
+package forwardinggate
 
 import (
 	"time"
 
-	singlewritergate "github.com/fuchstim/literaft/raft/gate/singlewriter"
+	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -13,7 +13,7 @@ type options struct {
 	forwardTimeout     time.Duration
 	handlerLockTimeout time.Duration
 	logger             hclog.Logger
-	baseGateOptions    []singlewritergate.Option
+	baseGateOptions    []leadergate.Option
 }
 
 func defaultOptions() options {
@@ -41,6 +41,6 @@ func WithHandlerLockTimeout(d time.Duration) Option {
 	return func(o *options) { o.handlerLockTimeout = d }
 }
 
-func WithBaseGateOptions(opts ...singlewritergate.Option) Option {
+func WithBaseGateOptions(opts ...leadergate.Option) Option {
 	return func(o *options) { o.baseGateOptions = opts }
 }

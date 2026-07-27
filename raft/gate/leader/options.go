@@ -1,4 +1,4 @@
-package singlewritergate
+package leadergate
 
 import (
 	"time"

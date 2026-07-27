@@ -1,4 +1,4 @@
-package forwardgate
+package forwardinggate
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/fuchstim/literaft/internal/wal"
 	rafterrors "github.com/fuchstim/literaft/raft/errors"
 	"github.com/fuchstim/literaft/raft/fsm"
-	singlewritergate "github.com/fuchstim/literaft/raft/gate/singlewriter"
+	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
 	raftproto "github.com/fuchstim/literaft/raft/proto"
 )
 
@@ -36,7 +36,7 @@ type Gate struct {
 	forwardTimeout     time.Duration
 	handlerLockTimeout time.Duration
 
-	baseGate *singlewritergate.Gate
+	baseGate *leadergate.Gate
 }
 
 func New(r *raft.Raft, f *fsm.FSM, transport LeaderTransport, opts ...Option) *Gate {
@@ -44,18 +44,18 @@ func New(r *raft.Raft, f *fsm.FSM, transport LeaderTransport, opts ...Option) *G
 	for _, opt := range opts {
 		opt(&o)
 	}
-	o.baseGateOptions = append(o.baseGateOptions, singlewritergate.WithLogger(o.logger))
+	o.baseGateOptions = append(o.baseGateOptions, leadergate.WithLogger(o.logger))
 
 	g := &Gate{
 		raft:      r,
 		fsm:       f,
 		transport: transport,
-		logger:    o.logger.Named("forwardgate"),
+		logger:    o.logger.Named("forwardinggate"),
 
 		forwardTimeout:     o.forwardTimeout,
 		handlerLockTimeout: o.handlerLockTimeout,
 
-		baseGate: singlewritergate.New(r, f, o.baseGateOptions...),
+		baseGate: leadergate.New(r, f, o.baseGateOptions...),
 	}
 	transport.Handle(g.handleRequest)
 	return g

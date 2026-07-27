@@ -1,4 +1,4 @@
-package singlewritergate
+package leadergate
 
 import (
 	"errors"
@@ -46,7 +46,7 @@ func New(r *raft.Raft, f *fsm.FSM, opts ...Option) *Gate {
 		raft:    r,
 		fsm:     f,
 		timeout: o.applyTimeout,
-		logger:  o.logger.Named("singlewritergate"),
+		logger:  o.logger.Named("leadergate"),
 		stop:    make(chan struct{}),
 	}
 	g.wg.Go(g.watchLeadership)
