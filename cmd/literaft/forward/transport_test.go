@@ -2,7 +2,6 @@ package forward_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"testing"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/fuchstim/literaft/cmd/literaft/forward"
+	raftproto "github.com/fuchstim/literaft/raft/proto"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,14 +36,21 @@ func startServer(tr *forward.Transport) (string, func()) {
 
 var dialOpts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
+func testRequest(id string) *raftproto.ForwardRequest {
+	return &raftproto.ForwardRequest{
+		Header: &raftproto.ForwardRequest_Header{LastAppliedIndex: 7},
+		Entry:  &raftproto.LogEntry{Header: &raftproto.LogEntry_Header{Id: id}},
+	}
+}
+
 var _ = Describe("forward.Transport", func() {
 	It("round-trips a request through the leader's handler", func() {
 		// identity resolver: the forward address is the raft address.
 		leaderTr := forward.New(func(a raft.ServerAddress) string { return string(a) }, dialOpts)
-		var gotReq []byte
-		leaderTr.Handle(func(_ context.Context, req []byte) ([]byte, error) {
+		var gotReq *raftproto.ForwardRequest
+		leaderTr.Handle(func(_ context.Context, req *raftproto.ForwardRequest) *raftproto.ForwardResponse {
 			gotReq = req
-			return append([]byte("resp:"), req...), nil
+			return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STATUS_OK, LastAppliedIndex: 8}
 		})
 		addr, stop := startServer(leaderTr)
 		defer stop()
@@ -53,16 +60,18 @@ var _ = Describe("forward.Transport", func() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		resp, err := follower.Propose(ctx, raft.ServerAddress(addr), []byte("hello"))
+		req := testRequest("hello")
+		resp, err := follower.Propose(ctx, raft.ServerAddress(addr), req)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(gotReq).To(Equal([]byte("hello")))
-		Expect(resp).To(Equal([]byte("resp:hello")))
+		Expect(gotReq.GetEntry().GetHeader().GetId()).To(Equal("hello"))
+		Expect(resp.GetStatus()).To(Equal(raftproto.ForwardResponse_STATUS_OK))
+		Expect(resp.GetLastAppliedIndex()).To(Equal(uint64(8)))
 	})
 
-	It("surfaces a handler error to the caller", func() {
+	It("surfaces a not-leader response to the caller", func() {
 		leaderTr := forward.New(func(a raft.ServerAddress) string { return string(a) }, dialOpts)
-		leaderTr.Handle(func(context.Context, []byte) ([]byte, error) {
-			return nil, errors.New("nope")
+		leaderTr.Handle(func(context.Context, *raftproto.ForwardRequest) *raftproto.ForwardResponse {
+			return &raftproto.ForwardResponse{Status: raftproto.ForwardResponse_STATUS_NOT_LEADER, LeaderAddr: "elsewhere"}
 		})
 		addr, stop := startServer(leaderTr)
 		defer stop()
@@ -72,8 +81,10 @@ var _ = Describe("forward.Transport", func() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := follower.Propose(ctx, raft.ServerAddress(addr), []byte("x"))
-		Expect(err).To(HaveOccurred())
+		resp, err := follower.Propose(ctx, raft.ServerAddress(addr), testRequest("x"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetStatus()).To(Equal(raftproto.ForwardResponse_STATUS_NOT_LEADER))
+		Expect(resp.GetLeaderAddr()).To(Equal("elsewhere"))
 	})
 
 	It("answers Unavailable before a handler is registered", func() {
@@ -86,7 +97,7 @@ var _ = Describe("forward.Transport", func() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := follower.Propose(ctx, raft.ServerAddress(addr), []byte("x"))
+		_, err := follower.Propose(ctx, raft.ServerAddress(addr), testRequest("x"))
 		Expect(err).To(HaveOccurred())
 	})
 })

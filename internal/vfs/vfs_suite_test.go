@@ -27,7 +27,7 @@ type alwaysCommitGate struct{}
 
 var _ vfs.Gate = alwaysCommitGate{}
 
-func (alwaysCommitGate) ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error { return nil }
+func (alwaysCommitGate) ProposeTransaction(frames []*wal.Frame) error { return nil }
 
 var _ = BeforeSuite(func() {
 	vfsName = uuid.NewString()

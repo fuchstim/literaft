@@ -75,12 +75,12 @@ var _ = Describe("commit-frame interception under page-cache spill", func() {
 		Expect(len(entries)).To(BeNumerically(">=", 2),
 			"expected at least one entry for the insert and one for the update")
 		last := entries[len(entries)-1]
-		Expect(int64(last.nTruncate)).To(Equal(pageCount),
+		Expect(int64(last[len(last)-1].Header.NTruncate())).To(Equal(pageCount),
 			"the update proposal's nTruncate must be the post-commit database size")
 
 		pages := map[uint32][]byte{}
-		for _, p := range last.frames {
-			pages[p.Header.PgNo()] = p.Data
+		for _, frame := range last {
+			pages[frame.Header.PgNo()] = frame.Data
 		}
 		Expect(pages).NotTo(BeEmpty())
 		for pgno, data := range pages {

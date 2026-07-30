@@ -1,4 +1,4 @@
-package fsm
+package fsm_test
 
 import (
 	"context"
@@ -10,7 +10,8 @@ import (
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
 
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
+	"github.com/fuchstim/literaft/raft/fsm"
+	raftproto "github.com/fuchstim/literaft/raft/proto"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -21,9 +22,9 @@ func TestFSM(t *testing.T) {
 	RunSpecs(t, "fsm Suite")
 }
 
-func newFSM() *FSM {
+func newFSM() *fsm.FSM {
 	GinkgoHelper()
-	f, err := New(filepath.Join(GinkgoT().TempDir(), "db"))
+	f, err := fsm.New(filepath.Join(GinkgoT().TempDir(), "db"))
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(f.Close)
 	return f
@@ -31,7 +32,7 @@ func newFSM() *FSM {
 
 func createLog(id string, index uint64) *raft.Log {
 	GinkgoHelper()
-	b, err := proto.Marshal(&raftproto.Entry{Header: &raftproto.Header{Id: id}})
+	b, err := proto.Marshal(&raftproto.LogEntry{Header: &raftproto.LogEntry_Header{Id: id}})
 	Expect(err).NotTo(HaveOccurred())
 	return &raft.Log{Type: raft.LogCommand, Index: index, Data: b}
 }
@@ -40,11 +41,11 @@ var _ = Describe("fsm skip-marker CAS", func() {
 	It("consumes a pending marker on Apply and advances lastApplied", func() {
 		f := newFSM()
 		f.CreateSkipMarker("a")
-		Expect(f.lastApplied.Load()).To(Equal(uint64(0)))
+		Expect(f.LastAppliedIndex()).To(Equal(uint64(0)))
 
 		f.Apply(createLog("a", 12))
 
-		Expect(f.lastApplied.Load()).To(Equal(uint64(12)), "consumption must advance lastApplied to the entry index")
+		Expect(f.LastAppliedIndex()).To(Equal(uint64(12)), "consumption must advance lastApplied to the entry index")
 		Expect(f.AwaitSkipMarkerConsumed(context.Background(), "a")).To(Succeed(), "a consumed marker resolves immediately")
 	})
 
@@ -59,7 +60,7 @@ var _ = Describe("fsm skip-marker CAS", func() {
 		// The marker is terminal (abandoned): Apply must not consume it, so
 		// lastApplied stays put (the no-txn entry has nothing to materialize).
 		f.Apply(createLog("a", 5))
-		Expect(f.lastApplied.Load()).To(Equal(uint64(0)))
+		Expect(f.LastAppliedIndex()).To(Equal(uint64(0)))
 	})
 
 	It("resolves a lost race as consumed: a marker consumed before the wait's ctx is observed still returns nil", func() {
@@ -78,7 +79,7 @@ var _ = Describe("fsm skip-marker CAS", func() {
 		for i := 0; i < 100; i++ {
 			// Built directly (not newFSM) so each iteration owns its Close;
 			// newFSM's DeferCleanup would double-close it.
-			f, err := New(filepath.Join(GinkgoT().TempDir(), "db"))
+			f, err := fsm.New(filepath.Join(GinkgoT().TempDir(), "db"))
 			Expect(err).NotTo(HaveOccurred())
 			f.CreateSkipMarker("a")
 
@@ -94,9 +95,9 @@ var _ = Describe("fsm skip-marker CAS", func() {
 			// Consistency: consumed (await nil) implies lastApplied advanced;
 			// abandoned (await err) implies Apply did not consume it.
 			if awaitErr == nil {
-				Expect(f.lastApplied.Load()).To(Equal(uint64(9)), "iteration %d: consumed must have advanced lastApplied", i)
+				Expect(f.LastAppliedIndex()).To(Equal(uint64(9)), "iteration %d: consumed must have advanced lastApplied", i)
 			} else {
-				Expect(f.lastApplied.Load()).To(Equal(uint64(0)), "iteration %d: abandoned must not have advanced lastApplied", i)
+				Expect(f.LastAppliedIndex()).To(Equal(uint64(0)), "iteration %d: abandoned must not have advanced lastApplied", i)
 			}
 			f.Close()
 		}
@@ -110,6 +111,6 @@ var _ = Describe("fsm skip-marker CAS", func() {
 	It("ignores non-command log entries", func() {
 		f := newFSM()
 		f.Apply(&raft.Log{Type: raft.LogNoop, Index: 7})
-		Expect(f.lastApplied.Load()).To(Equal(uint64(0)))
+		Expect(f.LastAppliedIndex()).To(Equal(uint64(0)))
 	})
 })

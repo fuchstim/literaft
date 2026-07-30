@@ -13,9 +13,9 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/fsm"
-	raftgate "github.com/fuchstim/literaft/internal/raft/gate"
-	"github.com/fuchstim/literaft/log"
+	"github.com/fuchstim/literaft/raft/fsm"
+	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
+	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
 
@@ -114,7 +114,7 @@ func (c *TCPCluster) ReadyLeader() *Node {
 	var leader *Node
 	Eventually(c.t, 10*time.Second, 20*time.Millisecond, func() bool {
 		for _, n := range c.nodes {
-			if n.Raft.State() == raft.Leader && n.Log.Ready() {
+			if n.Raft.State() == raft.Leader && n.Gate.Ready() {
 				leader = n
 				return true
 			}
@@ -171,9 +171,10 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 // a real file under s.dataDir instead), a real fsm.FSM over s.dbPath, a
 // real hraft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
-// restarting an already-bootstrapped node is a harmless no-op), a
-// log.SingleWriterLog adapting it, and a driver.Driver registered under a
-// fresh database/sql alias.
+// restarting an already-bootstrapped node is a harmless no-op), a write
+// gate wrapping it (leadergate.Gate, or forwardinggate.Gate wrapping one
+// when hub is non-nil), and a driver.Driver registered under a fresh
+// database/sql alias.
 func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 	t.Helper()
 
@@ -230,18 +231,18 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 		}
 	}
 
-	l := log.NewSingleWriterLog(r, log.WithApplyTimeout(o.applyTimeout))
-
-	// With forwarding enabled, the driver's adapter is a ForwardingLog
-	// wrapping l; on a follower it forwards writes to the leader through the
-	// shared in-process hub instead of rejecting them.
-	var adapter raftgate.LogAdapter = l
+	// With forwarding enabled, the write gate is a forwardinggate.Gate wrapping
+	// a leadergate.Gate; on a follower it forwards writes to the leader
+	// through the shared in-process hub instead of rejecting them.
+	var g Gate
 	if hub != nil {
-		adapter = log.NewForwardingLog(l, hub.Transport(raft.ServerAddress(s.addr)), f,
-			log.WithForwardTimeout(o.applyTimeout), log.WithHandlerLockTimeout(o.applyTimeout))
+		g = forwardinggate.New(r, f, hub.Transport(raft.ServerAddress(s.addr)),
+			forwardinggate.WithForwardTimeout(o.applyTimeout), forwardinggate.WithHandlerLockTimeout(o.applyTimeout))
+	} else {
+		g = leadergate.New(r, f, leadergate.WithApplyTimeout(o.applyTimeout))
 	}
 
-	drv := driver.New(f, adapter)
+	drv := driver.New(f, g)
 	alias := "literaft-testutils-" + uuid.NewString()
 	sql.Register(alias, drv)
 	db, err := sql.Open(alias, "")
@@ -256,7 +257,7 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 		FSM:    f,
 		DBPath: s.dbPath,
 		Driver: drv,
-		Log:    l,
+		Gate:   g,
 		DB:     db,
 		shutdown: func() error {
 			var errs []error
@@ -264,7 +265,7 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 				errs = append(errs, err)
 			}
 			drv.Close()
-			l.Close()
+			g.Close()
 			if err := r.Shutdown().Error(); err != nil {
 				errs = append(errs, fmt.Errorf("raft shutdown: %w", err))
 			}

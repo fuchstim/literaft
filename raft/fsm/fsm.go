@@ -11,7 +11,7 @@ import (
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
-	raftproto "github.com/fuchstim/literaft/internal/raft/proto"
+	raftproto "github.com/fuchstim/literaft/raft/proto"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"
@@ -123,6 +123,10 @@ func (f *FSM) DBPath() string {
 	return f.dbPath
 }
 
+func (f *FSM) LastAppliedIndex() uint64 {
+	return f.lastApplied.Load()
+}
+
 func (f *FSM) CreateSkipMarker(entryID string) {
 	f.skipMarkersMu.Lock()
 	defer f.skipMarkersMu.Unlock()
@@ -178,33 +182,12 @@ func (f *FSM) BeginHeldApply(ctx context.Context, entryID string) (func(), error
 	}, nil
 }
 
-func (f *FSM) tryConsumeSkipMarker(entryID string, index uint64) bool {
-	f.skipMarkersMu.Lock()
-	defer f.skipMarkersMu.Unlock()
-
-	m, ok := f.skipMarkers[entryID]
-	if !ok || m.state != skipMarkerPending {
-		return false
-	}
-
-	m.state = skipMarkerSkipped
-	f.lastApplied.Store(index)
-	close(m.done)
-	return true
-}
-
-func (f *FSM) getLoan(id string) *walappender.HeldLock {
-	f.loansMu.Lock()
-	defer f.loansMu.Unlock()
-	return f.loans[id]
-}
-
 func (f *FSM) Apply(log *raft.Log) any {
 	if log.Type != raft.LogCommand {
 		return nil
 	}
 
-	entry := &raftproto.Entry{}
+	entry := &raftproto.LogEntry{}
 	if err := proto.Unmarshal(log.Data, entry); err != nil {
 		f.logger.Error("failed to unmarshal committed entry", "index", log.Index, "error", err)
 		panic(fmt.Sprintf("failed to unmarshal committed entry at index %d: %v", log.Index, err))
@@ -230,7 +213,7 @@ func (f *FSM) Apply(log *raft.Log) any {
 	if loan := f.getLoan(entryID); loan != nil {
 		f.logger.Debug("applying forwarded entry under loaned lock",
 			"index", index, "id", entryID, "pages", len(txn.Pages), "nTruncate", txn.NTruncate)
-		if err := f.walAppender.AppendTransactionUnderLock(loan, txn, func() { f.lastApplied.Store(index) }); err != nil {
+		if err := f.walAppender.AppendFramesUnderLock(loan, txn.Frames(), func() { f.lastApplied.Store(index) }); err != nil {
 			f.logger.Error("failed to append forwarded entry", "index", index, "id", entryID, "error", err)
 			panic(fmt.Sprintf("failed to append forwarded entry at index %d: %v", index, err))
 		}
@@ -240,7 +223,7 @@ func (f *FSM) Apply(log *raft.Log) any {
 	// Otherwise materialize under our own write lock.
 	f.logger.Debug("applying entry",
 		"index", index, "id", entryID, "pages", len(txn.Pages), "nTruncate", txn.NTruncate)
-	if err := f.walAppender.AppendTransaction(txn, func() { f.lastApplied.Store(index) }); err != nil {
+	if err := f.walAppender.AppendFrames(txn.Frames(), func() { f.lastApplied.Store(index) }); err != nil {
 		f.logger.Error("failed to append entry", "index", index, "id", entryID, "error", err)
 		panic(fmt.Sprintf("failed to append entry at index %d: %v", index, err))
 	}
@@ -262,9 +245,30 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	if err != nil {
 		return fmt.Errorf("failed to restore snapshot: %w", err)
 	}
-	f.lastApplied.Store(header.LastAppliedIndex)
+	f.lastApplied.Store(header.LastAppliedIndex())
 
 	return nil
+}
+
+func (f *FSM) tryConsumeSkipMarker(entryID string, index uint64) bool {
+	f.skipMarkersMu.Lock()
+	defer f.skipMarkersMu.Unlock()
+
+	m, ok := f.skipMarkers[entryID]
+	if !ok || m.state != skipMarkerPending {
+		return false
+	}
+
+	m.state = skipMarkerSkipped
+	f.lastApplied.Store(index)
+	close(m.done)
+	return true
+}
+
+func (f *FSM) getLoan(id string) *walappender.HeldLock {
+	f.loansMu.Lock()
+	defer f.loansMu.Unlock()
+	return f.loans[id]
 }
 
 var _ raft.FSMSnapshot = (*fsmSnapshot)(nil)

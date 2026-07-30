@@ -12,7 +12,7 @@ import (
 // releases the withheld commit frame to disk; any other error aborts the
 // transaction, and the commit frame never reaches disk.
 type Gate interface {
-	ProposeTransaction(frames []*wal.Frame, nTruncate uint32) error
+	ProposeTransaction(frames []*wal.Frame) error
 }
 
 type CodedError interface {

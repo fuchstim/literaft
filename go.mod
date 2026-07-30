@@ -1,6 +1,6 @@
 module github.com/fuchstim/literaft
 
-go 1.25.2
+go 1.26.5
 
 require (
 	github.com/Jille/raft-grpc-transport v1.6.1

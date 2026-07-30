@@ -86,7 +86,7 @@ func (f *gatedWALFile) writeFrameHeader(p []byte, off int64) (int, error) {
 		// WAL frame checksums for a committed transaction can be rewritten (same offset, same pgno)
 		// The data stays unchanged, only the checksum bytes change.
 		if pending, seen := f.currentTxFrameOffsets[off]; seen && pending.Header.PgNo() == h.PgNo() {
-			pending.Header = h
+			pending.Header = &h
 
 			return f.File.WriteAt(p, off)
 		}
@@ -131,10 +131,10 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
 	}
 
-	pendingHeader := *f.pendingFrameHeader
+	pendingHeader := f.pendingFrameHeader
 	f.pendingFrameHeader = nil
 
-	frame := &wal.Frame{pendingHeader, slices.Clone(p)}
+	frame := &wal.Frame{Header: pendingHeader, Data: slices.Clone(p)}
 	f.currentTxFrames = append(f.currentTxFrames, frame)
 	f.currentTxFrameOffsets[off-wal.FrameHeaderSize] = frame
 
@@ -146,7 +146,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 	frames, nTruncate := f.currentTxFrames, frame.Header.NTruncate()
 	f.currentTxFrames = nil
 
-	if err := f.gate.ProposeTransaction(frames, nTruncate); err != nil {
+	if err := f.gate.ProposeTransaction(frames); err != nil {
 		f.logger.Info("gate rejected transaction; discarding withheld commit frame",
 			"offset", off-wal.FrameHeaderSize, "frames", len(frames), "nTruncate", nTruncate, "error", err)
 
