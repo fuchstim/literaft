@@ -134,7 +134,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 	pendingHeader := f.pendingFrameHeader
 	f.pendingFrameHeader = nil
 
-	frame := &wal.Frame{pendingHeader, slices.Clone(p)}
+	frame := &wal.Frame{Header: pendingHeader, Data: slices.Clone(p)}
 	f.currentTxFrames = append(f.currentTxFrames, frame)
 	f.currentTxFrameOffsets[off-wal.FrameHeaderSize] = frame
 

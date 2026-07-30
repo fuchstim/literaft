@@ -113,7 +113,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 			nTruncate = nPages
 		}
 
-		frame := &wal.Frame{}
+		frame := &wal.Frame{Header: &wal.FrameHeader{}}
 		frame.Header.SetPgNo(nPages)
 		frame.Header.SetNTruncate(nTruncate)
 		frame.Data = curPage
