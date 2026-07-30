@@ -150,7 +150,7 @@ func (g *Gate) drain(term uint64) {
 		if err := g.raft.Barrier(g.timeout).Error(); err == nil {
 			g.readyMu.Lock()
 			defer g.readyMu.Unlock()
-			if g.raft.State() == raft.Leader && g.raft.CurrentTerm() == term && g.fsm.LastAppliedIndex() == g.raft.CommitIndex() {
+			if g.raft.State() == raft.Leader && g.raft.CurrentTerm() == term {
 				g.ready = true
 				g.logger.Info("drained apply backlog; ready to serve writes", "term", term)
 			}

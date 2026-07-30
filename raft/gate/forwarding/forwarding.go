@@ -68,7 +68,7 @@ func (g *Gate) Ready() bool {
 		return g.baseGate.Ready()
 	}
 
-	return g.fsm.LastAppliedIndex() == g.raft.CommitIndex()
+	return true
 }
 
 func (g *Gate) Close() { g.baseGate.Close() }

@@ -387,6 +387,17 @@ size to M3's shm work.
   `SingleWriterLog.Apply` and `Gate`'s opaque error wrap. Subsumes `#28`
   (`NotLeaderError` now maps to `READONLY` so a client can tell redirect from
   retry).
+- [**`leadergate`/`forwardinggate` `Ready()` doesn't actually prove the local
+  FSM is caught up to the latest committed entry**](https://github.com/fuchstim/literaft/issues/102):
+  `leadergate.Gate.drain()` only checks `raft.State()`/`CurrentTerm()` after
+  a `Barrier` resolves, not an index comparison against the raft log. An
+  attempted `fsm.LastAppliedIndex() == raft.CommitIndex()` check was reverted
+  after wiring `internal/testutils`'s `NewTCPCluster` up to
+  `leadergate`/`forwardinggate` for the first time showed it can never hold:
+  hraft's `runFSM` only calls `raft.FSM.Apply` for `LogCommand` entries, so
+  `lastApplied` can't count `LogConfiguration`/`LogBarrier`/`LogNoop` entries
+  the way `raft.CommitIndex()` does, and the first bootstrap/election entry
+  permanently desyncs the two. Not started.
 
 ## M8: Library polish & packaging
 

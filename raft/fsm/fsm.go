@@ -184,7 +184,6 @@ func (f *FSM) BeginHeldApply(ctx context.Context, entryID string) (func(), error
 
 func (f *FSM) Apply(log *raft.Log) any {
 	if log.Type != raft.LogCommand {
-		f.lastApplied.Store(log.Index)
 		return nil
 	}
 
@@ -201,13 +200,11 @@ func (f *FSM) Apply(log *raft.Log) any {
 	// path: consume the marker, don't re-materialize.
 	if f.tryConsumeSkipMarker(entryID, index) {
 		f.logger.Debug("consumed skip marker; entry already published locally", "index", index, "id", entryID)
-		f.lastApplied.Store(log.Index)
 		return nil
 	}
 
 	txn := entry.GetTransaction()
 	if txn == nil {
-		f.lastApplied.Store(index)
 		return nil
 	}
 
