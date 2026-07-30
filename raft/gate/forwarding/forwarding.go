@@ -177,7 +177,7 @@ func (g *Gate) handleRequest(ctx context.Context, req *raftproto.ForwardRequest)
 
 	id := req.GetEntry().GetHeader().GetId()
 
-	if g.raft.State() == raft.Leader {
+	if g.raft.State() != raft.Leader {
 		g.logger.Info("redirecting mis-routed forwarded write", "id", id, "leader", g.raft.Leader())
 		return &raftproto.ForwardResponse{
 			Status:     raftproto.ForwardResponse_STATUS_NOT_LEADER,
