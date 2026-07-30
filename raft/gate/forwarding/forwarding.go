@@ -64,6 +64,10 @@ func New(r *raft.Raft, f *fsm.FSM, transport LeaderTransport, opts ...Option) *G
 }
 
 func (g *Gate) Ready() bool {
+	if g.raft.State() == raft.Leader {
+		return g.baseGate.Ready()
+	}
+
 	return g.fsm.LastAppliedIndex() == g.raft.CommitIndex()
 }
 
