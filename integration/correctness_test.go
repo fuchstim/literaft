@@ -12,7 +12,7 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	ncrdriver "github.com/ncruces/go-sqlite3/driver"
 
-	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
+	rafterrors "github.com/fuchstim/literaft/raft/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -299,11 +299,11 @@ func waitFollowerCurrent(t testutils.TB, c *testutils.TCPCluster, n *testutils.N
 	testutils.Eventually(t, 10*time.Second, 5*time.Millisecond, func() bool {
 		var maxApplied uint64
 		for _, m := range c.Nodes() {
-			if a := m.FSM.LastApplied(); a > maxApplied {
+			if a := m.FSM.LastAppliedIndex(); a > maxApplied {
 				maxApplied = a
 			}
 		}
-		return n.FSM.LastApplied() >= maxApplied
+		return n.FSM.LastAppliedIndex() >= maxApplied
 	}, fmt.Sprintf("follower %s to catch up before re-running a no-op conditional write", n.ID))
 }
 

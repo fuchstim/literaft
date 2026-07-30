@@ -1,6 +1,7 @@
-// Package forward is a reference log.LeaderTransport: a small gRPC service
-// that ships opaque byte blobs from a follower to the leader for write
-// forwarding. It runs on every node; only the current leader accepts work.
+// Package forward is a reference forwardinggate.LeaderTransport: a small gRPC
+// service that ships a ForwardRequest/ForwardResponse from a follower to the
+// leader for write forwarding. It runs on every node; only the current leader
+// accepts work.
 //
 // A caller-supplied resolver maps a leader's raft address to its forward dial
 // address. When the raft transport already is gRPC on that address, register
@@ -18,15 +19,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	forwardpb "github.com/fuchstim/literaft/cmd/literaft/forward/proto"
-	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
-	"github.com/fuchstim/literaft/log"
+	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
+	raftproto "github.com/fuchstim/literaft/raft/proto"
 )
 
-var _ log.LeaderTransport = (*Transport)(nil)
+var _ forwardinggate.LeaderTransport = (*Transport)(nil)
 
-// Transport implements log.LeaderTransport over gRPC.
+// Transport implements forwardinggate.LeaderTransport over gRPC, marshaling
+// each ForwardRequest/ForwardResponse into the wire Envelope's opaque bytes.
 type Transport struct {
 	// resolve maps a leader's raft.ServerAddress to the dial address of that
 	// node's forward gRPC service. For a node whose raft transport already is
@@ -35,7 +39,7 @@ type Transport struct {
 	dialOptions []grpc.DialOption
 
 	handlerMu sync.RWMutex
-	handler   func(ctx context.Context, request []byte) ([]byte, error)
+	handler   func(ctx context.Context, request *raftproto.ForwardRequest) *raftproto.ForwardResponse
 
 	connMu sync.Mutex
 	conns  map[string]*grpc.ClientConn
@@ -60,29 +64,40 @@ func (t *Transport) Register(g grpc.ServiceRegistrar) {
 	forwardpb.RegisterForwardingServer(g, &server{t: t})
 }
 
-// Handle implements log.LeaderTransport.
-func (t *Transport) Handle(handler func(ctx context.Context, request []byte) ([]byte, error)) {
+// Handle implements forwardinggate.LeaderTransport.
+func (t *Transport) Handle(handler func(ctx context.Context, request *raftproto.ForwardRequest) *raftproto.ForwardResponse) {
 	t.handlerMu.Lock()
 	t.handler = handler
 	t.handlerMu.Unlock()
 }
 
-// Propose implements log.LeaderTransport: it dials the leader's forward
-// service and issues one Propose RPC, returning the response payload bytes.
-func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request []byte) ([]byte, error) {
+// Propose implements forwardinggate.LeaderTransport: it dials the leader's
+// forward service and issues one Propose RPC, returning the decoded response.
+func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request *raftproto.ForwardRequest) (*raftproto.ForwardResponse, error) {
 	conn, err := t.conn(t.resolve(leader))
 	if err != nil {
 		// No client was created, so nothing was transmitted to the leader: a
 		// proven non-delivery, which is a clean retryable rejection.
 		return nil, rafterrors.NewNotAppliedError("forward request not delivered to the leader", err)
 	}
+
+	payload, err := proto.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("marshal forward request: %w", err)
+	}
+
 	// A failed RPC is deliberately left ambiguous: gRPC can't prove a unary
 	// call that errored wasn't already received and processed.
-	resp, err := forwardpb.NewForwardingClient(conn).Propose(ctx, &forwardpb.Envelope{Payload: request})
+	env, err := forwardpb.NewForwardingClient(conn).Propose(ctx, &forwardpb.Envelope{Payload: payload})
 	if err != nil {
 		return nil, err
 	}
-	return resp.GetPayload(), nil
+
+	resp := &raftproto.ForwardResponse{}
+	if err := proto.Unmarshal(env.GetPayload(), resp); err != nil {
+		return nil, fmt.Errorf("unmarshal forward response: %w", err)
+	}
+	return resp, nil
 }
 
 // Close closes all cached client connections.
@@ -132,9 +147,16 @@ func (s *server) Propose(ctx context.Context, env *forwardpb.Envelope) (*forward
 	if handler == nil {
 		return nil, status.Error(codes.Unavailable, "forward handler not registered")
 	}
-	respBytes, err := handler(ctx, env.GetPayload())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "forward handler: %v", err)
+
+	req := &raftproto.ForwardRequest{}
+	if err := proto.Unmarshal(env.GetPayload(), req); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unmarshal forward request: %v", err)
 	}
-	return &forwardpb.Envelope{Payload: respBytes}, nil
+
+	resp := handler(ctx, req)
+	payload, err := proto.Marshal(resp)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal forward response: %v", err)
+	}
+	return &forwardpb.Envelope{Payload: payload}, nil
 }

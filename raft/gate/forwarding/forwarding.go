@@ -44,7 +44,9 @@ func New(r *raft.Raft, f *fsm.FSM, transport LeaderTransport, opts ...Option) *G
 	for _, opt := range opts {
 		opt(&o)
 	}
-	o.baseGateOptions = append(o.baseGateOptions, leadergate.WithLogger(o.logger))
+	if o.baseGate == nil {
+		o.baseGate = leadergate.New(r, f, leadergate.WithLogger(o.logger))
+	}
 
 	g := &Gate{
 		raft:      r,
@@ -55,11 +57,17 @@ func New(r *raft.Raft, f *fsm.FSM, transport LeaderTransport, opts ...Option) *G
 		forwardTimeout:     o.forwardTimeout,
 		handlerLockTimeout: o.handlerLockTimeout,
 
-		baseGate: leadergate.New(r, f, o.baseGateOptions...),
+		baseGate: o.baseGate,
 	}
 	transport.Handle(g.handleRequest)
 	return g
 }
+
+func (g *Gate) Ready() bool {
+	return g.fsm.LastAppliedIndex() == g.raft.CommitIndex()
+}
+
+func (g *Gate) Close() { g.baseGate.Close() }
 
 func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 	e := &raftproto.LogEntry{

@@ -14,9 +14,9 @@ func defaultOptions() options {
 	}
 }
 
-// WithLogger threads an hclog.Logger through the gate and registered VFS this
-// Driver owns, each under a named child. Defaults to a no-op logger, so an
-// embedded Driver stays silent unless the caller opts in.
+// WithLogger threads an hclog.Logger through the registered VFS this Driver
+// owns, under a named child. Defaults to a no-op logger, so an embedded
+// Driver stays silent unless the caller opts in.
 func WithLogger(l hclog.Logger) Option {
 	return func(o *options) {
 		if l != nil {

@@ -13,7 +13,7 @@ type options struct {
 	forwardTimeout     time.Duration
 	handlerLockTimeout time.Duration
 	logger             hclog.Logger
-	baseGateOptions    []leadergate.Option
+	baseGate           *leadergate.Gate
 }
 
 func defaultOptions() options {
@@ -21,7 +21,7 @@ func defaultOptions() options {
 		forwardTimeout:     2 * time.Second,
 		handlerLockTimeout: 1 * time.Second,
 		logger:             hclog.NewNullLogger(),
-		baseGateOptions:    nil,
+		baseGate:           nil,
 	}
 }
 
@@ -41,6 +41,6 @@ func WithHandlerLockTimeout(d time.Duration) Option {
 	return func(o *options) { o.handlerLockTimeout = d }
 }
 
-func WithBaseGateOptions(opts ...leadergate.Option) Option {
-	return func(o *options) { o.baseGateOptions = opts }
+func WithBaseGate(g *leadergate.Gate) Option {
+	return func(o *options) { o.baseGate = g }
 }

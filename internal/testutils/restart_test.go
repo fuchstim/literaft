@@ -36,7 +36,7 @@ import (
 func assertRestarted(restarted *testutils.Node, wantRows int64, minApplied uint64) {
 	GinkgoHelper()
 	testutils.Eventually(GinkgoT(), 10*time.Second, 20*time.Millisecond, func() bool {
-		if restarted.FSM.LastApplied() < minApplied {
+		if restarted.FSM.LastAppliedIndex() < minApplied {
 			return false
 		}
 		n, err := rowCount(restarted)
@@ -73,7 +73,7 @@ var _ = Describe("node restart", func() {
 
 		// The applied index the restart must replay back up to, captured
 		// while quiescent so no in-flight write moves it.
-		target := follower.FSM.LastApplied()
+		target := follower.FSM.LastAppliedIndex()
 		restarted := c.RestartNode(GinkgoT(), c.IndexOf(follower))
 		assertRestarted(restarted, 20, target)
 	})
@@ -92,7 +92,7 @@ var _ = Describe("node restart", func() {
 		// directly, never routed through the follower-apply write path --
 		// restart must rebuild those via replay just as faithfully as a
 		// follower's.
-		target := leader.FSM.LastApplied()
+		target := leader.FSM.LastAppliedIndex()
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
 		assertRestarted(restarted, 20, target)
@@ -150,7 +150,7 @@ var _ = Describe("node restart", func() {
 			return err == nil && n == 40
 		}, "follower to catch up")
 
-		target := follower.FSM.LastApplied()
+		target := follower.FSM.LastAppliedIndex()
 		restarted := c.RestartNode(GinkgoT(), c.IndexOf(follower))
 		assertRestarted(restarted, 40, target)
 	})
@@ -165,7 +165,7 @@ var _ = Describe("node restart", func() {
 
 		leader := writeRowsAndForceSnapshot(c, 40)
 
-		target := leader.FSM.LastApplied()
+		target := leader.FSM.LastAppliedIndex()
 		idx := c.IndexOf(leader)
 		restarted := c.RestartNode(GinkgoT(), idx)
 		assertRestarted(restarted, 40, target)

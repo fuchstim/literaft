@@ -9,9 +9,9 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	"github.com/fuchstim/literaft/driver"
-	rafterrors "github.com/fuchstim/literaft/internal/raft/gate/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
-	"github.com/fuchstim/literaft/log"
+	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -23,15 +23,15 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		l := log.NewSingleWriterLog(n.Raft, log.WithApplyTimeout(2*time.Second))
-		defer l.Close()
-		drv := driver.New(n.FSM, l)
+		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		defer gate.Close()
+		drv := driver.New(n.FSM, gate)
 		defer drv.Close()
 
 		db := openDB(drv)
 		defer db.Close()
 
-		Eventually(l.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		_, err := db.ExecContext(ctx, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -52,9 +52,9 @@ var _ = Describe("Driver", func() {
 
 		drivers := make(map[*testutils.Node]*driver.Driver, len(c.Nodes()))
 		for _, n := range c.Nodes() {
-			l := log.NewSingleWriterLog(n.Raft, log.WithApplyTimeout(2*time.Second))
-			defer l.Close()
-			d := driver.New(n.FSM, l)
+			gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+			defer gate.Close()
+			d := driver.New(n.FSM, gate)
 			defer d.Close()
 			drivers[n] = d
 		}
@@ -81,13 +81,13 @@ var _ = Describe("Driver", func() {
 		c2 := testutils.NewInmemCluster(GinkgoT(), 1)
 		defer c2.Shutdown()
 
-		l1 := log.NewSingleWriterLog(c1.Nodes()[0].Raft)
-		defer l1.Close()
-		drv1 := driver.New(c1.Nodes()[0].FSM, l1)
+		gate1 := leadergate.New(c1.Nodes()[0].Raft, c1.Nodes()[0].FSM)
+		defer gate1.Close()
+		drv1 := driver.New(c1.Nodes()[0].FSM, gate1)
 		defer drv1.Close()
-		l2 := log.NewSingleWriterLog(c2.Nodes()[0].Raft)
-		defer l2.Close()
-		drv2 := driver.New(c2.Nodes()[0].FSM, l2)
+		gate2 := leadergate.New(c2.Nodes()[0].Raft, c2.Nodes()[0].FSM)
+		defer gate2.Close()
+		drv2 := driver.New(c2.Nodes()[0].FSM, gate2)
 		defer drv2.Close()
 
 		Expect(drv1.VFSName()).NotTo(Equal(drv2.VFSName()))
@@ -97,8 +97,8 @@ var _ = Describe("Driver", func() {
 		db2 := openDB(drv2)
 		defer db2.Close()
 
-		Eventually(l1.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
-		Eventually(l2.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(gate1.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(gate2.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		_, err := db1.ExecContext(ctx, "CREATE TABLE only1 (id INTEGER PRIMARY KEY)")
@@ -113,13 +113,13 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		l := log.NewSingleWriterLog(n.Raft, log.WithApplyTimeout(2*time.Second))
-		defer l.Close()
-		drv := driver.New(n.FSM, l)
+		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		defer gate.Close()
+		drv := driver.New(n.FSM, gate)
 
 		db := openDB(drv)
 
-		Eventually(l.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		vfsName := drv.VFSName()
 		Expect(sqlite3vfs.Find(vfsName)).NotTo(BeNil())
@@ -127,7 +127,7 @@ var _ = Describe("Driver", func() {
 		// db.Close() alone must not tear down the Driver.
 		Expect(db.Close()).To(Succeed())
 		Expect(sqlite3vfs.Find(vfsName)).NotTo(BeNil())
-		Expect(l.Ready()).To(BeTrue())
+		Expect(gate.Ready()).To(BeTrue())
 
 		drv.Close()
 		Expect(sqlite3vfs.Find(vfsName)).To(BeNil())
@@ -141,16 +141,16 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		l := log.NewSingleWriterLog(n.Raft, log.WithApplyTimeout(2*time.Second))
-		defer l.Close()
-		drv := driver.New(n.FSM, l)
+		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		defer gate.Close()
+		drv := driver.New(n.FSM, gate)
 		defer drv.Close()
 
 		db := openDB(drv)
 		defer db.Close()
 		db.SetMaxOpenConns(2)
 
-		Eventually(l.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		c1, err := db.Conn(ctx)
