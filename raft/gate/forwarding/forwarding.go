@@ -81,6 +81,9 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 		},
 	}
 
+	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
+	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
+
 	err := g.baseGate.ProposeEntry(e)
 	var nle *rafterrors.NotLeaderError
 	if err == nil || !errors.As(err, &nle) {
@@ -102,9 +105,6 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), g.forwardTimeout)
 	defer cancel()
-
-	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
-	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
 
 	return g.forwardToLeader(ctx, req, nle.Leader)
 }
