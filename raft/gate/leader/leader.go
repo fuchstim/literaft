@@ -62,6 +62,9 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 		},
 	}
 
+	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
+	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
+
 	return g.ProposeEntry(e)
 }
 
@@ -79,9 +82,6 @@ func (g *Gate) ProposeEntry(e *raftproto.LogEntry) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal entry: %w", err)
 	}
-
-	g.fsm.CreateSkipMarker(e.GetHeader().GetId())
-	defer g.fsm.DeleteSkipMarker(e.GetHeader().GetId())
 
 	g.logger.Debug("proposing transaction",
 		"id", e.GetHeader().GetId(), "pages", len(e.GetTransaction().GetPages()), "nTruncate", e.GetTransaction().GetNTruncate())
