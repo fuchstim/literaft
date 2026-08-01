@@ -117,12 +117,13 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 	resCh := make(chan error, 1)
 	go func() { resCh <- w.AppendFramesUnderLockChan(l, frameCh) }()
 
+	var readErr error
 	for {
 		nTruncate := uint32(0)
 		if _, err := io.ReadFull(r, nextPage); err != nil {
 			if !errors.Is(err, io.EOF) {
-				close(frameCh)
-				return SnapshotHeader{}, fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
+				readErr = fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
+				break
 			}
 
 			// If we hit EOF, `curPage` was the last page in the snapshot.
@@ -145,7 +146,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 	}
 	close(frameCh)
 
-	if err := <-resCh; err != nil {
+	if err := errors.Join(readErr, <-resCh); err != nil {
 		return SnapshotHeader{}, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
 	}
 
