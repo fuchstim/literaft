@@ -213,8 +213,7 @@ and accepted only if it was computed on the leader's current applied state
 state). To reject follower writes outright instead (returning a leader hint the
 client redirects on), pass the plain `log.SingleWriterLog` to `driver.New` and
 drop the forwarding transport. `cmd/literaft` forwards by default and switches
-to rejection with `-forward-writes=false`. See
-[`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+to rejection with `-forward-writes=false`. See [`log.ForwardingLog`](log/forward.go).
 
 ## Running a real cluster
 
@@ -297,7 +296,7 @@ follower's local, possibly-stale snapshot.
 
 A read-modify-write that must be evaluated against the latest committed cluster
 state should be issued on the leader (or after ensuring the follower has caught
-up). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+up).
 
 ## Comparison
 
@@ -330,14 +329,16 @@ pre-1.0.
 
 ## Further reading
 
-- [`docs/DESIGN.md`](docs/DESIGN.md): full design (write/read/checkpoint/
-  follower-apply paths, external-reader safety, conflict handling).
-- [`docs/DECISIONS.md`](docs/DECISIONS.md): ADR log of rejected alternatives.
-- [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md): the write-forwarding
-  protocol (base-index check, skip-marker state machine, failure matrix).
-- [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md): on-disk byte layout reference.
-- [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md): notes on building on
-  `ncruces/go-sqlite3`.
+There's no separate design doc; the code is the reference. Start from:
+
+- [`internal/vfs`](internal/vfs): the commit-frame gate on the write path.
+- [`internal/fsm/walappender`](internal/fsm/walappender) and
+  [`internal/fsm/walappender/shm`](internal/fsm/walappender/shm): follower-apply,
+  including the custom wal-index shared-memory implementation.
+- [`internal/raft/gate`](internal/raft/gate) and [`log`](log): the RAFT log
+  adapter seam, `log.SingleWriterLog`, and `log.ForwardingLog`.
+- [`fsm`](fsm): the object owning a node's SQLite connection, walappender, and
+  snapshotter.
 
 ## Contributing
 
@@ -355,6 +356,3 @@ using:
 make test/unit          # Run unit tests (fast)
 make test/correctness   # Run correctness tests (slow)
 ```
-
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind it.
