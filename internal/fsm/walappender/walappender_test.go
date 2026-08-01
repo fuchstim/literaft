@@ -632,4 +632,49 @@ var _ = Describe("WALAppender.AppendFramesUnderLockChan", func() {
 		Expect(queryInt(follower, "SELECT count(*) FROM t")).To(Equal(int64(1)))
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
 	})
+
+	It("drains remaining frames after a mid-stream error instead of deadlocking the sender", func() {
+		dir := GinkgoT().TempDir()
+
+		followerPath := filepath.Join(dir, "follower-chan-error.db")
+		primeFollowerWALMode(followerPath)
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+		pageSize := uint32(queryInt(follower, "PRAGMA page_size"))
+
+		appender, err := walappender.Open(followerPath, pageSize, -1, 0, hclog.NewNullLogger())
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		h, err := appender.AcquireWriteLock(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		defer h.Release()
+
+		frameCh := make(chan *wal.Frame)
+		resCh := make(chan error, 1)
+		go func() { resCh <- appender.AppendFramesUnderLockChan(h, frameCh) }()
+
+		badFrame := &wal.Frame{Header: &wal.FrameHeader{}, Data: make([]byte, 1)} // wrong page size, forces an error on the first frame
+
+		goodFrame := &wal.Frame{Header: &wal.FrameHeader{}, Data: make([]byte, pageSize)}
+		goodFrame.Header.SetPgNo(1)
+
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			frameCh <- badFrame
+			// Must not block even though the consumer already errored on
+			// badFrame; it keeps draining until frameCh closes.
+			frameCh <- goodFrame
+			close(frameCh)
+		}()
+
+		Eventually(sent, time.Second).Should(BeClosed())
+
+		var appendErr error
+		Eventually(resCh, time.Second).Should(Receive(&appendErr))
+		Expect(appendErr).To(HaveOccurred())
+	})
 })

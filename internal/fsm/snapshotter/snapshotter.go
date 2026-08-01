@@ -15,6 +15,8 @@ import (
 	"github.com/ncruces/go-sqlite3"
 )
 
+const restoreFrameBufferSize = 4
+
 type Snapshotter struct {
 	dbPath   string
 	pageSize uint32
@@ -111,7 +113,8 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 	}
 	defer l.Release()
 
-	frameCh, resCh := make(chan *wal.Frame), make(chan error)
+	frameCh := make(chan *wal.Frame, restoreFrameBufferSize)
+	resCh := make(chan error, 1)
 	go func() { resCh <- w.AppendFramesUnderLockChan(l, frameCh) }()
 
 	for {
