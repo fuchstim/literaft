@@ -29,6 +29,16 @@ type gatedWALFile struct {
 	currentTxCommitted bool
 	// Highest offset seen in the WAL file. Used to detect WAL rewinds
 	maxOffset int64
+
+	// Set when a header's offset and pgno match a frame from the
+	// transaction that just committed, pending confirmation from the next
+	// write. A further header write confirms a genuine checksum-only
+	// rewrite (never followed by a data write, since the page content
+	// doesn't change). A data write at this offset means the match was
+	// coincidental: it belongs to a new transaction that happened to reuse
+	// the offset and pgno.
+	pendingRewriteHeader *wal.FrameHeader
+	pendingRewriteOffset int64
 }
 
 func newGatedWALFile(base sqlite3vfs.File, gate Gate, logger hclog.Logger) (*gatedWALFile, error) {
@@ -83,14 +93,20 @@ func (f *gatedWALFile) writeFrameHeader(p []byte, off int64) (int, error) {
 
 	h := wal.FrameHeader(p)
 	if f.currentTxCommitted {
-		// WAL frame checksums for a committed transaction can be rewritten (same offset, same pgno)
-		// The data stays unchanged, only the checksum bytes change.
+		// WAL frame checksums for a committed transaction can be rewritten (same offset, same pgno),
+		// with the data unchanged and only the checksum bytes different. A new transaction's first
+		// frame can coincidentally match on both counts too, so stage this as a candidate rather
+		// than committing to that reading yet; whether a data write follows next resolves it.
 		if pending, seen := f.currentTxFrameOffsets[off]; seen && pending.Header.PgNo() == h.PgNo() {
 			pending.Header = &h
+			f.pendingRewriteHeader = &h
+			f.pendingRewriteOffset = off
 
 			return f.File.WriteAt(p, off)
 		}
 	}
+
+	f.pendingRewriteHeader = nil
 
 	if f.currentTxCommitted || off <= f.maxOffset {
 		// This is either a new transaction (currentTxCommitted) or a WAL rewind (off <= maxOffset).
@@ -118,7 +134,21 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 		return 0, sqlite3vfs.SystemError(err, sqlite3.IOERR_WRITE)
 	}
 
-	if frame, seen := f.currentTxFrameOffsets[off-wal.FrameHeaderSize]; seen {
+	headerOffset := off - wal.FrameHeaderSize
+
+	if f.pendingRewriteHeader != nil && headerOffset == f.pendingRewriteOffset {
+		// A data write at this offset disproves the staged checksum-rewrite reading, since a
+		// genuine fixup is header-only. It's actually a new transaction's frame that reused the
+		// offset and pgno; recover using the header already captured, discarding the stale
+		// tracking state it was wrongly folded into.
+		header := f.pendingRewriteHeader
+		f.pendingRewriteHeader = nil
+		f.resetCurrentTx()
+		f.pendingFrameHeader = header
+		f.maxOffset = headerOffset
+	}
+
+	if frame, seen := f.currentTxFrameOffsets[headerOffset]; seen {
 		// If the same page gets updated multiple times in the same transaction,
 		// previous frames for that page can be overwritten with the new data.
 		// The header remains the same, only the data part is updated.
@@ -136,7 +166,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 
 	frame := &wal.Frame{Header: pendingHeader, Data: slices.Clone(p)}
 	f.currentTxFrames = append(f.currentTxFrames, frame)
-	f.currentTxFrameOffsets[off-wal.FrameHeaderSize] = frame
+	f.currentTxFrameOffsets[headerOffset] = frame
 
 	// If this is not a commit frame, don't withhold
 	if !frame.Header.IsCommit() {
@@ -148,7 +178,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 
 	if err := f.gate.ProposeTransaction(frames); err != nil {
 		f.logger.Info("gate rejected transaction; discarding withheld commit frame",
-			"offset", off-wal.FrameHeaderSize, "frames", len(frames), "nTruncate", nTruncate, "error", err)
+			"offset", headerOffset, "frames", len(frames), "nTruncate", nTruncate, "error", err)
 
 		f.resetCurrentTx()
 
@@ -162,7 +192,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 
 	f.currentTxCommitted = true
 	f.logger.Debug("gate committed transaction; releasing withheld commit frame",
-		"offset", off-wal.FrameHeaderSize, "frames", len(frames), "nTruncate", nTruncate)
+		"offset", headerOffset, "frames", len(frames), "nTruncate", nTruncate)
 
 	// Past this point the gate has committed the transaction cluster-wide,
 	// and this node's own FSM.Apply has already consumed its skip marker
@@ -170,10 +200,10 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 	// withheld commit frame now fails, the transaction is rolled back.
 	// This node will never see the entry again, so it would silently and permanently
 	// lack its own committed write. There is no way to recover from this, so we panic.
-	if _, err := f.File.WriteAt(frame.Header[:], off-wal.FrameHeaderSize); err != nil {
+	if _, err := f.File.WriteAt(frame.Header[:], headerOffset); err != nil {
 		f.logger.Error("failed to flush committed commit-frame header after RAFT commit",
-			"offset", off-wal.FrameHeaderSize, "error", err)
-		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame header at WAL offset %d after RAFT commit: %v", off-wal.FrameHeaderSize, err))
+			"offset", headerOffset, "error", err)
+		panic(fmt.Sprintf("vfs: failed to flush committed commit-frame header at WAL offset %d after RAFT commit: %v", headerOffset, err))
 	}
 
 	n2, err := f.File.WriteAt(frame.Data, off)
@@ -190,6 +220,7 @@ func (f *gatedWALFile) resetCurrentTx() {
 	f.currentTxFrames = nil
 	f.currentTxFrameOffsets = make(map[int64]*wal.Frame)
 	f.currentTxCommitted = false
+	f.pendingRewriteHeader = nil
 }
 
 var (
