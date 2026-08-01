@@ -356,5 +356,5 @@ using:
 
 ```sh
 make test/unit          # Run unit tests (fast)
-make test/correctness   # Run correctness tests (slow)
+make test/integration   # Run integration tests (slow)
 ```

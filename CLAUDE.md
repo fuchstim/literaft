@@ -125,7 +125,7 @@ make test/unit GINKGO_ARGS="--repeat 10" GINKGO_PACKAGES=./internal/vfs/...
 ```
 
 Before opening a PR, run `make build`: it runs `go mod tidy`, `go mod
-vendor`, `make generate`, and both `make test/unit test/correctness` (via
+vendor`, `make generate`, and both `make test/unit test/integration` (via
 goreleaser's `before.hooks`) ahead of the actual build, vetting and testing
 everything. This takes a while, so don't run it after every commit; run it
 once changes are code-complete and ready for review.

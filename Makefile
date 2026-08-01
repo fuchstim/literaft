@@ -50,8 +50,8 @@ GINKGO_PACKAGES ?= ./...
 test/unit: $(LOCALBIN)/ginkgo vet
 	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-package ./integration $(GINKGO_ARGS) $(GINKGO_PACKAGES)
 
-.PHONY: test/correctness
-test/correctness: $(LOCALBIN)/ginkgo vet
+.PHONY: test/integration
+test/integration: $(LOCALBIN)/ginkgo vet
 	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-file ./integration/throughput_test.go $(GINKGO_ARGS) ./integration
 
 .PHONY: vet
