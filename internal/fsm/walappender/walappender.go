@@ -160,19 +160,43 @@ func (a *WALAppender) AppendFrames(frames []*wal.Frame, afterCommit func()) erro
 	}
 	defer h.Release()
 
-	return a.AppendFramesUnderLock(h, frames, afterCommit)
+	if err := a.AppendFramesUnderLock(h, frames); err != nil {
+		return err
+	}
+
+	if afterCommit != nil {
+		afterCommit()
+	}
+
+	return nil
 }
 
 // AppendFramesUnderLock is identical to AppendFrames, but must be run
 // under a HeldLock acquired from AcquireWriteLock.
-func (a *WALAppender) AppendFramesUnderLock(h *HeldLock, frames []*wal.Frame, afterCommit func()) error {
-	if h == nil || h.a != a || h.released {
-		return fmt.Errorf("AppendFramesUnderLock called without a valid held lock for this appender")
-	}
-	return a.appendFramesLocked(frames, afterCommit)
+func (a *WALAppender) AppendFramesUnderLock(h *HeldLock, frames []*wal.Frame) error {
+	frameCh := make(chan *wal.Frame, len(frames))
+	go func() {
+		defer close(frameCh)
+		for _, f := range frames {
+			frameCh <- f
+		}
+	}()
+
+	return a.AppendFramesUnderLockChan(h, frameCh)
 }
 
-func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()) error {
+// AppendFramesUnderLockChan appends frames read from frameCh to the local
+// -wal under a held write lock. Caller must close frameCh once all frames
+// have been sent.
+func (a *WALAppender) AppendFramesUnderLockChan(h *HeldLock, frameCh <-chan *wal.Frame) error {
+	if h == nil || h.a != a || h.released {
+		return fmt.Errorf("AppendFramesUnderLockChan called without a valid held lock for this appender")
+	}
+
+	return a.appendFramesLocked(frameCh)
+}
+
+func (a *WALAppender) appendFramesLocked(frameCh <-chan *wal.Frame) error {
 	hdr, err := a.shm.ReadHeader()
 	if err != nil {
 		return fmt.Errorf("failed to read wal-index header: %w", err)
@@ -191,10 +215,17 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 	}
 	lastFrameChecksum1, lastFrameChecksum2 := hdr.LastFrameChecksum1(), hdr.LastFrameChecksum2()
 
-	for _, f := range frames {
+	// Always read frameCh until its closed, even on error.
+	var retErr error
+	for f := range frameCh {
+		if retErr != nil {
+			continue
+		}
+
 		if len(f.Data) != int(a.pageSize) {
-			return fmt.Errorf("frame for page %d is %d bytes, cluster page size is %d bytes",
+			retErr = fmt.Errorf("frame for page %d is %d bytes, cluster page size is %d bytes",
 				f.Header.PgNo(), len(f.Data), a.pageSize)
+			continue
 		}
 
 		f.Header.SetSalt1(hdr.Salt1())
@@ -204,15 +235,18 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 
 		currentFrameIdx++
 		if _, err := a.f.WriteAt(f.Header[:], currentOffset); err != nil {
-			return fmt.Errorf("failed to write header for frame frame %d: %w", currentFrameIdx, err)
+			retErr = fmt.Errorf("failed to write header for frame frame %d: %w", currentFrameIdx, err)
+			continue
 		}
 		if _, err := a.f.WriteAt(f.Data, currentOffset+wal.FrameHeaderSize); err != nil {
-			return fmt.Errorf("failed to write data for frame %d: %w", currentFrameIdx, err)
+			retErr = fmt.Errorf("failed to write data for frame %d: %w", currentFrameIdx, err)
+			continue
 		}
 		currentOffset += wal.FrameHeaderSize + int64(a.pageSize)
 
 		if err := a.shm.AddFrame(currentFrameIdx, f.Header.PgNo()); err != nil {
-			return fmt.Errorf("failed to add frame %d to wal-index: %w", currentFrameIdx, err)
+			retErr = fmt.Errorf("failed to add frame %d to wal-index: %w", currentFrameIdx, err)
+			continue
 		}
 
 		a.dirtyPageCountMu.Lock()
@@ -227,19 +261,16 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 			hdr.SetChangeCounter(hdr.ChangeCounter() + 1)
 
 			if err := a.shm.WriteHeader(hdr); err != nil {
-				return fmt.Errorf("failed to write wal-index header: %w", err)
+				retErr = fmt.Errorf("failed to write wal-index header: %w", err)
+				continue
 			}
 
 			a.logger.Debug("published wal-index header",
-				"mxFrame", currentFrameIdx, "nPage", f.Header.NTruncate(), "frames", len(frames))
+				"mxFrame", currentFrameIdx, "nPage", f.Header.NTruncate())
 		}
 	}
 
-	if afterCommit != nil {
-		afterCommit()
-	}
-
-	return nil
+	return retErr
 }
 
 // rewindLogIfBackfilled checks if all WAL frames have been copied into the database

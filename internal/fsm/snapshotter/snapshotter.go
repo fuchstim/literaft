@@ -2,6 +2,7 @@ package snapshotter
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/ncruces/go-sqlite3"
 )
+
+const restoreFrameBufferSize = 4
 
 type Snapshotter struct {
 	dbPath   string
@@ -101,12 +104,26 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		return SnapshotHeader{}, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
 	}
 
-	var frames []*wal.Frame
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	l, err := w.AcquireWriteLock(ctx)
+	if err != nil {
+		return SnapshotHeader{}, fmt.Errorf("failed to acquire WAL write lock: %w", err)
+	}
+	defer l.Release()
+
+	frameCh := make(chan *wal.Frame, restoreFrameBufferSize)
+	resCh := make(chan error, 1)
+	go func() { resCh <- w.AppendFramesUnderLockChan(l, frameCh) }()
+
+	var readErr error
 	for {
 		nTruncate := uint32(0)
 		if _, err := io.ReadFull(r, nextPage); err != nil {
 			if !errors.Is(err, io.EOF) {
-				return SnapshotHeader{}, fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
+				readErr = fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
+				break
 			}
 
 			// If we hit EOF, `curPage` was the last page in the snapshot.
@@ -117,7 +134,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		frame.Header.SetPgNo(nPages)
 		frame.Header.SetNTruncate(nTruncate)
 		frame.Data = curPage
-		frames = append(frames, frame)
+		frameCh <- frame
 
 		if nTruncate > 0 {
 			break
@@ -127,10 +144,9 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		curPage = nextPage
 		nextPage = make([]byte, b.pageSize)
 	}
+	close(frameCh)
 
-	// TODO: Stream frames to WAL appender instead of buffering them all in memory first.
-	// Requires WAL appender to support streaming frames
-	if err := w.AppendFrames(frames, nil); err != nil {
+	if err := errors.Join(readErr, <-resCh); err != nil {
 		return SnapshotHeader{}, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
 	}
 
