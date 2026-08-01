@@ -43,13 +43,16 @@ tag-release:
 generate: $(LOCALBIN)/buf $(LOCALBIN)/protoc-gen-go $(LOCALBIN)/protoc-gen-go-grpc
 	PATH="$(LOCALBIN):$$PATH" $(GO) generate ./...
 
+
+GINKGO_ARGS ?=
+GINKGO_PACKAGES ?= ./...
 .PHONY: test/unit
 test/unit: $(LOCALBIN)/ginkgo vet
-	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-package ./integration  ./...
+	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-package ./integration $(GINKGO_ARGS) $(GINKGO_PACKAGES)
 
-.PHONY: test/correctness
-test/correctness: $(LOCALBIN)/ginkgo vet
-	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-file ./integration/throughput_test.go ./integration
+.PHONY: test/integration
+test/integration: $(LOCALBIN)/ginkgo vet
+	$(LOCALBIN)/ginkgo run -r -p --keep-going --fail-on-pending --race --cover --coverprofile coverage.out --skip-file ./integration/throughput_test.go $(GINKGO_ARGS) ./integration
 
 .PHONY: vet
 vet:

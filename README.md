@@ -39,8 +39,9 @@ on-disk format is unchanged.
   become visible only after quorum. There is no page-level conflict resolution;
   conflicts are prevented by RAFT's total order.
 - **Writes on any node.** Writes execute on the leader. Followers reject writes
-  by default, or forward them to the leader when the log adapter is wrapped in
-  `log.ForwardingLog`.
+  by default, or forward them to the leader when the driver is given a
+  `forwardinggate.Gate` (`raft/gate/forwarding`) instead of a plain
+  `leadergate.Gate`.
 - **Concurrent connections.** Multiple read-write connections per process, with
   stock SQLite WAL concurrency (single writer, concurrent readers). Reads never
   block on replication; each commit blocks for one RAFT round-trip.
@@ -69,12 +70,12 @@ go get github.com/fuchstim/literaft
 The example runs a single-node cluster in one process, a minimal version of
 [`cmd/literaft`](cmd/literaft). It wires the components a node needs: a gRPC
 server hosting the raft transport and the write-forwarding service, a
-[`fsm.FSM`](fsm/fsm.go) (owns the replicated SQLite database), an `*hraft.Raft`
-(standard `hashicorp/raft`, here with in-memory stores), a
-[`log.ForwardingLog`](log/forward.go) wrapping a
-[`log.SingleWriterLog`](log/singlewriter.go) (adapts raft to the gate and
-forwards follower writes to the leader), and [`driver.New`](driver/driver.go)
-(wires it into a `database/sql` driver).
+[`fsm.FSM`](raft/fsm/fsm.go) (owns the replicated SQLite database), an
+`*hraft.Raft` (standard `hashicorp/raft`, here with in-memory stores), a
+[`forwardinggate.Gate`](raft/gate/forwarding/forwarding.go) wrapping a
+[`leadergate.Gate`](raft/gate/leader/leader.go) (adapts raft to the driver's
+gate seam and forwards follower writes to the leader), and
+[`driver.New`](driver/driver.go) (wires it into a `database/sql` driver).
 
 ```go
 package main
@@ -94,8 +95,8 @@ import (
 
 	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/fsm"
-	"github.com/fuchstim/literaft/log"
+	"github.com/fuchstim/literaft/raft/fsm"
+	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
 )
 
 func main() {
@@ -165,17 +166,16 @@ func main() {
 		panic(err)
 	}
 
-	// log.SingleWriterLog owns leader/ready/drain state; wrapping it in a
-	// log.ForwardingLog lets follower connections forward writes to the leader
-	// (under a base-index check) rather than rejecting them.
-	l := log.NewSingleWriterLog(r, log.WithLogger(logger))
-	defer l.Close()
-	adapter := log.NewForwardingLog(l, fwd, f, log.WithLogger(logger))
+	// forwardinggate.Gate wraps a leadergate.Gate (which owns leader/ready/drain
+	// state) so follower connections forward writes to the leader (under a
+	// base-index check) rather than rejecting them.
+	gate := forwardinggate.New(r, f, fwd, forwardinggate.WithLogger(logger))
+	defer gate.Close()
 
 	// driver.New registers a process-unique gated VFS and returns a
 	// database/sql-compatible driver. journal_mode=WAL is already set by
 	// fsm.New; the driver applies synchronous=NORMAL to every connection.
-	d := driver.New(f, adapter, driver.WithLogger(logger))
+	d := driver.New(f, gate, driver.WithLogger(logger))
 	defer d.Close()
 
 	sql.Register("literaft", d)
@@ -206,15 +206,15 @@ concurrent read-write semantics as stock SQLite in WAL mode.
 
 ### Rejecting writes on followers
 
-The example enables write forwarding by wrapping the `log.SingleWriterLog` in a
-`log.ForwardingLog`: a write on a follower connection is shipped to the leader
-and accepted only if it was computed on the leader's current applied state
-(otherwise it is rejected as stale and the client re-runs it against fresher
-state). To reject follower writes outright instead (returning a leader hint the
-client redirects on), pass the plain `log.SingleWriterLog` to `driver.New` and
-drop the forwarding transport. `cmd/literaft` forwards by default and switches
-to rejection with `-forward-writes=false`. See
-[`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+The example enables write forwarding by giving `driver.New` a
+`forwardinggate.Gate`, which wraps a `leadergate.Gate`: a write on a follower
+connection is shipped to the leader and accepted only if it was computed on
+the leader's current applied state (otherwise it is rejected as stale and the
+client re-runs it against fresher state). To reject follower writes outright
+instead (returning a leader hint the client redirects on), pass a plain
+`leadergate.Gate` to `driver.New` and drop the forwarding transport.
+`cmd/literaft` forwards by default and switches to rejection with
+`-forward-writes=false`. See [`raft/gate/forwarding`](raft/gate/forwarding).
 
 ## Running a real cluster
 
@@ -297,7 +297,7 @@ follower's local, possibly-stale snapshot.
 
 A read-modify-write that must be evaluated against the latest committed cluster
 state should be issued on the leader (or after ensuring the follower has caught
-up). See [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md).
+up).
 
 ## Comparison
 
@@ -330,15 +330,17 @@ pre-1.0.
 
 ## Further reading
 
-- [`docs/DESIGN.md`](docs/DESIGN.md): full design (write/read/checkpoint/
-  follower-apply paths, external-reader safety, conflict handling).
-- [`docs/DECISIONS.md`](docs/DECISIONS.md): ADR log of rejected alternatives.
-- [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md): the write-forwarding
-  protocol (base-index check, skip-marker state machine, failure matrix).
-- [`docs/ROADMAP.md`](docs/ROADMAP.md): milestone status, mirrored from GitHub.
-- [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md): on-disk byte layout reference.
-- [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md): notes on building on
-  `ncruces/go-sqlite3`.
+There's no separate design doc; the code is the reference. Start from:
+
+- [`internal/vfs`](internal/vfs): the commit-frame gate on the write path.
+- [`internal/fsm/walappender`](internal/fsm/walappender) and
+  [`internal/fsm/walappender/shm`](internal/fsm/walappender/shm): follower-apply,
+  including the custom wal-index shared-memory implementation.
+- [`raft/gate/leader`](raft/gate/leader) and
+  [`raft/gate/forwarding`](raft/gate/forwarding): the RAFT log adapter seam,
+  `leadergate.Gate`, and `forwardinggate.Gate`.
+- [`raft/fsm`](raft/fsm): the object owning a node's SQLite connection,
+  walappender, and snapshotter.
 
 ## Contributing
 
@@ -354,8 +356,5 @@ using:
 
 ```sh
 make test/unit          # Run unit tests (fast)
-make test/correctness   # Run correctness tests (slow)
+make test/integration   # Run integration tests (slow)
 ```
-
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind it.
