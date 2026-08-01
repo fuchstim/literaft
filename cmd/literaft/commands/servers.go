@@ -31,7 +31,12 @@ var _ = registerCommand(NewCommand(
 
 		fmt.Fprintln(w, "ID\tAddress\tRole")
 		for _, s := range servers {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", s.ID, s.Address, s.Suffrage.String())
+			suffrage := s.Suffrage.String()
+			if s.Address == raft.Leader() {
+				suffrage += " (Leader)"
+			}
+
+			fmt.Fprintf(w, "%s\t%s\t%s\n", s.ID, s.Address, suffrage)
 		}
 
 		return nil
