@@ -67,7 +67,7 @@ func FreeTCPAddr(t TB) string {
 // Supports RestartNode for crash/restart-recovery tests, which
 // NewInmemCluster's in-memory stores can't (there'd still be a snapshot
 // store and FSM db durable enough to restart from, even with the raft log
-// itself gone -- hraft resyncs the rest from the cluster).
+// itself gone -- raft resyncs the rest from the cluster).
 func NewTCPCluster(t TB, dir string, n int, opts ...Option) *TCPCluster {
 	t.Helper()
 	o := defaultOptions()
@@ -169,7 +169,7 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 // TCP transport and file snapshot store under s.dataDir, an in-memory
 // raftsqlite log/stable store by default (o.onDiskRaftStore switches it to
 // a real file under s.dataDir instead), a real fsm.FSM over s.dbPath, a
-// real hraft.Raft (which
+// real raft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
 // restarting an already-bootstrapped node is a harmless no-op), a write
 // gate wrapping it (leadergate.Gate, or forwardinggate.Gate wrapping one

@@ -11,7 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// hraft's Figure-8 rule can retroactively commit an entry a node proposed
+// raft's Figure-8 rule can retroactively commit an entry a node proposed
 // during an earlier, unfinished leadership stint, once that same node
 // regains leadership and a later entry in its new term commits and covers
 // it.

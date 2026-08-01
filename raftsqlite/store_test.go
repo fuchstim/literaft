@@ -114,7 +114,7 @@ var _ = Describe("Store", func() {
 	})
 
 	Describe("stable store", func() {
-		// hraft treats a stable-store miss as "no error" by checking this
+		// raft treats a stable-store miss as "no error" by checking this
 		// exact error message, not a sentinel value (see
 		// vendor/github.com/hashicorp/raft/raft.go's stable.Get callers).
 		It("returns an error whose message is exactly \"not found\" for a missing key", func() {

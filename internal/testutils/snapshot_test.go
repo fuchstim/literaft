@@ -19,7 +19,7 @@ import (
 // the leader's automatic snapshot fires and compacts its log, a brand-new
 // joiner (starting from index 0) cannot possibly catch up via normal
 // AppendEntries replay -- its needed starting index no longer exists in the
-// leader's log store. Only hraft's InstallSnapshot RPC (driving
+// leader's log store. Only raft's InstallSnapshot RPC (driving
 // raft.FSM.Snapshot on the leader and raft.FSM.Restore on the joiner) can
 // succeed, so a converging joiner here is real, end-to-end proof of the
 // snapshot mechanism, not just "eventually caught up somehow".

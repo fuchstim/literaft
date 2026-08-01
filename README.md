@@ -87,7 +87,7 @@ import (
 
 	grpctransport "github.com/Jille/raft-grpc-transport"
 	"github.com/hashicorp/go-hclog"
-	hraft "github.com/hashicorp/raft"
+	raft "github.com/hashicorp/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -121,13 +121,13 @@ func main() {
 	}
 	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
-	tm := grpctransport.New(hraft.ServerAddress(bindAddr), dialOptions)
+	tm := grpctransport.New(raft.ServerAddress(bindAddr), dialOptions)
 	grpcServer := grpc.NewServer()
 	tm.Register(grpcServer)
 
 	// The forwarding transport shares that same server, so the leader's forward
 	// address is just its raft address -- an identity resolver.
-	fwd := forward.New(func(a hraft.ServerAddress) string { return string(a) }, dialOptions)
+	fwd := forward.New(func(a raft.ServerAddress) string { return string(a) }, dialOptions)
 	fwd.Register(grpcServer)
 
 	go func() {
@@ -142,14 +142,14 @@ func main() {
 	// impact than others (ex. boltdb is rather slow as it fsyncs on every write).
 	// cmd/literaft uses this package's raftsqlite which implements a SQLite-backed
 	// RAFT log/stable store with WAL mode enabled.
-	store := hraft.NewInmemStore()
-	snaps := hraft.NewInmemSnapshotStore()
+	store := raft.NewInmemStore()
+	snaps := raft.NewInmemSnapshotStore()
 
-	config := hraft.DefaultConfig()
-	config.LocalID = hraft.ServerID(nodeID)
+	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(nodeID)
 	config.Logger = logger.Named("raft")
 
-	r, err := hraft.NewRaft(config, f, store, store, snaps, tm.Transport())
+	r, err := raft.NewRaft(config, f, store, store, snaps, tm.Transport())
 	if err != nil {
 		panic(err)
 	}
@@ -157,10 +157,10 @@ func main() {
 
 	// Bootstrap a new single-node cluster. Additional nodes would join through
 	// an existing member instead (see "Running a real cluster" below).
-	err = r.BootstrapCluster(hraft.Configuration{
-		Servers: []hraft.Server{{ID: config.LocalID, Address: hraft.ServerAddress(bindAddr)}},
+	err = r.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: config.LocalID, Address: raft.ServerAddress(bindAddr)}},
 	}).Error()
-	if err != nil && !errors.Is(err, hraft.ErrCantBootstrap) {
+	if err != nil && !errors.Is(err, raft.ErrCantBootstrap) {
 		panic(err)
 	}
 
@@ -184,7 +184,7 @@ func main() {
 
 	// A freshly bootstrapped node needs a moment to elect itself leader before
 	// it can accept writes.
-	for r.State() != hraft.Leader {
+	for r.State() != raft.Leader {
 		time.Sleep(50 * time.Millisecond)
 	}
 
