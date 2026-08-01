@@ -213,10 +213,14 @@ func (f *FSM) Apply(log *raft.Log) any {
 	if loan := f.getLoan(entryID); loan != nil {
 		f.logger.Debug("applying forwarded entry under loaned lock",
 			"index", index, "id", entryID, "pages", len(txn.Pages), "nTruncate", txn.NTruncate)
-		if err := f.walAppender.AppendFramesUnderLock(loan, txn.Frames(), func() { f.lastApplied.Store(index) }); err != nil {
+
+		if err := f.walAppender.AppendFramesUnderLock(loan, txn.Frames()); err != nil {
 			f.logger.Error("failed to append forwarded entry", "index", index, "id", entryID, "error", err)
 			panic(fmt.Sprintf("failed to append forwarded entry at index %d: %v", index, err))
 		}
+
+		f.lastApplied.Store(index)
+
 		return nil
 	}
 

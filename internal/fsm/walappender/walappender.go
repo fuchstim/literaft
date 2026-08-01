@@ -160,19 +160,40 @@ func (a *WALAppender) AppendFrames(frames []*wal.Frame, afterCommit func()) erro
 	}
 	defer h.Release()
 
-	return a.AppendFramesUnderLock(h, frames, afterCommit)
+	if err := a.AppendFramesUnderLock(h, frames); err != nil {
+		return err
+	}
+
+	if afterCommit != nil {
+		afterCommit()
+	}
+
+	return nil
 }
 
 // AppendFramesUnderLock is identical to AppendFrames, but must be run
 // under a HeldLock acquired from AcquireWriteLock.
-func (a *WALAppender) AppendFramesUnderLock(h *HeldLock, frames []*wal.Frame, afterCommit func()) error {
-	if h == nil || h.a != a || h.released {
-		return fmt.Errorf("AppendFramesUnderLock called without a valid held lock for this appender")
-	}
-	return a.appendFramesLocked(frames, afterCommit)
+func (a *WALAppender) AppendFramesUnderLock(h *HeldLock, frames []*wal.Frame) error {
+	frameCh := make(chan *wal.Frame, len(frames))
+	go func() {
+		defer close(frameCh)
+		for _, f := range frames {
+			frameCh <- f
+		}
+	}()
+
+	return a.AppendFramesUnderLockChan(h, frameCh)
 }
 
-func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()) error {
+func (a *WALAppender) AppendFramesUnderLockChan(h *HeldLock, frameCh chan *wal.Frame) error {
+	if h == nil || h.a != a || h.released {
+		return fmt.Errorf("AppendFramesUnderLockChan called without a valid held lock for this appender")
+	}
+
+	return a.appendFramesLocked(frameCh)
+}
+
+func (a *WALAppender) appendFramesLocked(frameCh chan *wal.Frame) error {
 	hdr, err := a.shm.ReadHeader()
 	if err != nil {
 		return fmt.Errorf("failed to read wal-index header: %w", err)
@@ -191,7 +212,7 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 	}
 	lastFrameChecksum1, lastFrameChecksum2 := hdr.LastFrameChecksum1(), hdr.LastFrameChecksum2()
 
-	for _, f := range frames {
+	for f := range frameCh {
 		if len(f.Data) != int(a.pageSize) {
 			return fmt.Errorf("frame for page %d is %d bytes, cluster page size is %d bytes",
 				f.Header.PgNo(), len(f.Data), a.pageSize)
@@ -231,12 +252,8 @@ func (a *WALAppender) appendFramesLocked(frames []*wal.Frame, afterCommit func()
 			}
 
 			a.logger.Debug("published wal-index header",
-				"mxFrame", currentFrameIdx, "nPage", f.Header.NTruncate(), "frames", len(frames))
+				"mxFrame", currentFrameIdx, "nPage", f.Header.NTruncate())
 		}
-	}
-
-	if afterCommit != nil {
-		afterCommit()
 	}
 
 	return nil

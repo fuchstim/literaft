@@ -2,6 +2,7 @@ package snapshotter
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -101,11 +102,23 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		return SnapshotHeader{}, fmt.Errorf("snapshot page size %d does not match cluster page size %d", pageSize, b.pageSize)
 	}
 
-	var frames []*wal.Frame
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	l, err := w.AcquireWriteLock(ctx)
+	if err != nil {
+		return SnapshotHeader{}, fmt.Errorf("failed to acquire WAL write lock: %w", err)
+	}
+	defer l.Release()
+
+	frameCh, resCh := make(chan *wal.Frame), make(chan error)
+	go func() { resCh <- w.AppendFramesUnderLockChan(l, frameCh) }()
+
 	for {
 		nTruncate := uint32(0)
 		if _, err := io.ReadFull(r, nextPage); err != nil {
 			if !errors.Is(err, io.EOF) {
+				close(frameCh)
 				return SnapshotHeader{}, fmt.Errorf("failed to read page %d from snapshot: %w", nPages+1, err)
 			}
 
@@ -117,7 +130,7 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		frame.Header.SetPgNo(nPages)
 		frame.Header.SetNTruncate(nTruncate)
 		frame.Data = curPage
-		frames = append(frames, frame)
+		frameCh <- frame
 
 		if nTruncate > 0 {
 			break
@@ -127,10 +140,9 @@ func (b *Snapshotter) Restore(r io.Reader) (SnapshotHeader, error) {
 		curPage = nextPage
 		nextPage = make([]byte, b.pageSize)
 	}
+	close(frameCh)
 
-	// TODO: Stream frames to WAL appender instead of buffering them all in memory first.
-	// Requires WAL appender to support streaming frames
-	if err := w.AppendFrames(frames, nil); err != nil {
+	if err := <-resCh; err != nil {
 		return SnapshotHeader{}, fmt.Errorf("failed to append frames to WAL at path `%s`: %w", b.dbPath, err)
 	}
 

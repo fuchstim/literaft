@@ -428,7 +428,7 @@ var _ = Describe("WALAppender log rewind", func() {
 			GinkgoHelper()
 			h, err := appender.AcquireWriteLock(context.Background())
 			Expect(err).NotTo(HaveOccurred())
-			Expect(appender.AppendFramesUnderLock(h, txn, nil)).To(Succeed())
+			Expect(appender.AppendFramesUnderLock(h, txn)).To(Succeed())
 			h.Release()
 		}
 
@@ -518,6 +518,118 @@ var _ = Describe("WALAppender log rewind", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer follower.Close()
 		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
+	})
+})
+
+var _ = Describe("WALAppender.AppendFramesUnderLockChan", func() {
+	sendFrames := func(a *walappender.WALAppender, txns ...[]*wal.Frame) {
+		GinkgoHelper()
+		frameCh := make(chan *wal.Frame)
+		go func() {
+			defer close(frameCh)
+			for _, txn := range txns {
+				for _, f := range txn {
+					frameCh <- f
+				}
+			}
+		}()
+
+		h, err := a.AcquireWriteLock(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		defer h.Release()
+
+		Expect(a.AppendFramesUnderLockChan(h, frameCh)).To(Succeed())
+	}
+
+	It("applies a single transaction", func() {
+		dir := GinkgoT().TempDir()
+
+		gate := &recordingGate{}
+		leaderPath := filepath.Join(dir, "leader-chan-single.db")
+		leader := leaderConn(leaderPath, gate)
+		defer leader.Close()
+
+		Expect(leader.Exec(`
+			BEGIN;
+			CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+			INSERT INTO t (id, v) VALUES (1, 'a'), (2, 'b');
+			COMMIT;
+		`)).To(Succeed())
+		Expect(gate.entries).To(HaveLen(1), "an explicit BEGIN/COMMIT must land as a single commit")
+		txn := gate.entries[0]
+
+		last := txn[len(txn)-1]
+		Expect(last.Header.NTruncate()).To(BeNumerically(">", 0),
+			"a transaction's final frame must be its commit frame")
+		for _, f := range txn[:len(txn)-1] {
+			Expect(f.Header.NTruncate()).To(Equal(uint32(0)), "only the last frame of a transaction commits")
+		}
+
+		pageSize := queryInt(leader, "PRAGMA page_size")
+
+		followerPath := filepath.Join(dir, "follower-chan-single.db")
+		primeFollowerWALMode(followerPath)
+
+		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0, hclog.NewNullLogger())
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		sendFrames(appender, txn)
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryInt(follower, "SELECT count(*) FROM t")).To(Equal(int64(2)))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal("a"))
+		Expect(queryText(follower, "SELECT v FROM t WHERE id = 2")).To(Equal("b"))
+	})
+
+	It("applies several transactions", func() {
+		dir := GinkgoT().TempDir()
+
+		gate := &recordingGate{}
+		leaderPath := filepath.Join(dir, "leader-chan-multi.db")
+		leader := leaderConn(leaderPath, gate)
+		defer leader.Close()
+
+		Expect(leader.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")).To(Succeed())
+		Expect(leader.Exec("INSERT INTO t (id, v) VALUES (1, 'seed')")).To(Succeed())
+		setup := gate.entries
+		gate.entries = nil
+
+		const numUpdates = 5
+		for i := range numUpdates {
+			Expect(leader.Exec(fmt.Sprintf("UPDATE t SET v = 'v%d' WHERE id = 1", i))).To(Succeed())
+		}
+		updates := gate.entries
+		Expect(updates).To(HaveLen(numUpdates), "each update must land as its own commit")
+
+		txns := append(setup, updates...)
+		for i, txn := range txns {
+			last := txn[len(txn)-1]
+			Expect(last.Header.NTruncate()).To(BeNumerically(">", 0), "transaction %d must end on a commit frame", i)
+		}
+
+		pageSize := queryInt(leader, "PRAGMA page_size")
+
+		followerPath := filepath.Join(dir, "follower-chan-multi.db")
+		primeFollowerWALMode(followerPath)
+
+		appender, err := walappender.Open(followerPath, uint32(pageSize), -1, 0, hclog.NewNullLogger())
+		Expect(err).NotTo(HaveOccurred())
+		defer appender.Close()
+
+		sendFrames(appender, txns...)
+
+		follower, err := sqlite3.Open("file:" + followerPath)
+		Expect(err).NotTo(HaveOccurred())
+		defer follower.Close()
+
+		Expect(queryText(follower, "PRAGMA integrity_check")).To(Equal("ok"))
+		Expect(queryInt(follower, "SELECT count(*) FROM t")).To(Equal(int64(1)))
 		Expect(queryText(follower, "SELECT v FROM t WHERE id = 1")).To(Equal(fmt.Sprintf("v%d", numUpdates-1)))
 	})
 })
