@@ -103,18 +103,16 @@ toolchain on `PATH`. Bump a tool by editing its version variable in the
 `Makefile`. A `buf.gen.yaml` that emits gRPC stubs must list the
 `protoc-gen-go-grpc` plugin in addition to `protoc-gen-go`.
 
-Run tests via the `ginkgo` CLI, not `go test ./...` directly: this repo's
-suites are Ginkgo/Gomega. `-p` is a boolean ("run in parallel with an
-auto-detected number of nodes"), not a process-count flag: a number after
-it (e.g. `-p 20`) is silently ignored as a harmless nonexistent extra
-package pattern, not consumed as a count. Use `--procs=N` (alias `--nodes`)
-for an explicit count, or bare `-p` for auto-detected parallelism (much
-faster); omit both (or pass `--procs=1`) when actively debugging a specific
-failure, since parallel output interleaves and timing-sensitive tests
-behave differently under concurrent load.
+Validate changes with `make test/unit`, not `go test ./...` or a bare
+`ginkgo` invocation directly: this repo's suites are Ginkgo/Gomega, and the
+target wires up `vet`, `--race`, coverage, and the `./integration` skip
+consistently. Pass extra ginkgo flags through the `GINKGO_ARGS` make
+variable, and narrow to specific packages with `GINKGO_PACKAGES` (default
+`./...`):
 
 ```
-ginkgo -r --procs=20 ./...
+make test/unit GINKGO_ARGS="--focus focused-test"
+make test/unit GINKGO_PACKAGES=./internal/vfs/...
 ```
 
 To check whether a test is flaky, use `--repeat N` (runs the suite N+1
@@ -123,8 +121,14 @@ shell timeout: `--repeat` has a real, deterministic stopping point instead
 of needing an external time bound:
 
 ```
-ginkgo --repeat 10 ./path/to/package/...
+make test/unit GINKGO_ARGS="--repeat 10" GINKGO_PACKAGES=./internal/vfs/...
 ```
+
+Before opening a PR, run `make build`: it runs `go mod tidy`, `go mod
+vendor`, `make generate`, and both `make test/unit test/correctness` (via
+goreleaser's `before.hooks`) ahead of the actual build, vetting and testing
+everything. This takes a while, so don't run it after every commit; run it
+once changes are code-complete and ready for review.
 
 Platform: develop on Linux (amd64/arm64) or macOS; both have full file-lock
 and shm support in ncruces. Linux uses **OFD locks**; macOS too. Do **not**
