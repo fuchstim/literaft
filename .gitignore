@@ -6,7 +6,7 @@ cpuprofile
 vendor
 *.test
 .DS_Store
-data.sql
+data*.sql
 coverage.out*
 # Added by goreleaser init:
 dist/
