@@ -1,4 +1,4 @@
-// Package raftsqlite implements hraft's raft.LogStore and raft.StableStore
+// Package raftsqlite implements raft's raft.LogStore and raft.StableStore
 // on top of github.com/ncruces/go-sqlite3 in WAL mode, as a drop-in
 // replacement for github.com/hashicorp/raft-boltdb/v2 that doesn't fsync on
 // every write.
@@ -23,7 +23,7 @@ var (
 )
 
 // ErrKeyNotFound is returned by Get/GetUint64 for a key that was never Set.
-// hraft distinguishes "no error" from "key not found" by checking this
+// raft distinguishes "no error" from "key not found" by checking this
 // error's message against the literal string "not found" rather than
 // comparing sentinel values, so this message must not change.
 var ErrKeyNotFound = errors.New("not found")

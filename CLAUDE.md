@@ -263,7 +263,7 @@ acceptable.
   proposal's own local `Apply` call), and `tryConsumeSkipMarker` flips it to
   `skipped` on the one materialization it's meant to cover. A static,
   permanent check (e.g. keying off a node ID instead of a per-proposal token)
-  breaks replay: hraft's Figure-8 rule can retroactively commit a
+  breaks replay: raft's Figure-8 rule can retroactively commit a
   self-authored entry from an earlier, unfinished leadership stint, and
   `FSM.Restore` can reset local state to an older snapshot, after which every
   self-authored entry past that snapshot needs to replay normally since the

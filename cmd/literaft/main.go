@@ -1,4 +1,4 @@
-// Command literaft runs one node process: a real hraft cluster member
+// Command literaft runs one node process: a real raft cluster member
 // serving a RAFT-replicated SQLite database over a gRPC transport, plus an
 // interactive SQL REPL on stdin/stdout for exercising a running node by hand.
 package main
@@ -94,7 +94,7 @@ func run() error {
 	}
 
 	// One root logger for the whole process: each subsystem takes a named
-	// child of it, and hraft shares it so its logs use the same format.
+	// child of it, and raft shares it so its logs use the same format.
 	logger := hclog.New(&hclog.LoggerOptions{
 		Level:  lvl,
 		Output: logOutput,
@@ -159,7 +159,7 @@ func run() error {
 
 	// Whether this node already has persisted raft state decides first-start
 	// vs restart: only a first start bootstraps or joins. A restart just comes
-	// back up and lets hraft recover its configuration and log -- membership is
+	// back up and lets raft recover its configuration and log -- membership is
 	// durable, so a node still in the cluster's configuration rejoins on its
 	// own (the leader keeps replicating to it), and a node that was explicitly
 	// decommissioned stays out rather than silently re-adding itself.
@@ -227,7 +227,7 @@ func run() error {
 			logger.Info("joined cluster", "id", *id, "bind", *bindAddr, "via", *joinAddr)
 		}
 	} else {
-		// Restart: hraft has recovered our configuration and log. Re-announce
+		// Restart: raft has recovered our configuration and log. Re-announce
 		// our address if it changed while we were down so the leader can reach
 		// us again; an unchanged address (the common case) does nothing.
 		if err := reannounceIfMoved(r, *id, *bindAddr, *joinAddr, dialOptions, logger); err != nil {

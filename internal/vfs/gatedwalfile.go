@@ -166,7 +166,7 @@ func (f *gatedWALFile) writeFrameData(p []byte, off int64) (int, error) {
 
 	// Past this point the gate has committed the transaction cluster-wide,
 	// and this node's own FSM.Apply has already consumed its skip marker
-	// (hraft delivers each committed index exactly once). If flushing the
+	// (raft delivers each committed index exactly once). If flushing the
 	// withheld commit frame now fails, the transaction is rolled back.
 	// This node will never see the entry again, so it would silently and permanently
 	// lack its own committed write. There is no way to recover from this, so we panic.

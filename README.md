@@ -70,11 +70,9 @@ go get github.com/fuchstim/literaft
 The example runs a single-node cluster in one process, a minimal version of
 [`cmd/literaft`](cmd/literaft). It wires the components a node needs: a gRPC
 server hosting the raft transport and the write-forwarding service, a
-[`fsm.FSM`](raft/fsm/fsm.go) (owns the replicated SQLite database), an
-`*hraft.Raft` (standard `hashicorp/raft`, here with in-memory stores), a
-[`forwardinggate.Gate`](raft/gate/forwarding/forwarding.go) wrapping a
-[`leadergate.Gate`](raft/gate/leader/leader.go) (adapts raft to the driver's
-gate seam and forwards follower writes to the leader), and
+[`fsm.FSM`](raft/fsm/fsm.go) (owns the replicated SQLite database), a
+`*raft.Raft` (standard `hashicorp/raft`, here with in-memory stores), a
+[`forwardinggate.Gate`](raft/gate/forwarding/forwarding.go), and
 [`driver.New`](driver/driver.go) (wires it into a `database/sql` driver).
 
 ```go
@@ -89,7 +87,7 @@ import (
 
 	grpctransport "github.com/Jille/raft-grpc-transport"
 	"github.com/hashicorp/go-hclog"
-	hraft "github.com/hashicorp/raft"
+	raft "github.com/hashicorp/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -123,13 +121,13 @@ func main() {
 	}
 	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 
-	tm := grpctransport.New(hraft.ServerAddress(bindAddr), dialOptions)
+	tm := grpctransport.New(raft.ServerAddress(bindAddr), dialOptions)
 	grpcServer := grpc.NewServer()
 	tm.Register(grpcServer)
 
 	// The forwarding transport shares that same server, so the leader's forward
 	// address is just its raft address -- an identity resolver.
-	fwd := forward.New(func(a hraft.ServerAddress) string { return string(a) }, dialOptions)
+	fwd := forward.New(func(a raft.ServerAddress) string { return string(a) }, dialOptions)
 	fwd.Register(grpcServer)
 
 	go func() {
@@ -144,14 +142,14 @@ func main() {
 	// impact than others (ex. boltdb is rather slow as it fsyncs on every write).
 	// cmd/literaft uses this package's raftsqlite which implements a SQLite-backed
 	// RAFT log/stable store with WAL mode enabled.
-	store := hraft.NewInmemStore()
-	snaps := hraft.NewInmemSnapshotStore()
+	store := raft.NewInmemStore()
+	snaps := raft.NewInmemSnapshotStore()
 
-	config := hraft.DefaultConfig()
-	config.LocalID = hraft.ServerID(nodeID)
+	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(nodeID)
 	config.Logger = logger.Named("raft")
 
-	r, err := hraft.NewRaft(config, f, store, store, snaps, tm.Transport())
+	r, err := raft.NewRaft(config, f, store, store, snaps, tm.Transport())
 	if err != nil {
 		panic(err)
 	}
@@ -159,15 +157,14 @@ func main() {
 
 	// Bootstrap a new single-node cluster. Additional nodes would join through
 	// an existing member instead (see "Running a real cluster" below).
-	err = r.BootstrapCluster(hraft.Configuration{
-		Servers: []hraft.Server{{ID: config.LocalID, Address: hraft.ServerAddress(bindAddr)}},
+	err = r.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: config.LocalID, Address: raft.ServerAddress(bindAddr)}},
 	}).Error()
-	if err != nil && !errors.Is(err, hraft.ErrCantBootstrap) {
+	if err != nil && !errors.Is(err, raft.ErrCantBootstrap) {
 		panic(err)
 	}
 
-	// forwardinggate.Gate wraps a leadergate.Gate (which owns leader/ready/drain
-	// state) so follower connections forward writes to the leader (under a
+	// forwardinggate.Gate forwards writes to the leader (under a
 	// base-index check) rather than rejecting them.
 	gate := forwardinggate.New(r, f, fwd, forwardinggate.WithLogger(logger))
 	defer gate.Close()
@@ -187,7 +184,7 @@ func main() {
 
 	// A freshly bootstrapped node needs a moment to elect itself leader before
 	// it can accept writes.
-	for r.State() != hraft.Leader {
+	for r.State() != raft.Leader {
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -207,7 +204,7 @@ concurrent read-write semantics as stock SQLite in WAL mode.
 ### Rejecting writes on followers
 
 The example enables write forwarding by giving `driver.New` a
-`forwardinggate.Gate`, which wraps a `leadergate.Gate`: a write on a follower
+`forwardinggate.Gate`: a write on a follower
 connection is shipped to the leader and accepted only if it was computed on
 the leader's current applied state (otherwise it is rejected as stale and the
 client re-runs it against fresher state). To reject follower writes outright
@@ -224,7 +221,7 @@ log/stable store, file-based snapshots, a cluster join/leave control plane, and
 an interactive SQL REPL.
 
 ```sh
-go build -o literaft ./cmd/literaft
+go install github.com/fuchstim/literaft/cmd/literaft@latest
 
 # The first node bootstraps a new single-node cluster (no -join).
 ./literaft -id node1 -bind 127.0.0.1:9001 -data-dir ./data/node1 -db ./data/node1/db.sqlite

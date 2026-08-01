@@ -1,8 +1,8 @@
 // Package testutils builds real, disk-backed literaft node clusters for
-// tests. A real literaft node process wires a real hraft transport/store, a
+// tests. A real literaft node process wires a real raft transport/store, a
 // real fsm.FSM, and a real driver.Driver into one process; this package
 // generalizes that same wiring to n nodes across two tiers so package tests
-// don't have to hand-wire hraft themselves:
+// don't have to hand-wire raft themselves:
 //
 //   - NewInmemCluster: in-memory transport/log/stable/snapshot store, real
 //     fsm.FSM per node under its own temp-dir SQLite file. Fast; no real
@@ -75,7 +75,7 @@ type Node struct {
 }
 
 // Shutdown tears this node down. Idempotent only if the caller makes it so;
-// mirrors hraft.Raft.Shutdown's own non-idempotent contract.
+// mirrors raft.Raft.Shutdown's own non-idempotent contract.
 func (n *Node) Shutdown() error { return n.shutdown() }
 
 // Cluster is a set of Nodes built by NewInmemCluster or NewTCPCluster.
@@ -184,7 +184,7 @@ func WithFSMOptions(opts ...fsm.Option) Option {
 	return func(o *options) { o.fsmOpts = opts }
 }
 
-// WithApplyTimeout bounds each hraft.Apply call the cluster's Logs/Drivers
+// WithApplyTimeout bounds each raft.Apply call the cluster's Logs/Drivers
 // (NewTCPCluster only) make. Defaults to 2s.
 func WithApplyTimeout(d time.Duration) Option {
 	return func(o *options) { o.applyTimeout = d }
@@ -192,7 +192,7 @@ func WithApplyTimeout(d time.Duration) Option {
 
 // WithSnapshotThreshold, WithSnapshotInterval, and WithTrailingLogs
 // (NewTCPCluster only) are wired straight onto raft.Config, overriding
-// hraft's own defaults so a test can force real, fast snapshotting instead
+// raft's own defaults so a test can force real, fast snapshotting instead
 // of waiting on production-sized thresholds.
 func WithSnapshotThreshold(n uint64) Option { return func(o *options) { o.snapshotThreshold = n } }
 func WithSnapshotInterval(d time.Duration) Option {
@@ -200,7 +200,7 @@ func WithSnapshotInterval(d time.Duration) Option {
 }
 func WithTrailingLogs(n uint64) Option { return func(o *options) { o.trailingLogs = n } }
 
-// WithLogOutput sets where hraft's own log output goes (both tiers).
+// WithLogOutput sets where raft's own log output goes (both tiers).
 // Defaults to io.Discard.
 func WithLogOutput(w io.Writer) Option {
 	return func(o *options) { o.logOutput = w }
@@ -227,7 +227,7 @@ func WithForwarding() Option {
 	return func(o *options) { o.forwarding = true }
 }
 
-// fastRaftConfig shrinks hraft's election/heartbeat timing so
+// fastRaftConfig shrinks raft's election/heartbeat timing so
 // NewInmemCluster tests don't spend real wall-clock seconds waiting for a
 // leader, while staying loose enough that scheduling jitter under test
 // load doesn't itself trigger spurious re-elections.

@@ -32,7 +32,7 @@ var _ = Describe("leadergate.Gate gaining-leadership drain", func() {
 		// non-self-originated committed entry, and AppendFrames blocks
 		// acquiring this exact lock -- so while it's held externally,
 		// newLeader's FSM genuinely cannot apply anything, however fast
-		// hraft itself replicates.
+		// raft itself replicates.
 		lock, err := shm.Open(newLeader.DBPath+"-shm", hclog.NewNullLogger())
 		Expect(err).NotTo(HaveOccurred())
 		defer lock.Close()
@@ -57,7 +57,7 @@ var _ = Describe("leadergate.Gate gaining-leadership drain", func() {
 		// Committing only needs a majority of 2 (both nodes): newLeader's
 		// AppendEntries handler stores each entry to its own log/log-store
 		// immediately regardless of whether its FSM-apply queue is stuck --
-		// storage and FSM application are decoupled in hraft. So these
+		// storage and FSM application are decoupled in raft. So these
 		// commit even though newLeader's FSM never gets to run for them yet.
 		for _, txn := range txns {
 			Expect(oldGate.ProposeTransaction(txn.frames)).To(Succeed())
@@ -67,7 +67,7 @@ var _ = Describe("leadergate.Gate gaining-leadership drain", func() {
 			return !ok
 		}, "newLeader's backlog must stay unapplied while its WAL_WRITE_LOCK is held externally")
 
-		// Hand leadership to newLeader. hraft only transfers once it
+		// Hand leadership to newLeader. raft only transfers once it
 		// believes the target's log is caught up (true here: newLeader has
 		// stored, but not yet applied, all 3 entries), so this succeeds
 		// despite its backlog.
