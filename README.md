@@ -70,11 +70,9 @@ go get github.com/fuchstim/literaft
 The example runs a single-node cluster in one process, a minimal version of
 [`cmd/literaft`](cmd/literaft). It wires the components a node needs: a gRPC
 server hosting the raft transport and the write-forwarding service, a
-[`fsm.FSM`](raft/fsm/fsm.go) (owns the replicated SQLite database), an
-`*hraft.Raft` (standard `hashicorp/raft`, here with in-memory stores), a
-[`forwardinggate.Gate`](raft/gate/forwarding/forwarding.go) wrapping a
-[`leadergate.Gate`](raft/gate/leader/leader.go) (adapts raft to the driver's
-gate seam and forwards follower writes to the leader), and
+[`fsm.FSM`](raft/fsm/fsm.go) (owns the replicated SQLite database), a
+`*raft.Raft` (standard `hashicorp/raft`, here with in-memory stores), a
+[`forwardinggate.Gate`](raft/gate/forwarding/forwarding.go), and
 [`driver.New`](driver/driver.go) (wires it into a `database/sql` driver).
 
 ```go
@@ -166,8 +164,7 @@ func main() {
 		panic(err)
 	}
 
-	// forwardinggate.Gate wraps a leadergate.Gate (which owns leader/ready/drain
-	// state) so follower connections forward writes to the leader (under a
+	// forwardinggate.Gate forwards writes to the leader (under a
 	// base-index check) rather than rejecting them.
 	gate := forwardinggate.New(r, f, fwd, forwardinggate.WithLogger(logger))
 	defer gate.Close()
@@ -207,7 +204,7 @@ concurrent read-write semantics as stock SQLite in WAL mode.
 ### Rejecting writes on followers
 
 The example enables write forwarding by giving `driver.New` a
-`forwardinggate.Gate`, which wraps a `leadergate.Gate`: a write on a follower
+`forwardinggate.Gate`: a write on a follower
 connection is shipped to the leader and accepted only if it was computed on
 the leader's current applied state (otherwise it is rejected as stale and the
 client re-runs it against fresher state). To reject follower writes outright
@@ -224,7 +221,7 @@ log/stable store, file-based snapshots, a cluster join/leave control plane, and
 an interactive SQL REPL.
 
 ```sh
-go build -o literaft ./cmd/literaft
+go install github.com/fuchstim/literaft/cmd/literaft@latest
 
 # The first node bootstraps a new single-node cluster (no -join).
 ./literaft -id node1 -bind 127.0.0.1:9001 -data-dir ./data/node1 -db ./data/node1/db.sqlite
