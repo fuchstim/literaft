@@ -5,7 +5,7 @@ Context for a RAFT-backed SQLite VFS, implemented in Go on top of
 separate design-doc corpus: `README.md` carries the high-level overview, and
 the code is the reference for everything below that. Read the relevant
 package before touching the write or follower-apply paths (start from
-`internal/vfs`, `internal/fsm/walappender`, and `log`).
+`internal/vfs`, `internal/fsm/walappender`, and `raft/gate`).
 
 The system replicates a single-node SQLite database over RAFT without
 patching SQLite and without breaking on-disk file compatibility: WAL mode
@@ -91,15 +91,17 @@ go build ./...
 ```
 
 **Protobuf / gRPC codegen lives in the `Makefile`.** The `.pb.go` and
-`_grpc.pb.go` files under `internal/**/proto/` are generated from the sibling
-`.proto` with `buf` (each proto package carries a `//go:generate buf generate`
-and its own `buf.gen.yaml`); don't hand-edit them. Regenerate everything with
-`make generate`, the single codegen entry point: it installs the pinned
-toolchain (`buf`, `protoc-gen-go`, and `protoc-gen-go-grpc`, the last required
-for the gRPC *service* stubs, e.g. `internal/membership`) and then runs
-`go generate ./...` with that toolchain on `PATH`. Bump a tool by editing
-its version variable in the `Makefile`. A `buf.gen.yaml` that emits gRPC stubs
-must list the `protoc-gen-go-grpc` plugin in addition to `protoc-gen-go`.
+`_grpc.pb.go` files under each `**/proto/` directory (`raft/proto`,
+`cmd/literaft/forward/proto`, `cmd/literaft/membership/proto`) are generated
+from the sibling `.proto` with `buf` (each proto package carries a
+`//go:generate buf generate` and its own `buf.gen.yaml`); don't hand-edit
+them. Regenerate everything with `make generate`, the single codegen entry
+point: it installs the pinned toolchain (`buf`, `protoc-gen-go`, and
+`protoc-gen-go-grpc`, the last required for the gRPC *service* stubs, e.g.
+`cmd/literaft/membership`) and then runs `go generate ./...` with that
+toolchain on `PATH`. Bump a tool by editing its version variable in the
+`Makefile`. A `buf.gen.yaml` that emits gRPC stubs must list the
+`protoc-gen-go-grpc` plugin in addition to `protoc-gen-go`.
 
 Run tests via the `ginkgo` CLI, not `go test ./...` directly: this repo's
 suites are Ginkgo/Gomega. `-p` is a boolean ("run in parallel with an
@@ -155,10 +157,8 @@ parameter on the real constructor. Rationale: a struct field can't
 distinguish "caller explicitly set the zero value" from "caller didn't set
 it at all," and a variadic `...Option` list can grow new options without
 breaking existing call sites, unlike adding a field to a struct that already
-has callers relying on its zero value. `log/` (`log/options.go`,
-`log.NewSingleWriterLog`) is the reference example. Older config-struct-based
-constructors (e.g. `internal/node.Config`) predate this convention and
-haven't been migrated.
+has callers relying on its zero value. `raft/gate/leader/` (`options.go`,
+`leadergate.New`) is the reference example.
 
 ---
 
