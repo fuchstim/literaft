@@ -202,19 +202,71 @@ acceptable.
 - **External-reader compatibility is a claim to verify, not assume.** ncruces
   (OFD locks) vs stock SQLite (POSIX `F_SETLK`) interop needs an actual test
   when touched, not an assumption that it still holds.
+- **Wrapping `File`/`VFS` must forward every optional capability interface.**
+  `FileSharedMemory`, `FileLockState`, `FileCheckpoint`, `FileUnwrap`, and the
+  rest are satisfied via type assertion, not declared on the base `File`
+  interface. A wrapper that doesn't re-expose them (`internal/vfs/gatedwalfile.go`'s
+  `vfsutil.WrapXxx` calls, one per capability) silently disables WAL/shm and
+  other features for the wrapped file instead of erroring.
+- **The main `.db` file's own SHARED lock stops external readers from deleting
+  a live WAL out from under a node.** `raft/fsm/dblock.go` holds this lock
+  (a plain OS byte-range lock on the main db file, unrelated to anything in
+  `-shm`) for the node's whole lifetime. Without it, an ordinary transient
+  external reader closing its own connection can correctly conclude it is the
+  last connection with the database open anywhere, and checkpoint-and-delete
+  `-wal`/`-shm`, orphaning every not-yet-checkpointed frame. It must be
+  acquired only *after* `PRAGMA journal_mode=WAL` has already succeeded on
+  that connection: acquired earlier, it collides with the one-time
+  rollback-journal-to-WAL conversion and the connection gets `SQLITE_BUSY`.
+- **The walappender shm write lock is an OFD lock: same-OFD lock requests
+  convert instead of conflicting, and any unlock on that OFD releases the
+  whole byte range, regardless of which goroutine acquired it.** A second
+  in-process acquirer of that lock (a forwarded-write handler materializing
+  under a loaned lock, on the leader) cannot just call the same lock/unlock
+  calls concurrently with the FSM goroutine: it silently fails to exclude,
+  and an early unlock lets a local writer interleave mid-protocol, tearing
+  the WAL and wal-index. `raft/fsm/fsm.go`'s loan mechanism
+  (`BeginHeldApply`/`loans`) exists to front the OS lock with an in-process
+  mutex and suppress the appender's own lock/unlock while a lock is loaned out.
+- **Own the apply-progress counter; don't read it off the RAFT library.**
+  `raft/fsm/fsm.go`'s `lastApplied` is a separate atomic counter, advanced
+  only once a page image is actually materialized (or, for a loaned apply,
+  once the WAL append under that loan completes). The underlying RAFT
+  library's own applied-index bookkeeping advances as soon as an entry is
+  dispatched to the FSM goroutine, before `Apply` runs, so it can lead the
+  local database; using it as a base-index or readiness check reopens a
+  lost-update window.
+- **A local publish failure after RAFT commit is fatal, not retryable.** If
+  materializing an already-committed entry fails locally
+  (`internal/vfs/publish_fatal_internal_test.go`), this node's disk has
+  silently diverged from the cluster. Swallowing the error or retrying would
+  let that divergence persist invisibly; crash instead.
+- **A wrapped error type needs its own `Unwrap`.** Embedding an `error` field
+  only promotes `Error() string`, not `Unwrap() error`. A custom error type
+  without an explicit `Unwrap` method silently breaks `errors.As`/`errors.Is`
+  discovery of what it wraps the moment it passes through another
+  `fmt.Errorf("...: %w", ...)` layer (`raft/errors/errors.go`'s error types
+  all implement it for this reason).
 - **Ambiguous commit.** RAFT "proposed, outcome unknown" must be treated as
   failure by the gate, which means a txn can fail locally yet commit
   cluster-wide. Client-request-ID dedup in the apply path is how you avoid
   double-apply on retry. (Deferred with forwarding, but keep the hook in mind.)
-- **The self-apply skip must stay transient, never permanent.** `fsm.FSM.Apply`
-  (`fsm/fsm.go`) skips materializing an entry only while its `Header.Id` is
-  present in `f.skipEntries`, a marker `Gate.proposeTransaction` sets before
-  its own `LogAdapter.Apply` call and clears right after, scoped to that one
-  in-flight proposal. A static, permanent check (e.g. keying off a node ID
-  instead of a per-proposal token) breaks replay: hraft's Figure-8 rule can
-  retroactively commit a self-authored entry from an earlier, unfinished
-  leadership stint, and `FSM.Restore` can reset local state to an older
-  snapshot, after which every self-authored entry past that snapshot needs to
-  replay normally since the restore just made it genuinely missing again.
-  Both would silently and permanently diverge that node's local disk from the
-  cluster.
+- **The self-apply skip must stay transient, never permanent, and must
+  survive a second consumer.** `FSM.Apply` (`raft/fsm/fsm.go`) skips
+  materializing an entry only while a per-proposal skip marker for its
+  `Header.Id` is `pending`; `CreateSkipMarker`/`DeleteSkipMarker` scope that
+  marker to one in-flight proposal (set before, cleared right after, the
+  proposal's own local `Apply` call), and `tryConsumeSkipMarker` flips it to
+  `skipped` on the one materialization it's meant to cover. A static,
+  permanent check (e.g. keying off a node ID instead of a per-proposal token)
+  breaks replay: hraft's Figure-8 rule can retroactively commit a
+  self-authored entry from an earlier, unfinished leadership stint, and
+  `FSM.Restore` can reset local state to an older snapshot, after which every
+  self-authored entry past that snapshot needs to replay normally since the
+  restore just made it genuinely missing again. Both would silently and
+  permanently diverge that node's local disk from the cluster. The marker is
+  also a three-state CAS (`pending`/`skipped`/`abandoned`, not a plain bool)
+  because `AwaitSkipMarkerConsumed` can time out waiting on a marker that a
+  concurrent forwarded-write path never ends up consuming; that dual-wait
+  timeout is load-bearing, not a nicety, or the waiter can hang behind a
+  marker that will never resolve.
