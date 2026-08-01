@@ -75,8 +75,8 @@ leader write throughput is one txn per round-trip.
 **Not a client-request-ID field.** An earlier draft of this ADR (and of
 `DESIGN.md`) described the entry format as carrying "a client request ID (for
 future dedup)". No such field was ever added, before or after the
-refactor; `ROADMAP.md`'s "Deferred" section still correctly lists
-client-request-ID dedup as unbuilt. `Header.Id`, the per-proposal token the
+refactor; client-request-ID dedup remains unbuilt and deferred (tracked on
+GitHub). `Header.Id`, the per-proposal token the
 current format does carry, serves a different, narrower purpose (the
 self-apply skip) and must not be conflated with this; see ADR-011.
 
@@ -270,7 +270,7 @@ narrow ADR-008 regime.
 ## ADR-010: Split InstallSnapshot out of M5 into its own milestone
 
 **Decision.** M5 shipped only the leadership-churn ordering work
-(`ROADMAP.md`'s "losing leadership" / "gaining leadership" bullets): the gate
+(the "losing leadership" / "gaining leadership" work items): the gate
 gates local proposals on a current-term `hraft.Barrier` drain, closing the
 apply-behind window (and, at the time this ADR was written, the Figure-8
 self-apply race; see ADR-011 for how that guarantee was later lost).
@@ -290,8 +290,7 @@ clusters never exceed.
 
 **Consequence.** `FSM.Snapshot`/`Restore` stayed stubbed and the snapshot
 threshold stayed high through M5; a follower that fell far enough behind to
-need a real snapshot wasn't handled until M6 (both M5 and M6 are done now,
-see `ROADMAP.md`).
+need a real snapshot wasn't handled until M6 (both M5 and M6 are done now).
 
 ---
 
@@ -448,8 +447,8 @@ of the `hraft.Raft` transport/stores; `cmd/literaft/main.go`'s `run()` is
 the reference example, and is now the *only* place that wiring happens,
 rather than being one layer inside a reusable `internal/node`.
 
-This is a more thorough version of what `ROADMAP.md`'s "Deferred: Refactor
-`internal/node` to consume `driver/`" item originally proposed (having
+This is a more thorough version of what the deferred "Refactor `internal/node`
+to consume `driver/`" item originally proposed (having
 `internal/node` call into `driver/` internally, keeping its own `Node` type
 as the public surface); the actual change removed the intermediate type
 entirely rather than having it delegate.
@@ -515,7 +514,7 @@ aren't, `log.SingleWriterLog.Apply` now tags it with a new
 (`BUSY`), which `internal/vfs.File`'s write path checks for via `errors.As`
 and uses instead of its `IOERR_WRITE` default, the first time any rejection
 reason has been distinguished at the sqlite result-code level, closing a gap
-`ROADMAP.md` had tracked as a TODO. The first version of `GateError` didn't
+that had been tracked as a TODO. The first version of `GateError` didn't
 implement `Unwrap`, which silently broke `errors.As`/`errors.Is` discovery of
 the error it wrapped (e.g. recovering a `log.CatchingUpError` from
 `Driver.LastRejection()`) the moment it passed through `Gate.proposeTransaction`'s

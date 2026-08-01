@@ -210,7 +210,7 @@ can see beyond the published `mxFrame`, which the gate guarantees equals
 **Consistency note:** a local read returns this node's committed state.
 On the leader that's current; on a follower it may lag. For linearizable reads,
 route to the leader under a lease or use a RAFT read-index barrier (RAFT-side,
-not VFS). Still deferred; see `ROADMAP.md`'s "Deferred" section (issue #35).
+not VFS). Still deferred (issue #35).
 
 ---
 
@@ -458,8 +458,8 @@ forwards whatever its `LogAdapter.Apply` returns.
 **Ambiguous commit:** RAFT "proposed, outcome unknown" is treated as failure by
 the gate, but the entry may have committed cluster-wide. The local app sees a
 failed txn that took effect; a blind retry would double-apply.
-Client-request-ID dedup stays deferred (`ROADMAP.md`'s "Deferred" section,
-issue #34) and, per the M9 forwarding design, is only ever needed if blind
+Client-request-ID dedup stays deferred (issue #34) and, per the M9 forwarding
+design, is only ever needed if blind
 re-propose is added: a forwarded write never re-sends the same page images
 after a possibly-proposed outcome (every retry is a fresh SQL execution on
 fresher state), and `FOLLOWER_WRITES.md`'s failure matrix enumerates how

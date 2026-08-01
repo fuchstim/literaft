@@ -335,7 +335,6 @@ pre-1.0.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md): ADR log of rejected alternatives.
 - [`docs/FOLLOWER_WRITES.md`](docs/FOLLOWER_WRITES.md): the write-forwarding
   protocol (base-index check, skip-marker state machine, failure matrix).
-- [`docs/ROADMAP.md`](docs/ROADMAP.md): milestone status, mirrored from GitHub.
 - [`docs/WAL_FORMAT.md`](docs/WAL_FORMAT.md): on-disk byte layout reference.
 - [`docs/NCRUCES_NOTES.md`](docs/NCRUCES_NOTES.md): notes on building on
   `ncruces/go-sqlite3`.

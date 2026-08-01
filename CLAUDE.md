@@ -79,7 +79,7 @@ The WAL write lock is the per-node serializer; RAFT is the cross-node one.
 
 ## Current status & milestone
 
-**M0–M6 done** (see `docs/ROADMAP.md`): wrapper VFS, external-reader
+**M0–M6 done**: wrapper VFS, external-reader
 compatibility, commit-frame gate, shm + follower apply, real
 `hashicorp/raft` integration (`internal/raft/gate/`, `internal/raft/proto/`,
 `fsm/`, `cmd/literaft/`), the leadership-churn ordering work, and real
@@ -91,7 +91,7 @@ normal log replication catches up via `fsm.FSM.Snapshot`/`Restore` (delegating
 to `internal/fsm/snapshotter.Snapshotter`, which appends the incoming snapshot
 as ordinary WAL frames rather than swapping the whole file) instead. Current
 work is **Milestone 7** (hardening: fault injection, fuzzing, and the
-remaining flakes — see `docs/ROADMAP.md`).
+remaining flakes).
 
 **Scope decision:** follower-originated writes are **rejected by default**
 (ADR-007) — a client write on a follower returns an error with a leader hint
@@ -121,25 +121,14 @@ electable. That is the path that needs the custom shm implementation (below).
 ## GitHub workflow
 
 GitHub issues and milestones are the source of truth for outstanding work.
-`docs/ROADMAP.md` is a derived mirror kept only for easier AI consumption in
-this file's context — update it *from* GitHub, not the other way around.
+There is no roadmap document mirroring them; check GitHub directly.
 
-**GitHub ↔ roadmap mapping**
+**GitHub project tracking**
 
-- Each GH milestone maps to a roadmap section (`## M# — ...`) of the same
-  name; each GH issue under it maps to a bullet in that section (bullet text
-  = issue body). Every roadmap-tracked issue lives in project 3
+- Every tracked issue lives in project 3
   (https://github.com/users/fuchstim/projects/3, repo `fuchstim/literaft`).
-  The "Deferred (out of current scope)" milestone maps to the roadmap's
-  "Deferred" section.
 - Status: the project's `Status` field is `Done` for completed items (issue
-  also closed) or `Backlog` otherwise — roadmap-derived issues only ever use
-  those two values. A milestone is closed once every issue under it is done.
-- **When GitHub issues/milestones change, update `docs/ROADMAP.md` in the
-  same pass:** a new issue becomes a new bullet, an edited issue body becomes
-  an edited bullet, an issue closed/marked `Done` gets reflected in the
-  bullet, a new milestone becomes a new `## M# — ...` section. Don't let the
-  two drift.
+  also closed) or `Backlog` otherwise.
 - IDs for scripting this via `gh api`/`gh project`: project id
   `PVT_kwHOATlZK84Bc32q`, `Status` field id `PVTSSF_lAHOATlZK84Bc32qzhXdftE`,
   options `Backlog`=`f75ad846`, `Done`=`98236657`. `gh project item-edit`
@@ -163,7 +152,7 @@ this file's context — update it *from* GitHub, not the other way around.
 
 ```
 /CLAUDE.md                        – this file
-/docs/                            – design, decisions, roadmap, format & library notes
+/docs/                            – design, decisions, format & library notes
 /go.mod
 /fsm/                             – owns a node's SQLite connection, walappender,
     fsm.go                          snapshotter, and the external-reader-safety
@@ -348,7 +337,7 @@ acceptable.
   (incl. external processes) will see torn state. Highest-risk code in the repo.
 - **External-reader compatibility is a claim to verify, not assume.** ncruces
   (OFD locks) vs stock SQLite (POSIX `F_SETLK`) interop needs an actual test
-  early — it's requirement #3. See `docs/ROADMAP.md` M1.
+  early — it's requirement #3.
 - **Ambiguous commit.** RAFT "proposed, outcome unknown" must be treated as
   failure by the gate, which means a txn can fail locally yet commit
   cluster-wide. Client-request-ID dedup in the apply path is how you avoid

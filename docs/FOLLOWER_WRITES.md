@@ -11,7 +11,7 @@ acceptance; the review's corrections are folded in throughout and noted
 where they changed the design. The byte-identical correctness
 check through follower connections and the failure-matrix cluster tests
 (leadership churn mid-forward, `InstallSnapshot` during forwarding) are in
-place; see `ROADMAP.md` M9.
+place.
 
 ---
 
