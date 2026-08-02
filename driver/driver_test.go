@@ -9,9 +9,9 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	"github.com/fuchstim/literaft/driver"
+	"github.com/fuchstim/literaft/internal/gate"
 	"github.com/fuchstim/literaft/internal/testutils"
 	rafterrors "github.com/fuchstim/literaft/raft/errors"
-	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -23,7 +23,7 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
 		defer gate.Close()
 		drv := driver.New(n.FSM, gate)
 		defer drv.Close()
@@ -52,7 +52,7 @@ var _ = Describe("Driver", func() {
 
 		drivers := make(map[*testutils.Node]*driver.Driver, len(c.Nodes()))
 		for _, n := range c.Nodes() {
-			gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+			gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
 			defer gate.Close()
 			d := driver.New(n.FSM, gate)
 			defer d.Close()
@@ -81,11 +81,11 @@ var _ = Describe("Driver", func() {
 		c2 := testutils.NewInmemCluster(GinkgoT(), 1)
 		defer c2.Shutdown()
 
-		gate1 := leadergate.New(c1.Nodes()[0].Raft, c1.Nodes()[0].FSM)
+		gate1 := gate.New(c1.Nodes()[0].Raft, c1.Nodes()[0].FSM)
 		defer gate1.Close()
 		drv1 := driver.New(c1.Nodes()[0].FSM, gate1)
 		defer drv1.Close()
-		gate2 := leadergate.New(c2.Nodes()[0].Raft, c2.Nodes()[0].FSM)
+		gate2 := gate.New(c2.Nodes()[0].Raft, c2.Nodes()[0].FSM)
 		defer gate2.Close()
 		drv2 := driver.New(c2.Nodes()[0].FSM, gate2)
 		defer drv2.Close()
@@ -113,7 +113,7 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
 		defer gate.Close()
 		drv := driver.New(n.FSM, gate)
 
@@ -141,7 +141,7 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := leadergate.New(n.Raft, n.FSM, leadergate.WithApplyTimeout(2*time.Second))
+		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
 		defer gate.Close()
 		drv := driver.New(n.FSM, gate)
 		defer drv.Close()

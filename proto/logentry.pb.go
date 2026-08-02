@@ -4,7 +4,7 @@
 // 	protoc        (unknown)
 // source: logentry.proto
 
-package raftproto
+package proto
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -247,20 +247,20 @@ var File_logentry_proto protoreflect.FileDescriptor
 
 const file_logentry_proto_rawDesc = "" +
 	"\n" +
-	"\x0elogentry.proto\x12\traftproto\"\xc4\x02\n" +
-	"\bLogEntry\x122\n" +
-	"\x06header\x18\x01 \x01(\v2\x1a.raftproto.LogEntry.HeaderR\x06header\x12C\n" +
-	"\vtransaction\x18\x02 \x01(\v2\x1f.raftproto.LogEntry.TransactionH\x00R\vtransaction\x1a\x18\n" +
+	"\x0elogentry.proto\x12\x05proto\"\xb8\x02\n" +
+	"\bLogEntry\x12.\n" +
+	"\x06header\x18\x01 \x01(\v2\x16.proto.LogEntry.HeaderR\x06header\x12?\n" +
+	"\vtransaction\x18\x02 \x01(\v2\x1b.proto.LogEntry.TransactionH\x00R\vtransaction\x1a\x18\n" +
 	"\x06Header\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x1a\x99\x01\n" +
-	"\vTransaction\x12:\n" +
-	"\x05pages\x18\x01 \x03(\v2$.raftproto.LogEntry.Transaction.PageR\x05pages\x12\x1d\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x1a\x95\x01\n" +
+	"\vTransaction\x126\n" +
+	"\x05pages\x18\x01 \x03(\v2 .proto.LogEntry.Transaction.PageR\x05pages\x12\x1d\n" +
 	"\n" +
 	"n_truncate\x18\x02 \x01(\rR\tnTruncate\x1a/\n" +
 	"\x04Page\x12\x13\n" +
 	"\x05pg_no\x18\x01 \x01(\rR\x04pgNo\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04dataB\t\n" +
-	"\apayloadB3Z1github.com/fuchstim/literaft/raft/proto;raftprotob\x06proto3"
+	"\apayloadB*Z(github.com/fuchstim/literaft/proto;protob\x06proto3"
 
 var (
 	file_logentry_proto_rawDescOnce sync.Once
@@ -276,15 +276,15 @@ func file_logentry_proto_rawDescGZIP() []byte {
 
 var file_logentry_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_logentry_proto_goTypes = []any{
-	(*LogEntry)(nil),                  // 0: raftproto.LogEntry
-	(*LogEntry_Header)(nil),           // 1: raftproto.LogEntry.Header
-	(*LogEntry_Transaction)(nil),      // 2: raftproto.LogEntry.Transaction
-	(*LogEntry_Transaction_Page)(nil), // 3: raftproto.LogEntry.Transaction.Page
+	(*LogEntry)(nil),                  // 0: proto.LogEntry
+	(*LogEntry_Header)(nil),           // 1: proto.LogEntry.Header
+	(*LogEntry_Transaction)(nil),      // 2: proto.LogEntry.Transaction
+	(*LogEntry_Transaction_Page)(nil), // 3: proto.LogEntry.Transaction.Page
 }
 var file_logentry_proto_depIdxs = []int32{
-	1, // 0: raftproto.LogEntry.header:type_name -> raftproto.LogEntry.Header
-	2, // 1: raftproto.LogEntry.transaction:type_name -> raftproto.LogEntry.Transaction
-	3, // 2: raftproto.LogEntry.Transaction.pages:type_name -> raftproto.LogEntry.Transaction.Page
+	1, // 0: proto.LogEntry.header:type_name -> proto.LogEntry.Header
+	2, // 1: proto.LogEntry.transaction:type_name -> proto.LogEntry.Transaction
+	3, // 2: proto.LogEntry.Transaction.pages:type_name -> proto.LogEntry.Transaction.Page
 	3, // [3:3] is the sub-list for method output_type
 	3, // [3:3] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name

@@ -4,19 +4,21 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/raft"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
+	"github.com/fuchstim/literaft/fsm"
+	"github.com/fuchstim/literaft/internal/gate"
 	"github.com/fuchstim/literaft/internal/vfs"
 	"github.com/fuchstim/literaft/internal/wal"
-	"github.com/fuchstim/literaft/raft/fsm"
 )
 
 type Driver struct {
-	gate            *recordingGate
+	gate            *recordinggate
 	dbPath, vfsName string
 }
 
-func New(f *fsm.FSM, gate vfs.Gate, opts ...Option) *Driver {
+func New(r *raft.Raft, f *fsm.FSM, opts ...Option) *Driver {
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
@@ -24,7 +26,8 @@ func New(f *fsm.FSM, gate vfs.Gate, opts ...Option) *Driver {
 
 	vfsName := uuid.NewString()
 
-	rg := &recordingGate{gate: gate}
+	gate := gate.New(r, f, o.logger, o.leaderTransport, o.applyTimeout, o.forwardTimeout, o.handlerLockTimeout)
+	rg := &recordinggate{Gate: gate}
 	vfs.Register(vfsName, sqlite3vfs.Find("os"), rg, o.logger.Named("vfs"))
 
 	return &Driver{rg, f.DBPath(), vfsName}
@@ -32,43 +35,35 @@ func New(f *fsm.FSM, gate vfs.Gate, opts ...Option) *Driver {
 
 func (d *Driver) Close() {
 	sqlite3vfs.Unregister(d.vfsName)
+	d.gate.Close()
 }
 
-// LastRejection returns the concrete error from this Driver's most recently
-// completed write proposal (nil if it succeeded, or if none has been made
-// yet). This is the reliable way to recover whether a rejected write was a
-// *rafterrors.NotLeaderError or a *rafterrors.CatchingUpError: that
-// distinction doesn't reliably survive the round trip back through
-// database/sql, which by then may report only a generic error.
+func (d *Driver) Ready() bool          { return d.gate.Ready() }
 func (d *Driver) LastRejection() error { return d.gate.LastRejection() }
+func (d *Driver) VFSName() string      { return d.vfsName }
 
-// VFSName returns the name this Driver registered its gated VFS under.
-func (d *Driver) VFSName() string { return d.vfsName }
+type recordinggate struct {
+	*gate.Gate
 
-// recordingGate wraps a vfs.Gate to record the outcome of the most recently
-// completed ProposeTransaction call, so LastRejection can recover it after
-// the error itself no longer reliably survives the round trip through
-// database/sql.
-type recordingGate struct {
-	gate vfs.Gate
-
-	lastErrMu sync.Mutex
-	lastErr   error
+	lastRejectionMu sync.Mutex
+	lastRejection   error
 }
 
-var _ vfs.Gate = (*recordingGate)(nil)
+func (g *recordinggate) ProposeTransaction(frames []*wal.Frame) error {
+	err := g.Gate.ProposeTransaction(frames)
+	if err != nil {
+		g.lastRejectionMu.Lock()
+		defer g.lastRejectionMu.Unlock()
 
-func (g *recordingGate) ProposeTransaction(frames []*wal.Frame) error {
-	err := g.gate.ProposeTransaction(frames)
-	g.lastErrMu.Lock()
-	defer g.lastErrMu.Unlock()
+		g.lastRejection = err
+	}
 
-	g.lastErr = err
 	return err
 }
 
-func (g *recordingGate) LastRejection() error {
-	g.lastErrMu.Lock()
-	defer g.lastErrMu.Unlock()
-	return g.lastErr
+func (g *recordinggate) LastRejection() error {
+	g.lastRejectionMu.Lock()
+	defer g.lastRejectionMu.Unlock()
+
+	return g.lastRejection
 }

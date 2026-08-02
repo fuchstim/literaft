@@ -1,4 +1,4 @@
-package leadergate_test
+package gate_test
 
 import (
 	"errors"
@@ -9,7 +9,7 @@ import (
 
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/wal"
-	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	protoerrors "github.com/fuchstim/literaft/proto/errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -33,7 +33,7 @@ func frame(pgno uint32, data []byte) *wal.Frame {
 	return &wal.Frame{Header: h, Data: data}
 }
 
-var _ = Describe("leadergate.Gate", func() {
+var _ = Describe("gate.Gate", func() {
 	It("returns a NotLeaderError with a leader hint from a follower", func() {
 		c := newGatedCluster(GinkgoT(), 2, time.Second)
 		defer c.Shutdown()
@@ -50,7 +50,7 @@ var _ = Describe("leadergate.Gate", func() {
 			if err == nil {
 				return false
 			}
-			var notLeader *rafterrors.NotLeaderError
+			var notLeader *protoerrors.NotLeaderError
 			if !errors.As(err, &notLeader) || notLeader.Leader != leader.Addr {
 				return false
 			}

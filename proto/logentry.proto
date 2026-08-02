@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package raftproto;
+package proto;
 
-option go_package = "github.com/fuchstim/literaft/raft/proto;raftproto";
+option go_package = "github.com/fuchstim/literaft/proto;proto";
 
 message LogEntry {
   Header header = 1;

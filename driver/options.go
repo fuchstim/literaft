@@ -1,26 +1,60 @@
 package driver
 
-import "github.com/hashicorp/go-hclog"
+import (
+	"time"
+
+	"github.com/fuchstim/literaft/proto"
+	"github.com/hashicorp/go-hclog"
+)
 
 type Option func(*options)
 
 type options struct {
-	logger hclog.Logger
+	logger             hclog.Logger
+	leaderTransport    proto.LeaderTransport
+	applyTimeout       time.Duration
+	forwardTimeout     time.Duration
+	handlerLockTimeout time.Duration
 }
 
 func defaultOptions() options {
 	return options{
-		logger: hclog.NewNullLogger(),
+		logger:             hclog.NewNullLogger(),
+		leaderTransport:    nil,
+		applyTimeout:       5 * time.Second,
+		forwardTimeout:     2 * time.Second,
+		handlerLockTimeout: 1 * time.Second,
 	}
 }
 
-// WithLogger threads an hclog.Logger through the registered VFS this Driver
-// owns, under a named child. Defaults to a no-op logger, so an embedded
-// Driver stays silent unless the caller opts in.
 func WithLogger(l hclog.Logger) Option {
 	return func(o *options) {
 		if l != nil {
 			o.logger = l
 		}
+	}
+}
+
+func WithLeaderTransport(lt proto.LeaderTransport) Option {
+	return func(o *options) {
+		o.leaderTransport = lt
+	}
+}
+
+func WithApplyTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.applyTimeout = d
+	}
+}
+
+func WithForwardTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.forwardTimeout = d
+	}
+}
+
+func WithHandlerLockTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.handlerLockTimeout = d
 	}
 }

@@ -7,8 +7,8 @@
 //   - NewInmemCluster: in-memory transport/log/stable/snapshot store, real
 //     fsm.FSM per node under its own temp-dir SQLite file. Fast; no real
 //     process restart is possible (nothing durable to restart from). For
-//     Gate/FSM/driver-level tests that build their own leadergate.Gate,
-//     forwardinggate.Gate, or Driver on top of the raw nodes.
+//     Gate/FSM/driver-level tests that build their own gate.Gate or Driver
+//     on top of the raw nodes.
 //   - NewTCPCluster: real TCP transport and file snapshot store on disk
 //     under a caller-provided directory, each node already wrapped in a
 //     real driver.Driver + *sql.DB. The raft log/stable store is an
@@ -30,12 +30,12 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/driver"
+	"github.com/fuchstim/literaft/fsm"
 	"github.com/fuchstim/literaft/internal/vfs"
-	"github.com/fuchstim/literaft/raft/fsm"
 )
 
 // Gate is the subset of behavior every NewTCPCluster node's write gate
-// exposes, satisfied by both *leadergate.Gate and *forwardinggate.Gate.
+// exposes, satisfied by *gate.Gate.
 type Gate interface {
 	vfs.Gate
 	Ready() bool

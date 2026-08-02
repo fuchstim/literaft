@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/raft/fsm"
-	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
-	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
+	"github.com/fuchstim/literaft/fsm"
+	"github.com/fuchstim/literaft/internal/gate"
+	raftproto "github.com/fuchstim/literaft/proto"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
 
@@ -172,9 +173,8 @@ func (c *TCPCluster) IndexOf(n *Node) int {
 // real raft.Raft (which
 // bootstraps if s.bootstrap is set -- tolerating raft.ErrCantBootstrap so
 // restarting an already-bootstrapped node is a harmless no-op), a write
-// gate wrapping it (leadergate.Gate, or forwardinggate.Gate wrapping one
-// when hub is non-nil), and a driver.Driver registered under a fresh
-// database/sql alias.
+// gate wrapping it (a gate.Gate, forwarding-enabled when hub is non-nil),
+// and a driver.Driver registered under a fresh database/sql alias.
 func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 	t.Helper()
 
@@ -231,16 +231,15 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 		}
 	}
 
-	// With forwarding enabled, the write gate is a forwardinggate.Gate wrapping
-	// a leadergate.Gate; on a follower it forwards writes to the leader
-	// through the shared in-process hub instead of rejecting them.
-	var g Gate
+	// With forwarding enabled, the write gate forwards a follower's writes to
+	// the leader through the shared in-process hub instead of rejecting them.
+	var leaderTransport raftproto.LeaderTransport
 	if hub != nil {
-		g = forwardinggate.New(r, f, hub.Transport(raft.ServerAddress(s.addr)),
-			forwardinggate.WithForwardTimeout(o.applyTimeout), forwardinggate.WithHandlerLockTimeout(o.applyTimeout))
-	} else {
-		g = leadergate.New(r, f, leadergate.WithApplyTimeout(o.applyTimeout))
+		leaderTransport = hub.Transport(raft.ServerAddress(s.addr))
 	}
+
+	g := gate.New(r, f, hclog.NewNullLogger(), leaderTransport,
+		o.applyTimeout, o.applyTimeout, o.applyTimeout)
 
 	drv := driver.New(f, g)
 	alias := "literaft-testutils-" + uuid.NewString()

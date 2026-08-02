@@ -1,4 +1,4 @@
-package leadergate_test
+package gate_test
 
 import (
 	"time"
@@ -89,9 +89,9 @@ var _ = Describe("Figure-8 self-apply safety", func() {
 
 		// The Figure-8 case itself: stale was never committed during
 		// leader's first term, but is still in leader's log, so this new
-		// term's Barrier (leadergate.Gate's drain) commits and covers it --
-		// and it must be materialized through an ordinary FSM.Apply on
-		// leader itself, not lost, not double-applied.
+		// term's Barrier (gate.Gate's drain) commits and covers it -- and
+		// it must be materialized through an ordinary FSM.Apply on leader
+		// itself, not lost, not double-applied.
 		testutils.Eventually(GinkgoT(), 5*time.Second, 10*time.Millisecond, func() bool {
 			_, okHelper := tryNodeQueryInt(helper, "SELECT count(*) FROM stale")
 			_, okThird := tryNodeQueryInt(thirdWheel, "SELECT count(*) FROM stale")

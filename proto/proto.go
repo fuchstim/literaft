@@ -1,8 +1,18 @@
-package raftproto
-
-import "github.com/fuchstim/literaft/internal/wal"
-
 //go:generate buf generate
+package proto
+
+import (
+	"context"
+
+	"github.com/fuchstim/literaft/internal/wal"
+	"github.com/hashicorp/raft"
+)
+
+
+type LeaderTransport interface {
+	Propose(ctx context.Context, leader raft.ServerAddress, request *LeaderRequest) (*LeaderResponse, error)
+	Handle(handler func(ctx context.Context, request *LeaderRequest) *LeaderResponse)
+}
 
 func NewLogEntryTransaction(frames []*wal.Frame) *LogEntry_Transaction {
 	tx := &LogEntry_Transaction{
