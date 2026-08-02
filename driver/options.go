@@ -3,8 +3,9 @@ package driver
 import (
 	"time"
 
-	"github.com/fuchstim/literaft/proto"
 	"github.com/hashicorp/go-hclog"
+
+	"github.com/fuchstim/literaft/proto"
 )
 
 type Option func(*options)

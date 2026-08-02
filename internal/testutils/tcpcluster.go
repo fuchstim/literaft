@@ -10,12 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
-	"github.com/fuchstim/literaft/internal/gate"
 	raftproto "github.com/fuchstim/literaft/proto"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
@@ -115,7 +113,7 @@ func (c *TCPCluster) ReadyLeader() *Node {
 	var leader *Node
 	Eventually(c.t, 10*time.Second, 20*time.Millisecond, func() bool {
 		for _, n := range c.nodes {
-			if n.Raft.State() == raft.Leader && n.Gate.Ready() {
+			if n.Raft.State() == raft.Leader && n.Driver.Ready() {
 				leader = n
 				return true
 			}
@@ -238,10 +236,9 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 		leaderTransport = hub.Transport(raft.ServerAddress(s.addr))
 	}
 
-	g := gate.New(r, f, hclog.NewNullLogger(), leaderTransport,
-		o.applyTimeout, o.applyTimeout, o.applyTimeout)
-
-	drv := driver.New(f, g)
+	drv := driver.New(r, f,
+		driver.WithLeaderTransport(leaderTransport),
+		driver.WithApplyTimeout(o.applyTimeout), driver.WithForwardTimeout(o.applyTimeout), driver.WithHandlerLockTimeout(o.applyTimeout))
 	alias := "literaft-testutils-" + uuid.NewString()
 	sql.Register(alias, drv)
 	db, err := sql.Open(alias, "")
@@ -256,7 +253,6 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 		FSM:    f,
 		DBPath: s.dbPath,
 		Driver: drv,
-		Gate:   g,
 		DB:     db,
 		shutdown: func() error {
 			var errs []error
@@ -264,7 +260,6 @@ func startTCPNode(t TB, s nodeSpec, o options, hub *InmemForwardHub) *Node {
 				errs = append(errs, err)
 			}
 			drv.Close()
-			g.Close()
 			if err := r.Shutdown().Error(); err != nil {
 				errs = append(errs, fmt.Errorf("raft shutdown: %w", err))
 			}

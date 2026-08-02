@@ -31,16 +31,7 @@ import (
 
 	"github.com/fuchstim/literaft/driver"
 	"github.com/fuchstim/literaft/fsm"
-	"github.com/fuchstim/literaft/internal/vfs"
 )
-
-// Gate is the subset of behavior every NewTCPCluster node's write gate
-// exposes, satisfied by *gate.Gate.
-type Gate interface {
-	vfs.Gate
-	Ready() bool
-	Close()
-}
 
 // TB is the subset of testing.TB (and Ginkgo's GinkgoTInterface, which
 // satisfies it structurally) this package needs. Kept minimal and local
@@ -59,11 +50,10 @@ type Node struct {
 	FSM    *fsm.FSM
 	DBPath string
 
-	// Driver, Gate, and DB are only populated by NewTCPCluster; NewInmemCluster
+	// Driver and DB are only populated by NewTCPCluster; NewInmemCluster
 	// leaves them nil since its callers build their own Gate or Driver on top
 	// of Raft/FSM with test-specific options.
 	Driver *driver.Driver
-	Gate   Gate
 	DB     *sql.DB
 
 	// Transport is only populated by NewInmemCluster, for tests that need

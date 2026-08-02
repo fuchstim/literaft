@@ -9,9 +9,8 @@ import (
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/internal/gate"
 	"github.com/fuchstim/literaft/internal/testutils"
-	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	rafterrors "github.com/fuchstim/literaft/proto/errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -23,15 +22,13 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
-		defer gate.Close()
-		drv := driver.New(n.FSM, gate)
+		drv := driver.New(n.Raft, n.FSM, driver.WithApplyTimeout(2*time.Second))
 		defer drv.Close()
 
 		db := openDB(drv)
 		defer db.Close()
 
-		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(drv.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		_, err := db.ExecContext(ctx, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -52,9 +49,7 @@ var _ = Describe("Driver", func() {
 
 		drivers := make(map[*testutils.Node]*driver.Driver, len(c.Nodes()))
 		for _, n := range c.Nodes() {
-			gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
-			defer gate.Close()
-			d := driver.New(n.FSM, gate)
+			d := driver.New(n.Raft, n.FSM, driver.WithApplyTimeout(2*time.Second))
 			defer d.Close()
 			drivers[n] = d
 		}
@@ -81,13 +76,9 @@ var _ = Describe("Driver", func() {
 		c2 := testutils.NewInmemCluster(GinkgoT(), 1)
 		defer c2.Shutdown()
 
-		gate1 := gate.New(c1.Nodes()[0].Raft, c1.Nodes()[0].FSM)
-		defer gate1.Close()
-		drv1 := driver.New(c1.Nodes()[0].FSM, gate1)
+		drv1 := driver.New(c1.Nodes()[0].Raft, c1.Nodes()[0].FSM)
 		defer drv1.Close()
-		gate2 := gate.New(c2.Nodes()[0].Raft, c2.Nodes()[0].FSM)
-		defer gate2.Close()
-		drv2 := driver.New(c2.Nodes()[0].FSM, gate2)
+		drv2 := driver.New(c2.Nodes()[0].Raft, c2.Nodes()[0].FSM)
 		defer drv2.Close()
 
 		Expect(drv1.VFSName()).NotTo(Equal(drv2.VFSName()))
@@ -97,8 +88,8 @@ var _ = Describe("Driver", func() {
 		db2 := openDB(drv2)
 		defer db2.Close()
 
-		Eventually(gate1.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
-		Eventually(gate2.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(drv1.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(drv2.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		_, err := db1.ExecContext(ctx, "CREATE TABLE only1 (id INTEGER PRIMARY KEY)")
@@ -113,13 +104,11 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
-		defer gate.Close()
-		drv := driver.New(n.FSM, gate)
+		drv := driver.New(n.Raft, n.FSM, driver.WithApplyTimeout(2*time.Second))
 
 		db := openDB(drv)
 
-		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(drv.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		vfsName := drv.VFSName()
 		Expect(sqlite3vfs.Find(vfsName)).NotTo(BeNil())
@@ -127,7 +116,7 @@ var _ = Describe("Driver", func() {
 		// db.Close() alone must not tear down the Driver.
 		Expect(db.Close()).To(Succeed())
 		Expect(sqlite3vfs.Find(vfsName)).NotTo(BeNil())
-		Expect(gate.Ready()).To(BeTrue())
+		Expect(drv.Ready()).To(BeTrue())
 
 		drv.Close()
 		Expect(sqlite3vfs.Find(vfsName)).To(BeNil())
@@ -141,16 +130,14 @@ var _ = Describe("Driver", func() {
 		defer c.Shutdown()
 		n := c.Nodes()[0]
 
-		gate := gate.New(n.Raft, n.FSM, gate.WithApplyTimeout(2*time.Second))
-		defer gate.Close()
-		drv := driver.New(n.FSM, gate)
+		drv := driver.New(n.Raft, n.FSM, driver.WithApplyTimeout(2*time.Second))
 		defer drv.Close()
 
 		db := openDB(drv)
 		defer db.Close()
 		db.SetMaxOpenConns(2)
 
-		Eventually(gate.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
+		Eventually(drv.Ready, 5*time.Second, 10*time.Millisecond).Should(BeTrue())
 
 		ctx := context.Background()
 		c1, err := db.Conn(ctx)

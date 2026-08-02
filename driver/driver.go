@@ -26,8 +26,9 @@ func New(r *raft.Raft, f *fsm.FSM, opts ...Option) *Driver {
 
 	vfsName := uuid.NewString()
 
-	gate := gate.New(r, f, o.logger, o.leaderTransport, o.applyTimeout, o.forwardTimeout, o.handlerLockTimeout)
-	rg := &recordinggate{Gate: gate}
+	g := gate.New(r, f, o.logger, o.leaderTransport, o.applyTimeout, o.forwardTimeout, o.handlerLockTimeout)
+
+	rg := &recordinggate{Gate: g}
 	vfs.Register(vfsName, sqlite3vfs.Find("os"), rg, o.logger.Named("vfs"))
 
 	return &Driver{rg, f.DBPath(), vfsName}
