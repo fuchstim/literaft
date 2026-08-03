@@ -6,7 +6,7 @@
 //	Retryable  CatchingUpError  sqlite3.BUSY         retry; nothing was applied
 //	Retryable  NotAppliedError  sqlite3.BUSY         retry; nothing was applied
 //	Ambiguous  AmbiguousError   sqlite3.IOERR_WRITE  possibly committed; do not blindly retry
-package rafterrors
+package protoerrors
 
 import (
 	"errors"

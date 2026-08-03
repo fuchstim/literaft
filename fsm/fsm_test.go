@@ -10,8 +10,8 @@ import (
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/fuchstim/literaft/raft/fsm"
-	raftproto "github.com/fuchstim/literaft/raft/proto"
+	"github.com/fuchstim/literaft/fsm"
+	raftproto "github.com/fuchstim/literaft/proto"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

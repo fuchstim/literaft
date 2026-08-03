@@ -1,4 +1,4 @@
-package leadergate_test
+package gate_test
 
 import (
 	"errors"
@@ -10,13 +10,13 @@ import (
 	"github.com/fuchstim/literaft/internal/fsm/walappender/shm"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/wal"
-	rafterrors "github.com/fuchstim/literaft/raft/errors"
+	protoerrors "github.com/fuchstim/literaft/proto/errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("leadergate.Gate gaining-leadership drain", func() {
+var _ = Describe("gate.Gate gaining-leadership drain", func() {
 	It("closes the gate until a newly elected leader drains its apply backlog, and applies the backlog exactly once", func() {
 		c := newGatedCluster(GinkgoT(), 2, time.Second)
 		defer c.Shutdown()
@@ -87,7 +87,7 @@ var _ = Describe("leadergate.Gate gaining-leadership drain", func() {
 		// the frame content here is never validated -- unlike txns above,
 		// it doesn't need to be real, valid page content.
 		proposeErr := newGate.ProposeTransaction([]*wal.Frame{frame(1, []byte("premature"))})
-		var catchingUp *rafterrors.CatchingUpError
+		var catchingUp *protoerrors.CatchingUpError
 		Expect(errors.As(proposeErr, &catchingUp)).To(BeTrue(), "got %v (%T), not a CatchingUpError", proposeErr, proposeErr)
 
 		// Release the backlog: the drain's Barrier can now complete,

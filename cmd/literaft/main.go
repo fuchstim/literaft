@@ -28,10 +28,8 @@ import (
 	"github.com/fuchstim/literaft/cmd/literaft/forward"
 	"github.com/fuchstim/literaft/cmd/literaft/membership"
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/internal/vfs"
-	"github.com/fuchstim/literaft/raft/fsm"
-	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
-	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
+	"github.com/fuchstim/literaft/fsm"
+	raftproto "github.com/fuchstim/literaft/proto"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
 
@@ -239,18 +237,11 @@ func run() error {
 
 	// With forwarding enabled the write gate forwards a follower's write to
 	// the leader; otherwise follower writes are rejected.
-	var gate vfs.Gate
-	var closeGate func()
+	var leaderTransport raftproto.LeaderTransport
 	if *forwardWrites {
-		g := forwardinggate.New(r, f, fwdTransport, forwardinggate.WithLogger(logger))
-		gate, closeGate = g, g.Close
-	} else {
-		g := leadergate.New(r, f, leadergate.WithLogger(logger))
-		gate, closeGate = g, g.Close
+		leaderTransport = fwdTransport
 	}
-	reg.add(func() error { closeGate(); return nil })
-
-	d := driver.New(f, gate, driver.WithLogger(logger))
+	d := driver.New(r, f, driver.WithLogger(logger), driver.WithLeaderTransport(leaderTransport))
 	reg.add(func() error { d.Close(); return nil })
 
 	sql.Register("literaft", d)

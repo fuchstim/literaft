@@ -11,7 +11,7 @@ import (
 
 	"github.com/fuchstim/literaft/internal/fsm/snapshotter"
 	"github.com/fuchstim/literaft/internal/fsm/walappender"
-	raftproto "github.com/fuchstim/literaft/raft/proto"
+	raftproto "github.com/fuchstim/literaft/proto"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/ncruces/go-sqlite3"

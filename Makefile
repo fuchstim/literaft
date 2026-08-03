@@ -58,6 +58,10 @@ test/integration: $(LOCALBIN)/ginkgo vet
 vet:
 	$(GO) vet ./...
 
+.PHONY: fmt
+fmt:
+	$(GO) fmt ./...
+
 .PHONY: clean
 clean:
 	rm -rf dist

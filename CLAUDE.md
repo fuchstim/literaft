@@ -5,7 +5,7 @@ Context for a RAFT-backed SQLite VFS, implemented in Go on top of
 separate design-doc corpus: `README.md` carries the high-level overview, and
 the code is the reference for everything below that. Read the relevant
 package before touching the write or follower-apply paths (start from
-`internal/vfs`, `internal/fsm/walappender`, and `raft/gate`).
+`internal/vfs`, `internal/fsm/walappender`, and `internal/gate`).
 
 The system replicates a single-node SQLite database over RAFT without
 patching SQLite and without breaking on-disk file compatibility: WAL mode
@@ -91,7 +91,7 @@ go build ./...
 ```
 
 **Protobuf / gRPC codegen lives in the `Makefile`.** The `.pb.go` and
-`_grpc.pb.go` files under each `**/proto/` directory (`raft/proto`,
+`_grpc.pb.go` files under each `**/proto/` directory (`proto`,
 `cmd/literaft/forward/proto`, `cmd/literaft/membership/proto`) are generated
 from the sibling `.proto` with `buf` (each proto package carries a
 `//go:generate buf generate` and its own `buf.gen.yaml`); don't hand-edit
@@ -161,8 +161,8 @@ parameter on the real constructor. Rationale: a struct field can't
 distinguish "caller explicitly set the zero value" from "caller didn't set
 it at all," and a variadic `...Option` list can grow new options without
 breaking existing call sites, unlike adding a field to a struct that already
-has callers relying on its zero value. `raft/gate/leader/` (`options.go`,
-`leadergate.New`) is the reference example.
+has callers relying on its zero value. `driver/` (`options.go`,
+`driver.New`) is the reference example.
 
 ---
 
@@ -213,7 +213,7 @@ acceptable.
   `vfsutil.WrapXxx` calls, one per capability) silently disables WAL/shm and
   other features for the wrapped file instead of erroring.
 - **The main `.db` file's own SHARED lock stops external readers from deleting
-  a live WAL out from under a node.** `raft/fsm/dblock.go` holds this lock
+  a live WAL out from under a node.** `fsm/dblock.go` holds this lock
   (a plain OS byte-range lock on the main db file, unrelated to anything in
   `-shm`) for the node's whole lifetime. Without it, an ordinary transient
   external reader closing its own connection can correctly conclude it is the
@@ -229,11 +229,11 @@ acceptable.
   under a loaned lock, on the leader) cannot just call the same lock/unlock
   calls concurrently with the FSM goroutine: it silently fails to exclude,
   and an early unlock lets a local writer interleave mid-protocol, tearing
-  the WAL and wal-index. `raft/fsm/fsm.go`'s loan mechanism
+  the WAL and wal-index. `fsm/fsm.go`'s loan mechanism
   (`BeginHeldApply`/`loans`) exists to front the OS lock with an in-process
   mutex and suppress the appender's own lock/unlock while a lock is loaned out.
 - **Own the apply-progress counter; don't read it off the RAFT library.**
-  `raft/fsm/fsm.go`'s `lastApplied` is a separate atomic counter, advanced
+  `fsm/fsm.go`'s `lastApplied` is a separate atomic counter, advanced
   only once a page image is actually materialized (or, for a loaned apply,
   once the WAL append under that loan completes). The underlying RAFT
   library's own applied-index bookkeeping advances as soon as an entry is
@@ -249,14 +249,14 @@ acceptable.
   only promotes `Error() string`, not `Unwrap() error`. A custom error type
   without an explicit `Unwrap` method silently breaks `errors.As`/`errors.Is`
   discovery of what it wraps the moment it passes through another
-  `fmt.Errorf("...: %w", ...)` layer (`raft/errors/errors.go`'s error types
+  `fmt.Errorf("...: %w", ...)` layer (`proto/errors/errors.go`'s error types
   all implement it for this reason).
 - **Ambiguous commit.** RAFT "proposed, outcome unknown" must be treated as
   failure by the gate, which means a txn can fail locally yet commit
   cluster-wide. Client-request-ID dedup in the apply path is how you avoid
   double-apply on retry. (Deferred with forwarding, but keep the hook in mind.)
 - **The self-apply skip must stay transient, never permanent, and must
-  survive a second consumer.** `FSM.Apply` (`raft/fsm/fsm.go`) skips
+  survive a second consumer.** `FSM.Apply` (`fsm/fsm.go`) skips
   materializing an entry only while a per-proposal skip marker for its
   `Header.Id` is `pending`; `CreateSkipMarker`/`DeleteSkipMarker` scope that
   marker to one in-flight proposal (set before, cleared right after, the

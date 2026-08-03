@@ -1,5 +1,5 @@
-// Package forward is a reference forwardinggate.LeaderTransport: a small gRPC
-// service that ships a ForwardRequest/ForwardResponse from a follower to the
+// Package forward is a reference raftproto.LeaderTransport: a small gRPC
+// service that ships a LeaderRequest/LeaderResponse from a follower to the
 // leader for write forwarding. It runs on every node; only the current leader
 // accepts work.
 //
@@ -22,15 +22,14 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	forwardpb "github.com/fuchstim/literaft/cmd/literaft/forward/proto"
-	rafterrors "github.com/fuchstim/literaft/raft/errors"
-	forwardinggate "github.com/fuchstim/literaft/raft/gate/forwarding"
-	raftproto "github.com/fuchstim/literaft/raft/proto"
+	raftproto "github.com/fuchstim/literaft/proto"
+	rafterrors "github.com/fuchstim/literaft/proto/errors"
 )
 
-var _ forwardinggate.LeaderTransport = (*Transport)(nil)
+var _ raftproto.LeaderTransport = (*Transport)(nil)
 
-// Transport implements forwardinggate.LeaderTransport over gRPC, marshaling
-// each ForwardRequest/ForwardResponse into the wire Envelope's opaque bytes.
+// Transport implements raftproto.LeaderTransport over gRPC, marshaling
+// each LeaderRequest/LeaderResponse into the wire Envelope's opaque bytes.
 type Transport struct {
 	// resolve maps a leader's raft.ServerAddress to the dial address of that
 	// node's forward gRPC service. For a node whose raft transport already is
@@ -39,7 +38,7 @@ type Transport struct {
 	dialOptions []grpc.DialOption
 
 	handlerMu sync.RWMutex
-	handler   func(ctx context.Context, request *raftproto.ForwardRequest) *raftproto.ForwardResponse
+	handler   func(ctx context.Context, request *raftproto.LeaderRequest) *raftproto.LeaderResponse
 
 	connMu sync.Mutex
 	conns  map[string]*grpc.ClientConn
@@ -64,16 +63,16 @@ func (t *Transport) Register(g grpc.ServiceRegistrar) {
 	forwardpb.RegisterForwardingServer(g, &server{t: t})
 }
 
-// Handle implements forwardinggate.LeaderTransport.
-func (t *Transport) Handle(handler func(ctx context.Context, request *raftproto.ForwardRequest) *raftproto.ForwardResponse) {
+// Handle implements raftproto.LeaderTransport.
+func (t *Transport) Handle(handler func(ctx context.Context, request *raftproto.LeaderRequest) *raftproto.LeaderResponse) {
 	t.handlerMu.Lock()
 	t.handler = handler
 	t.handlerMu.Unlock()
 }
 
-// Propose implements forwardinggate.LeaderTransport: it dials the leader's
+// Propose implements raftproto.LeaderTransport: it dials the leader's
 // forward service and issues one Propose RPC, returning the decoded response.
-func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request *raftproto.ForwardRequest) (*raftproto.ForwardResponse, error) {
+func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, request *raftproto.LeaderRequest) (*raftproto.LeaderResponse, error) {
 	conn, err := t.conn(t.resolve(leader))
 	if err != nil {
 		// No client was created, so nothing was transmitted to the leader: a
@@ -93,7 +92,7 @@ func (t *Transport) Propose(ctx context.Context, leader raft.ServerAddress, requ
 		return nil, err
 	}
 
-	resp := &raftproto.ForwardResponse{}
+	resp := &raftproto.LeaderResponse{}
 	if err := proto.Unmarshal(env.GetPayload(), resp); err != nil {
 		return nil, fmt.Errorf("unmarshal forward response: %w", err)
 	}
@@ -148,7 +147,7 @@ func (s *server) Propose(ctx context.Context, env *forwardpb.Envelope) (*forward
 		return nil, status.Error(codes.Unavailable, "forward handler not registered")
 	}
 
-	req := &raftproto.ForwardRequest{}
+	req := &raftproto.LeaderRequest{}
 	if err := proto.Unmarshal(env.GetPayload(), req); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unmarshal forward request: %v", err)
 	}

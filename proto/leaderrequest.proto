@@ -1,21 +1,23 @@
 syntax = "proto3";
 
-package raftproto;
+package proto;
 
 import "logentry.proto";
 
-option go_package = "github.com/fuchstim/literaft/raft/proto;raftproto";
+option go_package = "github.com/fuchstim/literaft/proto;proto";
 
-message ForwardRequest {
+message LeaderRequest {
   Header header = 1;
-  LogEntry entry = 2;
+  oneof payload {
+      LogEntry log_entry = 2;
+  }
 
   message Header {
-    uint64 last_applied_index = 1;
+    uint64 last_applied_index = 2;
   }
 }
 
-message ForwardResponse {
+message LeaderResponse {
   Status status = 1;
   string leader_addr = 2;
   uint64 last_applied_index = 3;

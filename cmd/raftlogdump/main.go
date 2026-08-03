@@ -15,7 +15,7 @@ import (
 	"github.com/hashicorp/raft"
 	"google.golang.org/protobuf/proto"
 
-	raftproto "github.com/fuchstim/literaft/raft/proto"
+	raftproto "github.com/fuchstim/literaft/proto"
 	"github.com/fuchstim/literaft/raftsqlite"
 )
 

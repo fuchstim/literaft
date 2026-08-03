@@ -1,4 +1,4 @@
-package leadergate_test
+package gate_test
 
 import (
 	"path/filepath"
@@ -11,18 +11,19 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	sqlite3vfs "github.com/ncruces/go-sqlite3/vfs"
 
+	"github.com/fuchstim/literaft/internal/gate"
 	"github.com/fuchstim/literaft/internal/testutils"
 	"github.com/fuchstim/literaft/internal/vfs"
 	"github.com/fuchstim/literaft/internal/wal"
-	leadergate "github.com/fuchstim/literaft/raft/gate/leader"
+	raftproto "github.com/fuchstim/literaft/proto"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-func TestLeaderGate(t *testing.T) {
+func TestGate(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "leadergate Suite")
+	RunSpecs(t, "gate Suite")
 }
 
 func queryInt(c *sqlite3.Conn, sql string) int64 {
@@ -59,10 +60,10 @@ func (fn funcGate) ProposeTransaction(frames []*wal.Frame) error { return fn(fra
 // never touching any real cluster -- via a gate that only records what it
 // captures. It returns realistic, valid WAL frames in commit order, ready
 // to feed straight into a real Gate.ProposeTransaction call so these tests
-// can exercise leadergate.Gate's leader/ready/timeout logic in isolation.
-// Callers proposing more than one of the returned captures onto the same
-// node must do so in this same order, since later statements build on
-// earlier ones' schema/rows.
+// can exercise gate.Gate's leader/ready/timeout/forwarding logic in
+// isolation. Callers proposing more than one of the returned captures onto
+// the same node must do so in this same order, since later statements
+// build on earlier ones' schema/rows.
 func captureTransactions(stmts ...string) []capturedTxn {
 	GinkgoHelper()
 	var got []capturedTxn
@@ -71,7 +72,7 @@ func captureTransactions(stmts ...string) []capturedTxn {
 		return nil
 	})
 
-	name := "literaft-leadergate-test-capture-" + uuid.NewString()
+	name := "literaft-gate-test-capture-" + uuid.NewString()
 	vfs.Register(name, sqlite3vfs.Find(""), gate, hclog.NewNullLogger())
 
 	path := filepath.Join(GinkgoT().TempDir(), "capture.db")
@@ -128,23 +129,50 @@ func tryNodeQueryInt(n *testutils.Node, sql string) (result int64, ok bool) {
 }
 
 // gatedCluster bundles a testutils.Cluster (Inmem tier) with a real
-// leadergate.Gate per node.
+// gate.Gate per node. hub is non-nil only when forwarding is enabled, in
+// which case every node's Gate forwards follower writes to the leader
+// through it instead of rejecting them.
 type gatedCluster struct {
 	*testutils.Cluster
-	gates map[*testutils.Node]*leadergate.Gate
+	hub   *testutils.InmemForwardHub
+	gates map[*testutils.Node]*gate.Gate
 }
 
 func newGatedCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster {
 	GinkgoHelper()
-	c := testutils.NewInmemCluster(t, n)
-	gates := make(map[*testutils.Node]*leadergate.Gate, n)
-	for _, node := range c.Nodes() {
-		gates[node] = leadergate.New(node.Raft, node.FSM, leadergate.WithApplyTimeout(timeout))
-	}
-	return &gatedCluster{c, gates}
+	return newCluster(t, n, timeout, false)
 }
 
-func (gc *gatedCluster) Gate(n *testutils.Node) *leadergate.Gate { return gc.gates[n] }
+// newFwdCluster builds a gatedCluster with forwarding enabled: every node's
+// Gate is wired to a shared testutils.InmemForwardHub, the same pairing a
+// real node process wires together with -forward-writes.
+func newFwdCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster {
+	GinkgoHelper()
+	return newCluster(t, n, timeout, true)
+}
+
+func newCluster(t testutils.TB, n int, timeout time.Duration, forwarding bool) *gatedCluster {
+	GinkgoHelper()
+	c := testutils.NewInmemCluster(t, n)
+
+	var hub *testutils.InmemForwardHub
+	if forwarding {
+		hub = testutils.NewInmemForwardHub()
+	}
+
+	gates := make(map[*testutils.Node]*gate.Gate, n)
+	for _, node := range c.Nodes() {
+		var leaderTransport raftproto.LeaderTransport
+		if hub != nil {
+			leaderTransport = hub.Transport(node.Addr)
+		}
+
+		gates[node] = gate.New(node.Raft, node.FSM, hclog.NewNullLogger(), leaderTransport, timeout, timeout, timeout)
+	}
+	return &gatedCluster{c, hub, gates}
+}
+
+func (gc *gatedCluster) Gate(n *testutils.Node) *gate.Gate { return gc.gates[n] }
 
 func (gc *gatedCluster) Shutdown() {
 	for _, g := range gc.gates {
@@ -156,7 +184,7 @@ func (gc *gatedCluster) Shutdown() {
 // ReadyLeader waits for a node that's both the raft leader and has
 // finished its Gate's gaining-leadership drain -- safe to immediately
 // propose against.
-func (gc *gatedCluster) ReadyLeader(t testutils.TB) (*testutils.Node, *leadergate.Gate) {
+func (gc *gatedCluster) ReadyLeader(t testutils.TB) (*testutils.Node, *gate.Gate) {
 	t.Helper()
 	var leader *testutils.Node
 	testutils.Eventually(t, 5*time.Second, 10*time.Millisecond, func() bool {

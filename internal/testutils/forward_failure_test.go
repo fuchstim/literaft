@@ -203,7 +203,7 @@ var _ = Describe("write forwarding failure matrix", func() {
 			}, fmt.Sprintf("node %s (incl. the snapshot-restored joiner) to converge", node.ID))
 			cnt, err := rowCount(node)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cnt).To(Equal(int64(preJoin+postJoin)))
+			Expect(cnt).To(Equal(int64(preJoin + postJoin)))
 			Expect(nodeQueryText(node, "PRAGMA integrity_check")).To(Equal("ok"))
 			Expect(externalQueryText(node.DBPath, "PRAGMA integrity_check")).To(Equal("ok"))
 		}

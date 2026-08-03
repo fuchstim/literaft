@@ -12,8 +12,8 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	ncrdriver "github.com/ncruces/go-sqlite3/driver"
 
-	rafterrors "github.com/fuchstim/literaft/raft/errors"
 	"github.com/fuchstim/literaft/internal/testutils"
+	rafterrors "github.com/fuchstim/literaft/proto/errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

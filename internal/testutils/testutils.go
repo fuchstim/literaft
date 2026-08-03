@@ -7,8 +7,8 @@
 //   - NewInmemCluster: in-memory transport/log/stable/snapshot store, real
 //     fsm.FSM per node under its own temp-dir SQLite file. Fast; no real
 //     process restart is possible (nothing durable to restart from). For
-//     Gate/FSM/driver-level tests that build their own leadergate.Gate,
-//     forwardinggate.Gate, or Driver on top of the raw nodes.
+//     Gate/FSM/driver-level tests that build their own gate.Gate or Driver
+//     on top of the raw nodes.
 //   - NewTCPCluster: real TCP transport and file snapshot store on disk
 //     under a caller-provided directory, each node already wrapped in a
 //     real driver.Driver + *sql.DB. The raft log/stable store is an
@@ -30,17 +30,8 @@ import (
 	"github.com/hashicorp/raft"
 
 	"github.com/fuchstim/literaft/driver"
-	"github.com/fuchstim/literaft/internal/vfs"
-	"github.com/fuchstim/literaft/raft/fsm"
+	"github.com/fuchstim/literaft/fsm"
 )
-
-// Gate is the subset of behavior every NewTCPCluster node's write gate
-// exposes, satisfied by both *leadergate.Gate and *forwardinggate.Gate.
-type Gate interface {
-	vfs.Gate
-	Ready() bool
-	Close()
-}
 
 // TB is the subset of testing.TB (and Ginkgo's GinkgoTInterface, which
 // satisfies it structurally) this package needs. Kept minimal and local
@@ -59,11 +50,10 @@ type Node struct {
 	FSM    *fsm.FSM
 	DBPath string
 
-	// Driver, Gate, and DB are only populated by NewTCPCluster; NewInmemCluster
+	// Driver and DB are only populated by NewTCPCluster; NewInmemCluster
 	// leaves them nil since its callers build their own Gate or Driver on top
 	// of Raft/FSM with test-specific options.
 	Driver *driver.Driver
-	Gate   Gate
 	DB     *sql.DB
 
 	// Transport is only populated by NewInmemCluster, for tests that need
@@ -218,11 +208,10 @@ func WithOnDiskRaftStore() Option {
 	return func(o *options) { o.onDiskRaftStore = true }
 }
 
-// WithForwarding (NewTCPCluster only) makes every node's write gate a
-// forwardinggate.Gate wrapping a leadergate.Gate, routing follower-originated
-// writes to the leader over an in-process InmemForwardHub. Follower
-// connections then accept writes (under the base-index check) instead of
-// rejecting them.
+// WithForwarding (NewTCPCluster only) configures every node's gate with a
+// leader transport, routing follower-originated writes to the leader over an
+// in-process InmemForwardHub. Follower connections then accept writes (under
+// the base-index check) instead of rejecting them.
 func WithForwarding() Option {
 	return func(o *options) { o.forwarding = true }
 }
