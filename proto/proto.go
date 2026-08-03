@@ -8,7 +8,6 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-
 type LeaderTransport interface {
 	Propose(ctx context.Context, leader raft.ServerAddress, request *LeaderRequest) (*LeaderResponse, error)
 	Handle(handler func(ctx context.Context, request *LeaderRequest) *LeaderResponse)
