@@ -229,7 +229,6 @@ func (x *LeaderResponse) GetDetail() string {
 
 type LeaderRequest_Header struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
-	Id               string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"` // per-request unique token
 	LastAppliedIndex uint64                 `protobuf:"varint,2,opt,name=last_applied_index,json=lastAppliedIndex,proto3" json:"last_applied_index,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -265,13 +264,6 @@ func (*LeaderRequest_Header) Descriptor() ([]byte, []int) {
 	return file_leaderrequest_proto_rawDescGZIP(), []int{0, 0}
 }
 
-func (x *LeaderRequest_Header) GetId() string {
-	if x != nil {
-		return x.Id
-	}
-	return ""
-}
-
 func (x *LeaderRequest_Header) GetLastAppliedIndex() uint64 {
 	if x != nil {
 		return x.LastAppliedIndex
@@ -283,12 +275,11 @@ var File_leaderrequest_proto protoreflect.FileDescriptor
 
 const file_leaderrequest_proto_rawDesc = "" +
 	"\n" +
-	"\x13leaderrequest.proto\x12\x05proto\x1a\x0elogentry.proto\"\xc7\x01\n" +
+	"\x13leaderrequest.proto\x12\x05proto\x1a\x0elogentry.proto\"\xb7\x01\n" +
 	"\rLeaderRequest\x123\n" +
 	"\x06header\x18\x01 \x01(\v2\x1b.proto.LeaderRequest.HeaderR\x06header\x12.\n" +
-	"\tlog_entry\x18\x02 \x01(\v2\x0f.proto.LogEntryH\x00R\blogEntry\x1aF\n" +
-	"\x06Header\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12,\n" +
+	"\tlog_entry\x18\x02 \x01(\v2\x0f.proto.LogEntryH\x00R\blogEntry\x1a6\n" +
+	"\x06Header\x12,\n" +
 	"\x12last_applied_index\x18\x02 \x01(\x04R\x10lastAppliedIndexB\t\n" +
 	"\apayload\"\xe0\x02\n" +
 	"\x0eLeaderResponse\x124\n" +

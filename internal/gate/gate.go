@@ -94,10 +94,7 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 	}
 
 	req := &raftproto.LeaderRequest{
-		Header: &raftproto.LeaderRequest_Header{
-			Id:               e.GetHeader().GetId(),
-			LastAppliedIndex: g.fsm.LastAppliedIndex(),
-		},
+		Header:  &raftproto.LeaderRequest_Header{LastAppliedIndex: g.fsm.LastAppliedIndex()},
 		Payload: &raftproto.LeaderRequest_LogEntry{LogEntry: e},
 	}
 
@@ -122,9 +119,17 @@ func (g *Gate) Ready() bool {
 		return g.leaderTransport != nil
 	}
 
+	return g.leaderReady()
+}
+
+// leaderReady reports whether this node is a leader that has finished
+// draining its apply backlog. Unlike Ready, it never takes the
+// forwarding-follower shortcut, so proposeEntry can't be fooled by a
+// leadership loss into treating a non-leader as ready.
+func (g *Gate) leaderReady() bool {
 	g.readyMu.RLock()
 	defer g.readyMu.RUnlock()
-	return g.ready
+	return g.raft.State() == raft.Leader && g.ready
 }
 
 func (g *Gate) proposeEntry(e *raftproto.LogEntry) error {
@@ -133,7 +138,7 @@ func (g *Gate) proposeEntry(e *raftproto.LogEntry) error {
 		return protoerrors.NewNotLeaderError(leader)
 	}
 
-	if !g.Ready() {
+	if !g.leaderReady() {
 		return protoerrors.NewCatchingUpError()
 	}
 
@@ -206,7 +211,7 @@ func (g *Gate) drain(term uint64) {
 }
 
 func (g *Gate) forwardToLeader(ctx context.Context, req *raftproto.LeaderRequest, leader raft.ServerAddress) error {
-	id := req.GetHeader().GetId()
+	id := req.GetLogEntry().GetHeader().GetId()
 
 	for attempt := 0; ; attempt++ {
 		if leader == "" {
@@ -271,7 +276,7 @@ func (g *Gate) handleRequest(ctx context.Context, req *raftproto.LeaderRequest) 
 		return &raftproto.LeaderResponse{Status: raftproto.LeaderResponse_STATUS_INVALID, Detail: err.Error()}
 	}
 
-	id := req.GetHeader().GetId()
+	id := req.GetLogEntry().GetHeader().GetId()
 
 	if g.raft.State() != raft.Leader {
 		g.logger.Info("redirecting mis-routed forwarded write", "id", id, "leader", g.raft.Leader())

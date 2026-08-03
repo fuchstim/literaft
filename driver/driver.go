@@ -43,6 +43,8 @@ func (d *Driver) Ready() bool          { return d.gate.Ready() }
 func (d *Driver) LastRejection() error { return d.gate.LastRejection() }
 func (d *Driver) VFSName() string      { return d.vfsName }
 
+var _ vfs.Gate = (*recordinggate)(nil)
+
 type recordinggate struct {
 	*gate.Gate
 
@@ -52,12 +54,10 @@ type recordinggate struct {
 
 func (g *recordinggate) ProposeTransaction(frames []*wal.Frame) error {
 	err := g.Gate.ProposeTransaction(frames)
-	if err != nil {
-		g.lastRejectionMu.Lock()
-		defer g.lastRejectionMu.Unlock()
 
-		g.lastRejection = err
-	}
+	g.lastRejectionMu.Lock()
+	defer g.lastRejectionMu.Unlock()
+	g.lastRejection = err
 
 	return err
 }

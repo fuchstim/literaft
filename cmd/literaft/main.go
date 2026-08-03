@@ -241,9 +241,7 @@ func run() error {
 	if *forwardWrites {
 		leaderTransport = fwdTransport
 	}
-	d := driver.New(r, f,
-		driver.WithLogger(logger), driver.WithLeaderTransport(leaderTransport),
-		driver.WithApplyTimeout(5*time.Second), driver.WithForwardTimeout(2*time.Second), driver.WithHandlerLockTimeout(time.Second))
+	d := driver.New(r, f, driver.WithLogger(logger), driver.WithLeaderTransport(leaderTransport))
 	reg.add(func() error { d.Close(); return nil })
 
 	sql.Register("literaft", d)

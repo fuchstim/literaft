@@ -13,7 +13,6 @@ message LeaderRequest {
   }
 
   message Header {
-    string id = 1; // per-request unique token
     uint64 last_applied_index = 2;
   }
 }

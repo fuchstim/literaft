@@ -129,7 +129,7 @@ func tryNodeQueryInt(n *testutils.Node, sql string) (result int64, ok bool) {
 }
 
 // gatedCluster bundles a testutils.Cluster (Inmem tier) with a real
-// gate.Gate per node. hub is non-nil only when built by newFwdCluster, in
+// gate.Gate per node. hub is non-nil only when forwarding is enabled, in
 // which case every node's Gate forwards follower writes to the leader
 // through it instead of rejecting them.
 type gatedCluster struct {
@@ -143,7 +143,7 @@ func newGatedCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster
 	return newCluster(t, n, timeout, false)
 }
 
-// newFwdCluster is newGatedCluster with forwarding enabled: every node's
+// newFwdCluster builds a gatedCluster with forwarding enabled: every node's
 // Gate is wired to a shared testutils.InmemForwardHub, the same pairing a
 // real node process wires together with -forward-writes.
 func newFwdCluster(t testutils.TB, n int, timeout time.Duration) *gatedCluster {

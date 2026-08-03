@@ -208,11 +208,10 @@ func WithOnDiskRaftStore() Option {
 	return func(o *options) { o.onDiskRaftStore = true }
 }
 
-// WithForwarding (NewTCPCluster only) makes every node's write gate a
-// forwardinggate.Gate wrapping a leadergate.Gate, routing follower-originated
-// writes to the leader over an in-process InmemForwardHub. Follower
-// connections then accept writes (under the base-index check) instead of
-// rejecting them.
+// WithForwarding (NewTCPCluster only) configures every node's gate with a
+// leader transport, routing follower-originated writes to the leader over an
+// in-process InmemForwardHub. Follower connections then accept writes (under
+// the base-index check) instead of rejecting them.
 func WithForwarding() Option {
 	return func(o *options) { o.forwarding = true }
 }
