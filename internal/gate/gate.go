@@ -1,7 +1,3 @@
-// Package gate implements vfs.Gate, RAFT's write admission control: writes
-// only proceed on the current cluster leader. If configured with a leader
-// transport, a follower's write is forwarded to the leader instead of
-// being rejected outright.
 package gate
 
 import (
@@ -25,9 +21,6 @@ import (
 
 var _ vfs.Gate = (*Gate)(nil)
 
-// Gate implements a vfs.Gate that accepts writes on the current RAFT
-// cluster leader. If transport is non-nil, a write proposed on a follower
-// is forwarded to the leader instead of being rejected.
 type Gate struct {
 	raft            *raft.Raft
 	fsm             *fsm.FSM
@@ -117,8 +110,23 @@ func (g *Gate) ProposeTransaction(frames []*wal.Frame) error {
 	return g.forwardToLeader(ctx, req, nle.Leader)
 }
 
-// proposeEntry proposes e directly against raft, only ever succeeding on
-// the current leader once it is ready to serve writes.
+func (g *Gate) Close() {
+	g.closeOnce.Do(func() {
+		close(g.stop)
+		g.wg.Wait()
+	})
+}
+
+func (g *Gate) Ready() bool {
+	if g.raft.State() != raft.Leader {
+		return g.leaderTransport != nil
+	}
+
+	g.readyMu.RLock()
+	defer g.readyMu.RUnlock()
+	return g.ready
+}
+
 func (g *Gate) proposeEntry(e *raftproto.LogEntry) error {
 	if g.raft.State() != raft.Leader {
 		leader, _ := g.raft.LeaderWithID()
@@ -150,28 +158,6 @@ func (g *Gate) proposeEntry(e *raftproto.LogEntry) error {
 	return nil
 }
 
-func (g *Gate) Close() {
-	g.closeOnce.Do(func() {
-		close(g.stop)
-		g.wg.Wait()
-	})
-}
-
-// Ready reports whether a write proposed right now is expected to succeed
-// barring the usual runtime failure modes: on the leader, that means having
-// finished draining its apply backlog for the current term; on a follower,
-// that means forwarding is enabled (a follower write is otherwise always
-// rejected outright, never queued).
-func (g *Gate) Ready() bool {
-	if g.raft.State() != raft.Leader {
-		return g.leaderTransport != nil
-	}
-
-	g.readyMu.RLock()
-	defer g.readyMu.RUnlock()
-	return g.ready
-}
-
 func (g *Gate) watchLeadership() {
 	for {
 		select {
@@ -201,8 +187,6 @@ func (g *Gate) drain(term uint64) {
 			return
 		}
 
-		// Barrier's own timeout only bounds enqueueing it, not waiting for
-		// the FSM to catch up
 		if err := g.raft.Barrier(g.applyTimeout).Error(); err == nil {
 			g.readyMu.Lock()
 			defer g.readyMu.Unlock()
@@ -221,8 +205,6 @@ func (g *Gate) drain(term uint64) {
 	}
 }
 
-// forwardToLeader ships req to leader over the transport, retrying once
-// against a redirected address if the target answers NOT_LEADER.
 func (g *Gate) forwardToLeader(ctx context.Context, req *raftproto.LeaderRequest, leader raft.ServerAddress) error {
 	id := req.GetHeader().GetId()
 
@@ -299,8 +281,6 @@ func (g *Gate) handleRequest(ctx context.Context, req *raftproto.LeaderRequest) 
 		}
 	}
 
-	// Acquire the leader's write lock (a loan the apply materializes under),
-	// with a deadline -> BUSY on timeout. Held across the raft round trip.
 	lockCtx, cancel := context.WithTimeout(ctx, g.handlerLockTimeout)
 	defer cancel()
 
